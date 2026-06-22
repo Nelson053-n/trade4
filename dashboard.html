@@ -1,0 +1,1042 @@
+<!doctype html>
+<html lang="ru" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>trade4 · спред-арбитраж FORTS</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Sora:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+/* ============================ премиум тёмная тема ============================ */
+:root{
+  --bg:#06080c; --bg2:#0a0e15;
+  --panel:#0d1219; --panel-2:#10161f; --panel-hi:#141c28;
+  --line:#1b2533; --line-soft:#141b26;
+  --ink:#e8eef6; --ink-dim:#8a98ac; --ink-faint:#4a586c;
+  --signal:#2ee6a6; --short:#4cb6ff; --warn:#f5b343; --loss:#ff5d6c;
+  --accent:#2ee6a6; --accent-2:#4cb6ff;
+  --glow:0 0 24px rgba(46,230,166,.18);
+  --chart-fill:rgba(46,230,166,.05); --chart-band:rgba(76,182,255,.32);
+  --chart-mid:rgba(138,152,172,.55); --chart-line:#e8eef6;
+  --mono:'IBM Plex Mono',ui-monospace,monospace; --disp:'Sora',system-ui,sans-serif;
+  --r:14px; --r-sm:9px;
+  --shadow:0 1px 0 rgba(255,255,255,.02) inset, 0 18px 40px -24px rgba(0,0,0,.9);
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{
+  background:
+    radial-gradient(1200px 600px at 78% -8%, rgba(76,182,255,.07), transparent 60%),
+    radial-gradient(900px 500px at 8% 4%, rgba(46,230,166,.06), transparent 55%),
+    var(--bg);
+  color:var(--ink); font-family:var(--disp); font-size:14px; line-height:1.5;
+  -webkit-font-smoothing:antialiased; letter-spacing:.1px;
+}
+::selection{background:rgba(46,230,166,.25)}
+a{color:var(--accent-2);text-decoration:none}
+.mono{font-family:var(--mono)}
+
+/* ---------- топбар ---------- */
+.topbar{
+  position:sticky; top:0; z-index:40;
+  display:flex; align-items:center; gap:18px; padding:14px 26px;
+  background:linear-gradient(180deg, rgba(10,14,21,.92), rgba(6,8,12,.78));
+  backdrop-filter:blur(14px) saturate(140%);
+  border-bottom:1px solid var(--line);
+}
+.brand{display:flex; align-items:center; gap:13px; min-width:0}
+.brand .mark{
+  width:38px;height:38px;border-radius:11px; flex:none; position:relative;
+  background:linear-gradient(145deg, #0f1c1a, #0c1420);
+  border:1px solid #1f3a35; box-shadow:var(--glow);
+  display:grid;place-items:center;
+}
+.brand .mark svg{width:22px;height:22px}
+.brand .name{font-weight:800;font-size:18px;letter-spacing:.4px}
+.brand .name b{color:var(--accent)}
+.brand .tag{font-family:var(--mono);font-size:10.5px;color:var(--ink-dim);
+  border:1px solid var(--line);border-radius:999px;padding:2px 9px;margin-left:2px;white-space:nowrap}
+.spacer{flex:1}
+.hdr-stat{display:flex;flex-direction:column;align-items:flex-end;line-height:1.25}
+.hdr-stat .k{font-family:var(--mono);font-size:9.5px;letter-spacing:1.4px;color:var(--ink-faint);text-transform:uppercase}
+.hdr-stat .v{font-family:var(--mono);font-size:13px;font-weight:600}
+.clock{font-family:var(--mono);font-size:15px;font-weight:600;letter-spacing:1px;color:var(--ink)}
+.sess{font-family:var(--mono);font-size:11px;margin-top:1px}
+.flowpill{display:inline-flex;align-items:center;gap:7px;font-family:var(--mono);font-size:11px;color:var(--ink-dim);
+  border:1px solid var(--line);border-radius:999px;padding:5px 12px}
+.flowpill .dot{width:8px;height:8px;border-radius:50%;background:var(--signal);box-shadow:0 0 10px var(--signal)}
+
+/* ---------- переключатель пар ---------- */
+.pairbar{display:flex;align-items:center;gap:10px;padding:14px 26px 0;flex-wrap:wrap}
+.pairbar .lab{font-family:var(--mono);font-size:10px;letter-spacing:1.5px;color:var(--ink-faint);text-transform:uppercase}
+.pairbtn{
+  font-family:var(--mono);font-size:12px;font-weight:500;color:var(--ink-dim);
+  background:var(--panel);border:1px solid var(--line);border-radius:999px;
+  padding:8px 16px;cursor:pointer;transition:.16s;letter-spacing:.2px;
+}
+.pairbtn:hover{color:var(--ink);border-color:#2a3a4d;transform:translateY(-1px)}
+.pairbtn.on{color:#06120e;background:linear-gradient(135deg,var(--accent),#46d6f0);
+  border-color:transparent;box-shadow:var(--glow);font-weight:600}
+
+/* ---------- layout ---------- */
+.wrap{padding:18px 26px 40px;max-width:1640px;margin:0 auto}
+.grid{display:grid;grid-template-columns:1fr 396px;gap:18px}
+@media(max-width:1180px){.grid{grid-template-columns:1fr}}
+
+.card{
+  background:linear-gradient(180deg,var(--panel-2),var(--panel));
+  border:1px solid var(--line);border-radius:var(--r);
+  box-shadow:var(--shadow); padding:18px 18px 16px; margin-bottom:18px;
+}
+.card h2{margin:0 0 13px;font-size:12px;font-weight:600;letter-spacing:1.4px;
+  text-transform:uppercase;color:var(--ink-dim);display:flex;align-items:center;gap:9px}
+.card h2 .em{font-family:var(--mono);font-size:11px;font-weight:400;letter-spacing:0;
+  text-transform:none;color:var(--ink-faint);margin-left:auto}
+.card h2::before{content:"";width:3px;height:13px;border-radius:2px;background:linear-gradient(var(--accent),var(--accent-2))}
+
+/* статус-баннер */
+.statusbar{display:flex;gap:13px;align-items:flex-start;padding:15px 16px;
+  background:radial-gradient(120% 140% at 0 0, rgba(76,182,255,.05), transparent 60%),var(--panel-hi);
+  border:1px solid var(--line);border-radius:var(--r);margin-bottom:16px}
+.statusbar .sdot{width:13px;height:13px;border-radius:50%;background:var(--signal);margin-top:4px;flex:none;
+  box-shadow:0 0 0 4px rgba(255,255,255,.05)}
+.statusbar .stxt{font-size:14.5px;font-weight:600;line-height:1.4}
+.statusbar .ssub{font-family:var(--mono);font-size:11px;color:var(--ink-dim);margin-top:3px}
+
+.halt{display:none;margin-bottom:14px;padding:12px 14px;border-radius:var(--r-sm);
+  background:rgba(255,93,108,.1);border:1px solid rgba(255,93,108,.4);color:var(--loss);font-weight:600;font-size:13px}
+
+/* метрики */
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:11px}
+.kpi{background:var(--panel-hi);border:1px solid var(--line-soft);border-radius:var(--r-sm);padding:12px 13px}
+.kpi .k{font-family:var(--mono);font-size:9.5px;letter-spacing:1.2px;color:var(--ink-faint);text-transform:uppercase}
+.kpi .v{font-family:var(--mono);font-size:21px;font-weight:600;margin-top:5px;line-height:1}
+.kpi .u{font-size:11px;color:var(--ink-faint);font-weight:400}
+@media(max-width:520px){.kpis{grid-template-columns:repeat(2,1fr)}}
+
+/* график */
+.chartwrap{position:relative}
+#s4chart{width:100%;height:380px;display:block;cursor:crosshair}
+.an-tip{position:absolute;display:none;pointer-events:none;z-index:20;
+  background:rgba(8,12,18,.96);border:1px solid var(--line);border-radius:8px;
+  padding:8px 11px;font-family:var(--mono);font-size:11px;line-height:1.55;
+  box-shadow:0 12px 30px -8px rgba(0,0,0,.8);max-width:230px}
+.legend{display:flex;gap:16px;flex-wrap:wrap;margin-top:10px;font-family:var(--mono);font-size:10.5px;color:var(--ink-dim)}
+.legend i{display:inline-block;width:13px;height:0;border-top-width:2px;border-top-style:solid;vertical-align:middle;margin-right:6px}
+
+/* readouts + gauge */
+.readouts{display:grid;grid-template-columns:repeat(4,1fr);gap:11px;margin-top:14px}
+.ro{background:var(--panel-hi);border:1px solid var(--line-soft);border-radius:var(--r-sm);padding:10px 12px}
+.ro label{display:block;font-family:var(--mono);font-size:9px;letter-spacing:1px;color:var(--ink-faint);text-transform:uppercase}
+.ro .v{font-family:var(--mono);font-size:18px;font-weight:600;margin-top:4px}
+.gauge{margin-top:14px}
+.gauge .scale{position:relative;height:8px;border-radius:6px;
+  background:linear-gradient(90deg, rgba(255,93,108,.5), rgba(138,152,172,.18) 50%, rgba(46,230,166,.5));
+  border:1px solid var(--line)}
+.gauge .mid-line{position:absolute;left:50%;top:-3px;bottom:-3px;width:1px;background:var(--ink-faint)}
+.gauge .ptr{position:absolute;top:-4px;width:3px;height:16px;border-radius:2px;background:var(--ink);
+  box-shadow:0 0 8px var(--ink);transform:translateX(-50%);transition:left .3s ease;left:50%}
+.gauge .ticks{display:flex;justify-content:space-between;font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:5px}
+
+/* журналы / таблицы */
+.jscroll{max-height:210px;overflow:auto;font-family:var(--mono);font-size:11.5px}
+.jscroll::-webkit-scrollbar{width:8px;height:8px}
+.jscroll::-webkit-scrollbar-thumb{background:#1d2836;border-radius:8px}
+table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11.5px}
+thead th{position:sticky;top:0;background:var(--panel);text-align:left;color:var(--ink-faint);
+  font-weight:500;font-size:9.5px;letter-spacing:.8px;text-transform:uppercase;padding:7px 8px;border-bottom:1px solid var(--line)}
+tbody td{padding:7px 8px;border-bottom:1px solid var(--line-soft)}
+tbody tr:hover{background:rgba(255,255,255,.018)}
+.empty{color:var(--ink-faint);padding:14px 8px;font-family:var(--mono);font-size:11px}
+.tblwrap{max-height:260px;overflow:auto}
+#s4-daily-chart{width:100%;height:150px;display:block;margin:6px 0 4px}
+
+/* контролы */
+.ctrls{display:flex;flex-wrap:wrap;gap:9px}
+.btn{
+  font-family:var(--mono);font-size:11.5px;font-weight:500;letter-spacing:.2px;
+  color:var(--ink);background:var(--panel-hi);border:1px solid var(--line);border-radius:var(--r-sm);
+  padding:9px 14px;cursor:pointer;transition:.15s
+}
+.btn:hover{border-color:#2a3a4d;background:var(--panel-hi);transform:translateY(-1px)}
+.btn.primary{color:#06120e;background:linear-gradient(135deg,var(--accent),#46d6f0);border-color:transparent;font-weight:600}
+.btn.primary:hover{box-shadow:var(--glow)}
+.btn.warn{color:var(--warn);border-color:rgba(245,179,67,.35)}
+.btn.danger{color:var(--loss);border-color:rgba(255,93,108,.3)}
+.btn:disabled{opacity:.5;cursor:default;transform:none}
+.toggle-row{display:flex;gap:18px;margin-top:12px;flex-wrap:wrap}
+.toggle{display:inline-flex;align-items:center;gap:8px;font-family:var(--mono);font-size:11.5px;color:var(--ink-dim);cursor:pointer}
+.toggle input{accent-color:var(--accent);width:15px;height:15px}
+.confirm-row{display:none;gap:9px;margin-top:11px}
+
+/* формы параметров */
+.params{display:grid;grid-template-columns:repeat(auto-fit,minmax(94px,1fr));gap:11px;margin-bottom:13px}
+.fld label{display:block;font-family:var(--mono);font-size:9px;letter-spacing:.8px;color:var(--ink-faint);text-transform:uppercase;margin-bottom:4px}
+.fld input,.fld select{
+  width:100%;font-family:var(--mono);font-size:12.5px;color:var(--ink);
+  background:var(--bg2);border:1px solid var(--line);border-radius:8px;padding:8px 9px
+}
+.fld input:focus,.fld select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(46,230,166,.1)}
+.hint{font-family:var(--mono);font-size:10px;color:var(--ink-faint);margin-top:6px}
+.msg{font-family:var(--mono);font-size:11px;color:var(--ink-dim);margin-top:9px;min-height:14px}
+.resbox{font-family:var(--mono);font-size:11.5px;line-height:1.7;margin-top:9px}
+.subtle{color:var(--ink-dim)}
+details summary{cursor:pointer;font-family:var(--mono);font-size:11px;color:var(--ink-dim);margin-top:8px}
+details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
+
+.pos-card{background:var(--panel-hi);border:1px solid var(--line-soft);border-radius:var(--r-sm);padding:12px 13px;font-family:var(--mono);font-size:12px;line-height:1.65}
+.foot{font-family:var(--mono);font-size:11px;color:var(--ink-faint);text-align:center;padding:8px 0 0;line-height:1.7}
+.badge{font-family:var(--mono);font-size:11px;margin-left:8px}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="brand">
+    <div class="mark">
+      <svg viewBox="0 0 24 24" fill="none" stroke="url(#g)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <defs><linearGradient id="g" x1="0" y1="0" x2="24" y2="24">
+          <stop offset="0" stop-color="#2ee6a6"/><stop offset="1" stop-color="#4cb6ff"/></linearGradient></defs>
+        <path d="M3 17l5-6 4 4 6-9"/><path d="M3 21h18"/>
+      </svg>
+    </div>
+    <div>
+      <div class="name">trade<b>4</b></div>
+    </div>
+    <span class="tag" id="hdr-tag">phase 1 · paper</span>
+  </div>
+  <div class="spacer"></div>
+  <div class="flowpill" id="hdr-flow"><span class="dot"></span><span>поток активен</span></div>
+  <div class="hdr-stat"><span class="k">данные</span><span class="v" id="hdr-data">—</span></div>
+  <div class="hdr-stat">
+    <span class="clock" id="s4-msk-clock">--:--:--</span>
+    <span class="sess" id="s4-session">●</span>
+  </div>
+</div>
+
+<div class="pairbar">
+  <span class="lab">пара обычка / преф</span>
+  <div id="s4-pair-switch" style="display:flex;gap:8px;flex-wrap:wrap"></div>
+</div>
+
+<div class="wrap">
+<div class="grid">
+
+  <!-- ===================== LEFT ===================== -->
+  <div>
+
+    <div class="card">
+      <h2 id="s4-title-h">Спред <span id="s4-chart-pair" style="font-family:var(--mono);text-transform:none;letter-spacing:0;color:var(--ink)">—</span>
+        <span class="em" id="s4-chart-sub">—</span></h2>
+      <div class="chartwrap">
+        <canvas id="s4chart"></canvas>
+        <div class="an-tip" id="s4tip"></div>
+      </div>
+      <div class="legend">
+        <span><i style="border-color:var(--chart-line)"></i>спред (преф − обычка)</span>
+        <span><i style="border-color:var(--chart-band)"></i>полосы Боллинджера ±σ</span>
+        <span><i style="border-color:var(--chart-mid);border-top-style:dashed"></i>средняя SMA</span>
+        <span><i style="border-color:var(--warn);border-top-style:dashed"></i>старт торговли</span>
+      </div>
+      <div class="readouts">
+        <div class="ro"><label>спред</label><div class="v" id="s4-ro-spread">—</div></div>
+        <div class="ro"><label>SMA</label><div class="v" id="s4-ro-sma">—</div></div>
+        <div class="ro"><label>σ</label><div class="v" id="s4-ro-sigma">—</div></div>
+        <div class="ro"><label>z-score</label><div class="v" id="s4-ro-z">—</div></div>
+      </div>
+      <div class="gauge">
+        <div class="scale"><div class="mid-line"></div><div class="ptr" id="s4-ptr"></div></div>
+        <div class="ticks"><span>−3σ</span><span>−2σ</span><span>0</span><span>+2σ</span><span>+3σ</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>журнал действий <span class="em" id="s4-fsm">—</span></h2>
+      <div class="jscroll" id="s4-events"><div class="empty">журнал пуст</div></div>
+    </div>
+
+    <div class="card">
+      <h2>журнал сделок <span class="em" id="s4-trades-sub"></span></h2>
+      <div class="tblwrap">
+        <table id="s4-trades">
+          <thead><tr><th>направление</th><th>спред вх→вых</th><th>лот</th><th>держ</th><th>проскальз</th><th>net ₽</th><th>причина</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>доходность по дням <span class="em" id="s4-daily-sub"></span></h2>
+      <canvas id="s4-daily-chart"></canvas>
+      <div class="tblwrap" style="max-height:200px">
+        <table id="s4-daily">
+          <thead><tr><th>дата (МСК)</th><th>доходность ₽</th><th>сделок</th><th>накопл. ₽</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>бэктест на истории MOEX ISS</h2>
+      <div class="params">
+        <div class="fld"><label>период, дней</label><input id="s4-bt-days" type="number" value="60" min="5" max="365"></div>
+        <div class="fld"><label>стоп σ (0=выкл)</label><input id="s4-bt-stop" type="number" value="0" step="0.5" min="0"></div>
+      </div>
+      <button class="btn primary" id="s4-btn-bt">▶ прогнать бэктест</button>
+      <span class="badge subtle" style="margin-left:8px"><a href="/st4/report" target="_blank">📊 скан пар → отчёт</a></span>
+      <div class="msg" id="s4-bt-msg"></div>
+      <div class="resbox" id="s4-bt-res"></div>
+      <div class="tblwrap" id="s4-bth-moex-wrap" style="margin-top:11px;max-height:200px">
+        <table id="s4-bth-moex-table">
+          <thead><tr><th>дата</th><th>дней</th><th>стоп σ</th><th>сделок</th><th>win%</th><th>net ₽</th><th>%</th><th>maxDD%</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>бэктест T-Bank (неделя) <span class="em" id="s4-bth-note"></span></h2>
+      <div class="params">
+        <div class="fld"><label>стоп σ (0=выкл)</label><input id="s4-btb-stop" type="number" value="0" step="0.5" min="0"></div>
+      </div>
+      <button class="btn primary" id="s4-btn-btb">▶ прогнать неделю</button>
+      <div class="msg" id="s4-btb-msg"></div>
+      <div class="resbox" id="s4-btb-res"></div>
+      <div class="tblwrap" id="s4-btb-table-wrap" style="display:none;margin-top:11px;max-height:200px">
+        <table id="s4-btb-table">
+          <thead><tr><th>направление</th><th>спред вх→вых</th><th>держ</th><th>net ₽</th><th>причина</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="tblwrap" id="s4-bth-wrap" style="margin-top:11px;max-height:200px">
+        <table id="s4-bth-table">
+          <thead><tr><th>дата</th><th>стоп σ</th><th>сделок</th><th>win%</th><th>net ₽</th><th>%</th><th>maxDD%</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ===================== RIGHT ===================== -->
+  <div>
+
+    <div class="statusbar">
+      <div class="sdot" id="s4-status-dot"></div>
+      <div>
+        <div class="stxt" id="s4-status-txt">—</div>
+        <div class="ssub" id="s4-status-sub">—</div>
+      </div>
+    </div>
+    <div class="halt" id="s4-halt"></div>
+
+    <div class="card">
+      <h2>состояние <span class="em" id="s4-legs">—</span></h2>
+      <div class="kpis">
+        <div class="kpi"><div class="k">equity ₽</div><div class="v" id="s4-equity">—</div></div>
+        <div class="kpi"><div class="k">P&L день</div><div class="v" id="s4-daypnl">—</div></div>
+        <div class="kpi"><div class="k">сделок</div><div class="v" id="s4-ntrades">—</div></div>
+        <div class="kpi"><div class="k">win-rate</div><div class="v" id="s4-winrate">—</div></div>
+      </div>
+      <div class="readouts" style="grid-template-columns:repeat(2,1fr);margin-top:11px">
+        <div class="ro"><label>режим исполнения</label><div class="v" id="s4-mode" style="font-size:14px">—</div></div>
+        <div class="ro"><label>провайдер данных</label><div class="v" id="s4-src" style="font-size:14px">—</div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>позиция</h2>
+      <div class="pos-card" id="s4-pos">нет открытой позиции</div>
+      <div id="s4-pending" style="display:none;margin-top:10px"></div>
+      <div class="confirm-row" id="s4-confirm-row">
+        <button class="btn primary" id="s4-btn-approve">✓ подтвердить вход</button>
+        <button class="btn danger" id="s4-btn-reject">✕ отклонить</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>управление</h2>
+      <div class="ctrls">
+        <button class="btn primary" id="s4-btn-live">▶ live (ISS)</button>
+        <button class="btn" id="s4-btn-player">▶ демо (синтетика)</button>
+        <button class="btn" id="s4-btn-pause">❚❚ пауза</button>
+        <button class="btn warn" id="s4-btn-flat">flat-all</button>
+        <button class="btn danger" id="s4-btn-reset">сброс</button>
+      </div>
+      <div class="toggle-row">
+        <label class="toggle"><input type="checkbox" id="s4-auto"> авто-вход (без подтверждения)</label>
+        <label class="toggle"><input type="checkbox" id="s4-trading"> торговля разрешена</label>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>коннектор исполнения <span class="em" id="s4-conn-badge">—</span></h2>
+      <div class="params" style="grid-template-columns:1fr">
+        <div class="fld"><label>режим</label>
+          <select id="s4-conn-mode"><option value="paper">paper (виртуальное исполнение)</option><option value="tbank_sandbox">T-Bank песочница (виртуальный счёт)</option></select>
+        </div>
+        <div class="fld"><label>токен T-Bank</label><input id="s4-conn-token" type="password" placeholder="t.xxx (для sandbox)"></div>
+      </div>
+      <div class="ctrls">
+        <button class="btn primary" id="s4-btn-conn">применить</button>
+        <button class="btn danger" id="s4-btn-forget">забыть токен</button>
+      </div>
+      <div class="msg" id="s4-conn-msg"></div>
+    </div>
+
+    <div class="card">
+      <h2>параметры стратегии</h2>
+      <div class="params">
+        <div class="fld"><label>SMA период</label><input id="s4-p-sma" type="number" value="200" min="10"></div>
+        <div class="fld"><label>σ-mult</label><input id="s4-p-sig" type="number" value="2" step="0.1" min="0.5"></div>
+        <div class="fld"><label>гейт %</label><input id="s4-p-dev" type="number" value="2" step="0.5" min="0"></div>
+        <div class="fld"><label>стоп σ</label><input id="s4-p-stop" type="number" value="0" step="0.5" min="0"></div>
+        <div class="fld"><label>лотов</label><input id="s4-p-lots" type="number" value="1" min="1"></div>
+      </div>
+      <button class="btn primary" id="s4-btn-apply">применить параметры</button>
+    </div>
+
+    <div class="card">
+      <h2>гарантийное обеспечение <span class="em" id="s4-margin-sub"></span></h2>
+      <button class="btn" id="s4-btn-margin">↻ обновить ГО</button>
+      <div class="resbox" id="s4-margin-head" style="margin-top:10px">—</div>
+      <div class="tblwrap" style="margin-top:9px;max-height:180px">
+        <table id="s4-margin-table">
+          <thead><tr><th>контрактов (пар)</th><th>ГО нужно</th><th>% от баланса</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>самопроверка</h2>
+      <button class="btn" id="s4-btn-tests">▶ юнит-тесты</button>
+      <span class="badge" id="s4-tests-badge"></span>
+      <details><summary>о стратегии st4</summary>
+        <p>Статистический арбитраж спреда фьючерсов на обыкновенные и привилегированные акции одного
+        эмитента (FORTS). Спред коинтегрирован — всегда возвращается к средней. Вход по пробою полос
+        Боллинджера, выход — при пересечении SMA, стоп — по σ. Атомарные пары: вторая нога не зальётся →
+        аварийный unwind первой. Индикаторы — только по закрытым свечам (no repaint).</p>
+      </details>
+    </div>
+
+  </div>
+</div>
+
+<div class="foot">trade4 · спред-арбитраж обычка/преф на FORTS · paper / T-Bank sandbox · реальные ордера не выставляются</div>
+</div>
+
+<script>
+/* ============================ ядро (без мультистратегийных артефактов) ============================ */
+const API='';                                   // same-origin
+const $=id=>document.getElementById(id);
+const fmt=(n,d=2)=>{ if(n==null||Number.isNaN(n)) return '—'; const v=(+n).toFixed(d); return v; };
+const getCSS=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+function _lighten(hex,t){ // осветлить hex на долю t (0..1) к белому
+  hex=hex.replace('#',''); if(hex.length===3) hex=hex.split('').map(c=>c+c).join('');
+  const r=parseInt(hex.slice(0,2),16),g=parseInt(hex.slice(2,4),16),b=parseInt(hex.slice(4,6),16);
+  const L=x=>Math.round(x+(255-x)*t);
+  return `rgb(${L(r)},${L(g)},${L(b)})`;
+}
+
+let S4PAIR='sber'; try{ S4PAIR=localStorage.getItem('s4pair')||'sber'; }catch(e){}
+
+async function s4api(path, method='GET', body=null){
+  const sep=path.includes('?')?'&':'?';
+  const opt={method, headers:{}};
+  if(body){ opt.headers['Content-Type']='application/json'; opt.body=JSON.stringify(body); }
+  const r=await fetch(`${API}/st4${path}${sep}pair=${S4PAIR}`, opt);
+  if(!r.ok){ let d=''; try{ d=(await r.json()).detail; }catch(e){} throw new Error(d||('HTTP '+r.status)); }
+  return r.json();
+}
+function s4money(v){ if(v==null||Number.isNaN(v)) return '—'; const n=Math.round(v); return (n>=0?'+':'')+n.toLocaleString('ru')+' ₽'; }
+
+/* ---- зум/панорама графика ---- */
+let _s4snap=null,_s4Started=false,_s4zoom=1,_s4panRight=null,_s4fullLen=0,_s4lastHist=null;
+function s4ResetZoom(){ _s4zoom=1; _s4panRight=null; }
+function s4tsLabel(ms){ const m=s4msk(ms); return m.hh+':'+m.mm; }
+
+function s4DrawChart(hist, trades, openPos){
+  const cv=$('s4chart'); if(!cv) return;
+  if(arguments.length>0) _s4lastHist={hist:hist||[], trades:trades||[], openPos:openPos||null};
+  const data=_s4lastHist||{hist:[],trades:[],openPos:null};
+  const r=cv.getBoundingClientRect();
+  if(r.width<5||r.height<5){ requestAnimationFrame(()=>s4DrawChart()); return; }
+  const dpr=devicePixelRatio||1; cv.width=r.width*dpr; cv.height=r.height*dpr;
+  const ctx=cv.getContext('2d'); ctx.setTransform(1,0,0,1,0,0); ctx.scale(dpr,dpr);
+  const W=r.width,H=r.height; ctx.clearRect(0,0,W,H);
+  const full=(data.hist||[]).filter(p=>p.sma!=null&&!Number.isNaN(p.sma));
+  if(full.length<2){ ctx.fillStyle=getCSS('--ink-dim'); ctx.font='12px IBM Plex Mono,monospace'; ctx.fillText('прогрев индикатора BB('+(_s4snap?_s4snap.sma_period:200)+')…',12,24); return; }
+  _s4fullLen=full.length;
+  const visN=Math.max(10, Math.round(full.length*_s4zoom));
+  const right=_s4panRight==null?full.length:Math.min(full.length,Math.max(visN,_s4panRight));
+  const left=Math.max(0,right-visN);
+  const series=full.slice(left,right);
+  if(series.length<2) return;
+  const cs=getComputedStyle(document.documentElement);
+  const C={fill:cs.getPropertyValue('--chart-fill').trim(),band:cs.getPropertyValue('--chart-band').trim(),
+           mid:cs.getPropertyValue('--chart-mid').trim(),line:cs.getPropertyValue('--chart-line').trim(),
+           ax:cs.getPropertyValue('--ink-faint').trim(),grid:cs.getPropertyValue('--line').trim()};
+  const ML=52,MB=22,MT=6,MR=8;
+  const px0=ML,px1=W-MR,py0=MT,py1=H-MB;
+  const all=series.flatMap(p=>[p.upper,p.lower,p.spread]);
+  let lo=Math.min(...all), hi=Math.max(...all); const pad=(hi-lo)*0.12||1; lo-=pad; hi+=pad;
+  const x=i=>px0+i/(series.length-1)*(px1-px0), y=v=>py1-(v-lo)/(hi-lo)*(py1-py0);
+
+  ctx.font='9px IBM Plex Mono, monospace'; ctx.textBaseline='middle';
+  ctx.textAlign='right';
+  const TY=5;
+  for(let i=0;i<=TY;i++){
+    const v=lo+(hi-lo)*i/TY, yy=y(v);
+    ctx.strokeStyle=C.grid; ctx.lineWidth=1; ctx.globalAlpha=.5;
+    ctx.beginPath(); ctx.moveTo(px0,yy); ctx.lineTo(px1,yy); ctx.stroke(); ctx.globalAlpha=1;
+    ctx.fillStyle=C.ax; ctx.fillText(v.toFixed(0), px0-6, yy);
+  }
+  ctx.textAlign='center'; ctx.textBaseline='top';
+  const TX=Math.min(5,series.length-1);
+  for(let i=0;i<=TX;i++){
+    const idx=Math.round(i/TX*(series.length-1)), xx=x(idx);
+    const lbl=series[idx].ts?s4tsLabel(series[idx].ts):('#'+idx);
+    ctx.strokeStyle=C.grid; ctx.lineWidth=1; ctx.globalAlpha=.35;
+    ctx.beginPath(); ctx.moveTo(xx,py0); ctx.lineTo(xx,py1); ctx.stroke(); ctx.globalAlpha=1;
+    ctx.fillStyle=C.ax; ctx.fillText(lbl, xx, py1+5);
+  }
+  ctx.beginPath();
+  series.forEach((p,i)=>{const X=x(i),Y=y(p.upper); i?ctx.lineTo(X,Y):ctx.moveTo(X,Y);});
+  for(let i=series.length-1;i>=0;i--) ctx.lineTo(x(i),y(series[i].lower));
+  ctx.closePath(); ctx.fillStyle=C.fill; ctx.fill();
+  ['upper','lower'].forEach(k=>{ctx.beginPath();series.forEach((p,i)=>{const X=x(i),Y=y(p[k]);i?ctx.lineTo(X,Y):ctx.moveTo(X,Y);});ctx.strokeStyle=C.band;ctx.lineWidth=1;ctx.stroke();});
+  ctx.setLineDash([4,4]);ctx.beginPath();series.forEach((p,i)=>{const X=x(i),Y=y(p.sma);i?ctx.lineTo(X,Y):ctx.moveTo(X,Y);});ctx.strokeStyle=C.mid;ctx.stroke();ctx.setLineDash([]);
+  ctx.beginPath();series.forEach((p,i)=>{const X=x(i),Y=y(p.spread);i?ctx.lineTo(X,Y):ctx.moveTo(X,Y);});
+  ctx.strokeStyle=C.line;ctx.lineWidth=1.6;ctx.stroke();
+
+  const win=cs.getPropertyValue('--signal').trim(), loss=cs.getPropertyValue('--loss').trim();
+  const ink=cs.getPropertyValue('--ink').trim(), panel=cs.getPropertyValue('--panel').trim();
+  const t0=series[0].ts, t1=series[series.length-1].ts;
+  const inRange=ts=>ts!=null && ts>=t0-1 && ts<=t1+1;
+  const idxAt=ts=>{ let bi=0,bd=Infinity; series.forEach((p,i)=>{const d=Math.abs((p.ts||0)-ts); if(d<bd){bd=d;bi=i;}}); return bi; };
+  const ring=(X,Y,col)=>{ ctx.beginPath();ctx.arc(X,Y,4,0,7);ctx.fillStyle=panel;ctx.fill();ctx.lineWidth=2;ctx.strokeStyle=col;ctx.stroke(); };
+  const tStart=window._s4tradeStart;
+  if(tStart && inRange(tStart)){
+    const xs=x(idxAt(tStart));
+    ctx.save();
+    ctx.strokeStyle=cs.getPropertyValue('--warn').trim(); ctx.lineWidth=1.5; ctx.setLineDash([5,4]); ctx.globalAlpha=.8;
+    ctx.beginPath(); ctx.moveTo(xs,py0); ctx.lineTo(xs,py1); ctx.stroke();
+    ctx.setLineDash([]); ctx.globalAlpha=1;
+    ctx.fillStyle=cs.getPropertyValue('--warn').trim(); ctx.font='9px IBM Plex Mono,monospace'; ctx.textAlign='left'; ctx.textBaseline='top';
+    ctx.fillText('▸ старт', xs+3, py0+2);
+    ctx.restore();
+  }
+  (data.trades||[]).forEach(t=>{
+    if(!inRange(t.entry_ts)) return;
+    const col = t.net_pnl_rub>=0 ? win : loss;
+    const i1=idxAt(t.entry_ts), X1=x(i1), Y1=y(series[i1].spread);
+    if(inRange(t.exit_ts)){
+      const i2=idxAt(t.exit_ts), X2=x(i2), Y2=y(series[i2].spread);
+      ctx.save(); ctx.globalAlpha=.35; ctx.strokeStyle=col; ctx.lineWidth=1.5;
+      ctx.beginPath();ctx.moveTo(X1,Y1);ctx.lineTo(X2,Y2);ctx.stroke(); ctx.restore();
+      ring(X2,Y2,col);
+    }
+    ring(X1,Y1,ink);
+  });
+  const op=data.openPos;
+  if(op && inRange(op.entry_ts)){
+    const i1=idxAt(op.entry_ts), X1=x(i1), Y1=y(series[i1].spread);
+    const Xc=x(series.length-1), Yc=y(series[series.length-1].spread);
+    const col = op.unrealized_rub>=0 ? win : loss;
+    ctx.save(); ctx.globalAlpha=.4; ctx.strokeStyle=col; ctx.setLineDash([3,3]); ctx.lineWidth=1.5;
+    ctx.beginPath();ctx.moveTo(X1,Y1);ctx.lineTo(Xc,Yc);ctx.stroke(); ctx.restore();
+    ring(X1,Y1, op.state==='short_spread'?cs.getPropertyValue('--short').trim():win);
+  }
+  const lastp=series[series.length-1], lx=x(series.length-1), ly=y(lastp.spread);
+  ctx.beginPath();ctx.arc(lx,ly,3.5,0,7);ctx.fillStyle=C.line;ctx.shadowColor=C.line;ctx.shadowBlur=10;ctx.fill();ctx.shadowBlur=0;
+  window._s4geom = {series, x, y, px0, px1, py0, py1,
+    trades:(data.trades||[]).filter(t=>inRange(t.entry_ts)).map(t=>({t, xi:x(idxAt(t.entry_ts)), yi:y(series[idxAt(t.entry_ts)].spread),
+       xo:inRange(t.exit_ts)?x(idxAt(t.exit_ts)):null, yo:inRange(t.exit_ts)?y(series[idxAt(t.exit_ts)].spread):null}))};
+}
+function s4Redraw(){ if(_s4lastHist) s4DrawChart(); }
+function s4PlaceTip(tip, mx, my, r){
+  const OFF=16;
+  const tw=tip.offsetWidth||170, th=tip.offsetHeight||44;
+  let left = mx+OFF; if(left+tw > r.width-4) left = mx-OFF-tw;
+  left = Math.max(4, Math.min(left, r.width-tw-4));
+  let top = my-OFF-th; if(top < 4) top = my+OFF;
+  top = Math.max(4, Math.min(top, r.height-th-4));
+  tip.style.left=left+'px'; tip.style.top=top+'px';
+}
+
+async function s4LoadMargin(){
+  const head=$('s4-margin-head'), tb=$('s4-margin-table'); if(!tb) return;
+  head.textContent='загрузка ГО из биржи…';
+  try{
+    const d=await s4api('/margin');
+    if(d.error){ head.textContent=d.error; return; }
+    const lev=(32339/(d.margin_ord||1)).toFixed(1);
+    head.innerHTML=`ГО на 1 пару (<b>${d.legs.ord}+${d.legs.pref}</b>): <b>${d.margin_pair.toLocaleString('ru')}₽</b> `
+      +`(${d.margin_ord.toLocaleString('ru')} + ${d.margin_pref.toLocaleString('ru')}) · встроенное плечо ≈ ${lev}×`
+      +(d.balance_rub?` · баланс sandbox ${d.balance_rub.toLocaleString('ru')}₽`:'');
+    const body=tb.querySelector('tbody'); body.innerHTML='';
+    (d.rows||[]).forEach(r=>{
+      const pct=r.pct_of_balance;
+      const pctCol = pct==null?'var(--ink-dim)':(pct>50?'var(--loss)':(pct>25?'var(--warn)':'var(--signal)'));
+      const tr=document.createElement('tr');
+      tr.innerHTML=`<td><b>${r.lots}</b></td><td>${r.margin_rub.toLocaleString('ru')} ₽</td>`
+        +`<td style="color:${pctCol}">${pct==null?'—':pct+'%'}</td>`;
+      body.appendChild(tr);
+    });
+  }catch(e){ head.textContent='ошибка: '+e.message; }
+}
+
+function s4RenderBtHistoryMoex(hist){
+  const tb=$('s4-bth-moex-table'); if(!tb) return;
+  const body=tb.querySelector('tbody'); body.innerHTML='';
+  if(!hist || !hist.length){ body.innerHTML='<tr><td colspan="8" class="empty">прогонов ещё не было</td></tr>'; return; }
+  hist.slice().reverse().forEach(h=>{
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${h.date}</td><td>${h.days||'—'}</td><td>${h.stop_sigma}</td><td>${h.trades}</td>`+
+      `<td>${h.win_rate_pct}%</td>`+
+      `<td style="color:${h.net_pnl_rub>=0?'var(--signal)':'var(--loss)'};font-weight:600">${s4money(h.net_pnl_rub)}</td>`+
+      `<td>${fmt(h.return_pct,2)}</td><td>${h.max_drawdown_pct}</td>`;
+    body.appendChild(tr);
+  });
+}
+function s4RenderBtHistory(hist){
+  const tb=$('s4-bth-table'); if(!tb) return;
+  const body=tb.querySelector('tbody'); body.innerHTML='';
+  if(!hist || !hist.length){ body.innerHTML='<tr><td colspan="7" class="empty">прогонов ещё не было</td></tr>'; return; }
+  hist.slice().reverse().forEach(h=>{
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${h.date}</td><td>${h.stop_sigma}</td><td>${h.trades}</td>`+
+      `<td>${h.win_rate_pct}%</td>`+
+      `<td style="color:${h.net_pnl_rub>=0?'var(--signal)':'var(--loss)'};font-weight:600">${s4money(h.net_pnl_rub)}</td>`+
+      `<td>${fmt(h.return_pct,2)}</td><td>${h.max_drawdown_pct}</td>`;
+    body.appendChild(tr);
+  });
+}
+function s4RenderTrades(trades){
+  const tb=$('s4-trades').querySelector('tbody'); tb.innerHTML='';
+  $('s4-trades-sub').textContent = trades.length? trades.length+' закрытых' : '';
+  if(!trades.length){ tb.innerHTML='<tr><td colspan="7" class="empty">сделок пока нет</td></tr>'; return; }
+  trades.slice().reverse().forEach(t=>{
+    const dir = t.state==='short_spread' ? '<span style="color:var(--short)">шорт спреда</span>' : '<span style="color:var(--signal)">лонг спреда</span>';
+    const net = t.net_pnl_rub;
+    const reason = {exit:'возврат к SMA', stop:'стоп σ', time_stop:'тайм-стоп', flat_all:'flat-all'}[t.reason]||t.reason;
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${dir}</td><td>${Math.round(t.entry_spread)} → ${Math.round(t.exit_spread)}</td>`+
+      `<td>${t.lots}</td><td>${t.bars_held}</td><td>${(t.slippage_ticks||0).toFixed(1)}t</td>`+
+      `<td style="color:${net>=0?'var(--signal)':'var(--loss)'};font-weight:600">${s4money(net)}</td><td style="color:var(--ink-dim)">${reason}</td>`;
+    tb.appendChild(tr);
+  });
+}
+function s4RenderDaily(trades){
+  const tb=$('s4-daily').querySelector('tbody'); tb.innerHTML='';
+  if(!trades||!trades.length){ $('s4-daily-sub').textContent=''; tb.innerHTML='<tr><td colspan="4" class="empty">сделок пока нет</td></tr>'; s4DrawDailyBars([]); return; }
+  const by={};
+  trades.forEach(t=>{
+    const d=new Date(t.exit_ts);
+    const tm=new Date(d.getTime()+(d.getTimezoneOffset()+180)*60000);
+    const key=tm.getFullYear()+'-'+String(tm.getMonth()+1).padStart(2,'0')+'-'+String(tm.getDate()).padStart(2,'0');
+    (by[key]=by[key]||{date:key,net:0,n:0}); by[key].net+=t.net_pnl_rub; by[key].n++;
+  });
+  const days=Object.values(by).sort((a,b)=>a.date<b.date?-1:1);
+  let cum=0;
+  $('s4-daily-sub').textContent=days.length+(days.length===1?' день':' дн.');
+  const cumMap={};
+  days.forEach(x=>{ cum+=x.net; cumMap[x.date]=cum; });
+  days.slice().reverse().forEach(x=>{
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${x.date}</td>`+
+      `<td style="color:${x.net>=0?'var(--signal)':'var(--loss)'};font-weight:600">${s4money(x.net)}</td>`+
+      `<td>${x.n}</td>`+
+      `<td style="color:var(--ink-dim)">${s4money(cumMap[x.date])}</td>`;
+    tb.appendChild(tr);
+  });
+  s4DrawDailyBars(days);
+}
+function s4DrawDailyBars(days){
+  const cv=$('s4-daily-chart'); if(!cv) return;
+  const r=cv.getBoundingClientRect();
+  if(r.width<5 || r.height<5){ requestAnimationFrame(()=>s4DrawDailyBars(days)); return; }
+  const dpr=devicePixelRatio||1;
+  cv.width=r.width*dpr; cv.height=r.height*dpr;
+  const ctx=cv.getContext('2d'); ctx.setTransform(1,0,0,1,0,0); ctx.scale(dpr,dpr);
+  const W=r.width, H=r.height; ctx.clearRect(0,0,W,H);
+  if(!days||!days.length){ ctx.fillStyle=getCSS('--ink-faint'); ctx.font='11px IBM Plex Mono,monospace'; ctx.fillText('нет данных',10,20); return; }
+  const vals=days.map(d=>d.net);
+  let hi=Math.max(0,...vals), lo=Math.min(0,...vals);
+  const span=(hi-lo)||1; const padTop=14, padBot=24, padL=44;
+  const y=v=>padTop+(H-padTop-padBot)*(1-(v-lo)/span);
+  const y0=y(0);
+  const n=days.length, gap=4;
+  const bw=Math.max(2,(W-padL-8-gap*(n-1))/n);
+  ctx.strokeStyle=getCSS('--ink-faint'); ctx.lineWidth=1; ctx.beginPath();
+  ctx.moveTo(padL,y0); ctx.lineTo(W-4,y0); ctx.stroke();
+  ctx.fillStyle=getCSS('--ink-dim'); ctx.font='10px IBM Plex Mono,monospace'; ctx.textAlign='right';
+  ctx.fillText(Math.round(hi).toLocaleString('ru'),padL-4,y(hi)+4);
+  if(lo<0) ctx.fillText(Math.round(lo).toLocaleString('ru'),padL-4,y(lo)+4);
+  ctx.textAlign='center';
+  const rad=Math.min(5,bw/2);
+  days.forEach((d,i)=>{
+    const xx=padL+4+i*(bw+gap);
+    const yy=y(d.net), top=Math.min(yy,y0), h=Math.max(1,Math.abs(yy-y0));
+    const base=d.net>=0?getCSS('--signal'):getCSS('--loss');
+    const g=ctx.createLinearGradient(0,top,0,top+h);
+    if(d.net>=0){ g.addColorStop(0,_lighten(rgb2hex(base),0.32)); g.addColorStop(1,base); }
+    else { g.addColorStop(0,base); g.addColorStop(1,_lighten(rgb2hex(base),0.32)); }
+    ctx.fillStyle=g;
+    const rr=Math.min(rad,h);
+    if(ctx.roundRect){ ctx.beginPath(); ctx.roundRect(xx,top,bw,h,d.net>=0?[rr,rr,0,0]:[0,0,rr,rr]); ctx.fill(); }
+    else ctx.fillRect(xx,top,bw,h);
+    ctx.fillStyle=getCSS('--ink-dim'); ctx.font='9px IBM Plex Mono,monospace';
+    ctx.fillText(d.n, xx+bw/2, d.net>=0?top-3:top+h+10);
+    if(n<=12 || i%Math.ceil(n/12)===0){
+      const dm=d.date.slice(8,10)+'.'+d.date.slice(5,7);
+      ctx.fillStyle=getCSS('--ink-faint'); ctx.font='9px IBM Plex Mono,monospace';
+      ctx.fillText(dm, xx+bw/2, H-4);
+    }
+  });
+  ctx.textAlign='left';
+}
+// наши --signal/--loss заданы в hex, но getCSS может вернуть с пробелом — нормализуем для _lighten
+function rgb2hex(c){ c=c.trim(); if(c[0]==='#') return c;
+  const m=c.match(/\d+/g); if(!m) return '#2ee6a6';
+  return '#'+m.slice(0,3).map(x=>(+x).toString(16).padStart(2,'0')).join(''); }
+
+function s4msk(ms){
+  const d=new Date(ms); const t=d.getTime()+(d.getTimezoneOffset()+180)*60000; const m=new Date(t);
+  return {hh:String(m.getHours()).padStart(2,'0'),mm:String(m.getMinutes()).padStart(2,'0'),
+          ss:String(m.getSeconds()).padStart(2,'0'),min:m.getHours()*60+m.getMinutes(),dow:m.getDay()};
+}
+function s4fortsSession(min,dow){
+  const inR=(a,b)=>min>=a&&min<b;
+  if(inR(14*60,14*60+5)) return {txt:'клиринг (14:00–14:05)',color:'var(--warn)'};
+  if(inR(18*60+45,19*60+5)) return {txt:'вечерний клиринг (18:45–19:05)',color:'var(--warn)'};
+  if(inR(9*60,10*60)) return {txt:'утренняя сессия',color:'var(--signal)'};
+  if(inR(10*60,14*60)||inR(14*60+5,18*60+45)) return {txt:'основная сессия',color:'var(--signal)'};
+  if(inR(19*60+5,23*60+50)) return {txt:'вечерняя сессия',color:'var(--signal)'};
+  return {txt:'торги закрыты',color:'var(--ink-dim)'};
+}
+function s4Clock(){
+  const m=s4msk(Date.now());
+  const el=$('s4-msk-clock'); if(el) el.textContent=`${m.hh}:${m.mm}:${m.ss}`;
+  const se=$('s4-session'); if(se){ const s=s4fortsSession(m.min,m.dow); se.textContent='● '+s.txt; se.style.color=s.color; }
+}
+setInterval(s4Clock,1000); s4Clock();
+
+function s4Render(s){
+  _s4snap=s;
+  const b = s.history && s.history.length ? s.history[s.history.length-1] : null;
+  $('s4-ro-spread').textContent = b? Math.round(b.spread) : '—';
+  $('s4-ro-sma').textContent = b? Math.round(b.sma) : '—';
+  $('s4-ro-sigma').textContent = b? b.sigma.toFixed(1) : '—';
+  if(b && b.sigma>0){
+    const z=(b.spread-b.sma)/b.sigma;
+    $('s4-ro-z').textContent=(z>=0?'+':'')+z.toFixed(2);
+    $('s4-ro-z').style.color = Math.abs(z)>=(s.sigma_mult||2)?'var(--warn)':'var(--ink)';
+    const clamp=Math.max(-3,Math.min(3,z)); $('s4-ptr').style.left=((clamp+3)/6*100)+'%';
+  } else { $('s4-ro-z').textContent='—'; }
+  $('s4-chart-sub').textContent = `${s.legs.pref} − ${s.legs.ord} · BB(${s.sma_period}, ${s.sigma_mult}σ)`;
+  if(s.asset_pref && s.asset_ord) $('s4-chart-pair').textContent = `${s.asset_pref} − ${s.asset_ord}`;
+  const _d2e = s.rollover ? s.rollover.days_to_expiry : null;
+  const _expTail = s.legs.ord_expiry
+    ? ' · эксп '+s.legs.ord_expiry + (_d2e!=null ? ` (${_d2e} дн${s.rollover.quiet_mode?', тишина':''})` : '')
+    : '';
+  $('s4-legs').textContent = `${s.legs.ord} / ${s.legs.pref}` + _expTail;
+
+  const sandboxMode = s.connector_mode==='tbank_sandbox';
+  const bl=$('s4-btn-live'); if(bl && !s.live) bl.textContent = sandboxMode ? '▶ live (T-Bank)' : '▶ live (ISS)';
+  if($('hdr-tag')) $('hdr-tag').textContent = sandboxMode ? 'phase 2 · sandbox' : 'phase 1 · paper';
+  if($('hdr-data')) $('hdr-data').textContent = s.data_provider||'—';
+  const hf=$('hdr-flow');
+  if(hf){
+    const on = s.live || s.player;
+    hf.querySelector('.dot').style.background = on ? '' : 'var(--ink-faint)';
+    hf.querySelector('.dot').style.boxShadow = on ? '' : 'none';
+    hf.querySelector('span:last-child').textContent = on ? 'поток активен' : 'остановлено';
+  }
+
+  const fsmRu={flat:'FLAT (нет позиции)',short_spread:'ШОРТ спреда',long_spread:'ЛОНГ спреда',entering_short:'вход в шорт…',entering_long:'вход в лонг…',exiting:'выход…',halted:'⛔ HALTED'};
+  $('s4-fsm').textContent=fsmRu[s.fsm_state]||s.fsm_state;
+  $('s4-fsm').style.color = s.fsm_state==='halted'?'var(--loss)':(s.fsm_state.includes('short')?'var(--short)':(s.fsm_state.includes('long')?'var(--signal)':'var(--ink-dim)'));
+  const isLive = s.data_source==='live';
+  $('s4-src').textContent = s.data_provider || (isLive?'MOEX ISS':'синтетика');
+  $('s4-src').style.color = (s.data_provider==='T-Bank')?'var(--signal)':(isLive?'var(--ink)':'var(--ink-dim)');
+  const sandbox = s.connector_mode==='tbank_sandbox';
+  let modeTxt='paper', modeCol='var(--ink)';
+  if(sandbox){
+    if(s.sandbox_active){ modeTxt='T-Bank ✓'; modeCol='var(--signal)'; }
+    else if(s.sandbox_error){ modeTxt='T-Bank — ошибка'; modeCol='var(--loss)'; }
+    else { modeTxt='T-Bank — нужен live'; modeCol='var(--warn)'; }
+  }
+  $('s4-mode').textContent=modeTxt; $('s4-mode').style.color=modeCol;
+
+  const flowing = s.live || s.player;
+  const inPos = !!s.position;
+  let dotColor='var(--ink-faint)', statusTxt=s.wait_reason||'—';
+  const sandboxFailed = sandbox && isLive && !s.sandbox_active && s.sandbox_error;
+  const sandboxWaitsLive = sandbox && !isLive && flowing;
+  if(s.halted){ dotColor='var(--loss)'; }
+  else if(sandboxFailed){ dotColor='var(--loss)'; statusTxt='sandbox не запустился: '+s.sandbox_error+' (исполнение идёт как paper)'; }
+  else if(sandboxWaitsLive){ dotColor='var(--warn)'; statusTxt='режим T-Bank выбран, но идут демо-данные — нажмите «live», чтобы sandbox заработал'; }
+  else if(inPos){ dotColor=s.position.state==='short_spread'?'var(--short)':'var(--signal)'; }
+  else if(!flowing){ dotColor='var(--ink-faint)'; }
+  else if(!s.warmup_done){ dotColor='var(--warn)'; }
+  else if(s.rollover && s.rollover.quiet_mode){ dotColor='var(--warn)'; }
+  else if(s.data_source==='live' && s.data_lag_min!=null && s.data_lag_min>25){ dotColor='var(--warn)'; }
+  else { dotColor='var(--signal)'; }
+  $('s4-status-dot').style.background=dotColor;
+  $('s4-status-txt').textContent=statusTxt;
+  let sub = s.strategy_name||'';
+  if(s.data_source==='live' && s.data_lag_min!=null) sub += ` · последний бар ${s.data_lag_min} мин назад`;
+  $('s4-status-sub').textContent=sub;
+
+  const evbox=$('s4-events');
+  if(s.events && s.events.length){
+    const kindColor={position:'var(--signal)',exit:'var(--ink)',halt:'var(--loss)',warn:'var(--warn)',info:'var(--ink-dim)'};
+    evbox.innerHTML = s.events.slice().reverse().map(e=>{
+      const m=s4msk(e.ts*1000);
+      const rep = e.count>1 ? ` <span style="color:var(--ink-faint)">×${e.count}</span>` : '';
+      return `<div style="padding:3px 0"><span style="color:var(--ink-faint)">${m.hh}:${m.mm}:${m.ss}</span> <span style="color:${kindColor[e.kind]||'var(--ink-dim)'}">${e.message}</span>${rep}</div>`;
+    }).join('');
+  } else evbox.innerHTML='<div class="empty">журнал пуст</div>';
+
+  const sm=s.summary;
+  $('s4-equity').textContent = Math.round(sm.equity_rub).toLocaleString('ru');
+  $('s4-equity').style.color = sm.return_pct>=0?'var(--signal)':'var(--loss)';
+  $('s4-daypnl').textContent = s4money(sm.day_pnl_rub); $('s4-daypnl').style.color = sm.day_pnl_rub>=0?'var(--signal)':'var(--loss)';
+  $('s4-ntrades').textContent = sm.trades;
+  $('s4-winrate').textContent = sm.win_rate_pct+'%';
+
+  const halt=$('s4-halt');
+  if(s.halted){ halt.style.display=''; halt.textContent='⛔ HALTED: '+(s.halt_reason||'')+' — нажмите «сброс» после разбора'; }
+  else halt.style.display='none';
+
+  const pos=$('s4-pos');
+  if(s.position){
+    const p=s.position; const u=p.unrealized_rub;
+    pos.innerHTML = `<div style="font-weight:600;color:${p.state==='short_spread'?'var(--short)':'var(--signal)'}">${p.state==='short_spread'?'ШОРТ спреда':'ЛОНГ спреда'} · ${p.lots} лот · держим ${p.bars_held} бар</div>`+
+      p.legs.map(l=>`<div style="margin-top:5px">${l.code} (${l.role}): <b>${l.side==='buy'?'лонг':'шорт'}</b> @ ${l.entry}</div>`).join('')+
+      `<div style="margin-top:7px">нереализованный P&L: <b style="color:${u>=0?'var(--signal)':'var(--loss)'}">${s4money(u)}</b></div>`;
+  } else pos.textContent='нет открытой позиции';
+
+  const pend=$('s4-pending'), crow=$('s4-confirm-row');
+  if(s.pending){ pend.style.display=''; pend.innerHTML=`<div style="color:var(--warn);font-weight:600;font-family:var(--mono);font-size:12px">⏳ сигнал ${s.pending.signal.toUpperCase()} (спред ${Math.round(s.pending.spread)}, SMA ${Math.round(s.pending.sma)}) ждёт подтверждения</div>`; crow.style.display='flex'; }
+  else { pend.style.display='none'; crow.style.display='none'; }
+
+  $('s4-auto').checked=s.auto_approve; $('s4-trading').checked=s.trading_enabled;
+  const cm=$('s4-conn-mode'); if(cm && document.activeElement!==cm) cm.value=s.connector_mode||'paper';
+  const cbg=$('s4-conn-badge');
+  if(cbg){
+    cbg.textContent = (sandbox?'T-Bank песочница':'paper')
+      + (sandbox ? (s.sandbox_active?' · активна':' · только в live') : '')
+      + (s.token_set?' · токен ✓':'');
+    cbg.style.color = (sandbox && s.sandbox_active) ? 'var(--signal)' : 'var(--ink-faint)';
+  }
+  const ctok=$('s4-conn-token');
+  if(ctok && document.activeElement!==ctok)
+    ctok.placeholder = s.token_set ? 'токен установлен (ввести заново для замены)' : 't.xxx (для sandbox)';
+  $('s4-btn-pause').textContent = (s.live||s.player)?'❚❚ пауза':'▶ продолжить';
+  window._s4tradeStart = s.trade_start_ts || null;
+  s4DrawChart(s.history, s.trades, s.position);
+  s4RenderTrades(s.trades);
+  s4RenderDaily(s.trades);
+}
+
+async function s4Poll(){ try{ s4Render(await s4api('/state')); }catch(e){} }
+
+/* ---- переключатель пар ---- */
+let S4PAIRS=[];
+async function s4BuildPairSwitch(){
+  try{ S4PAIRS=(await s4api('/pairs')).pairs||[]; }catch(e){ return; }
+  if(!S4PAIRS.some(p=>p.id===S4PAIR)) S4PAIR=(S4PAIRS[0]||{}).id||'sber';
+  const box=$('s4-pair-switch'); if(!box) return;
+  box.innerHTML='';
+  S4PAIRS.forEach(p=>{
+    const b=document.createElement('button');
+    b.className='pairbtn'; b.id='s4-pair-'+p.id; b.dataset.pair=p.id;
+    b.textContent=`${p.label} · ${p.ord}/${p.pref}`;
+    b.onclick=()=>s4SwitchPair(p.id);
+    box.appendChild(b);
+  });
+  s4MarkPair();
+}
+function s4MarkPair(){
+  S4PAIRS.forEach(p=>{ const b=$('s4-pair-'+p.id); if(b) b.classList.toggle('on', S4PAIR===p.id); });
+}
+function s4LoadPairData(){
+  s4LoadMargin();
+  s4api('/backtest_history').then(d=>s4RenderBtHistory(d.history||[])).catch(()=>{});
+  s4api('/backtest_history?source=moex').then(d=>s4RenderBtHistoryMoex(d.history||[])).catch(()=>{});
+}
+async function s4SwitchPair(p){
+  if(p===S4PAIR) return;
+  S4PAIR=p; try{ localStorage.setItem('s4pair',p); }catch(e){}
+  s4MarkPair(); s4ResetZoom();
+  $('s4-bt-res').innerHTML=''; $('s4-bt-msg').textContent='';
+  $('s4-btb-res').innerHTML=''; $('s4-btb-msg').textContent='';
+  $('s4-btb-table-wrap').style.display='none';
+  await s4Poll(); s4LoadPairData();
+}
+
+function s4Init(){
+  const s4cv=$('s4chart');
+  s4cv.addEventListener('wheel',e=>{
+    e.preventDefault();
+    if(_s4fullLen<2) return;
+    const k = e.deltaY<0 ? 0.85 : 1/0.85;
+    const nz = Math.min(1, Math.max(10/_s4fullLen, _s4zoom*k));
+    if(_s4panRight==null) _s4panRight=_s4fullLen;
+    _s4zoom=nz;
+    if(_s4zoom>=1){ _s4panRight=null; }
+    s4Redraw();
+  },{passive:false});
+  let s4drag=null;
+  s4cv.addEventListener('mousedown',e=>{ s4drag={x:e.clientX, panRight:_s4panRight==null?_s4fullLen:_s4panRight}; s4cv.style.cursor='grabbing'; });
+  addEventListener('mousemove',e=>{
+    if(!s4drag||_s4fullLen<2) return;
+    const W=s4cv.getBoundingClientRect().width;
+    const visN=Math.max(10,Math.round(_s4fullLen*_s4zoom));
+    const dxBars=Math.round((e.clientX-s4drag.x)/W*visN);
+    let nr=s4drag.panRight-dxBars;
+    nr=Math.max(visN,Math.min(_s4fullLen,nr));
+    _s4panRight = nr>=_s4fullLen ? null : nr;
+    s4Redraw();
+  });
+  addEventListener('mouseup',()=>{ if(s4drag){ s4drag=null; s4cv.style.cursor='crosshair'; } });
+  s4cv.addEventListener('dblclick',()=>{ s4ResetZoom(); s4Redraw(); });
+  s4cv.style.cursor='crosshair';
+  s4cv.addEventListener('mousemove',e=>{
+    const g=window._s4geom, tip=$('s4tip'); if(!g||!tip){ return; }
+    const r=s4cv.getBoundingClientRect(), mx=e.clientX-r.left, my=e.clientY-r.top;
+    let best=null,bd=14;
+    g.trades.forEach(p=>{
+      [['вход',p.xi,p.yi],['выход',p.xo,p.yo]].forEach(([kind,px,py])=>{
+        if(px==null) return; const d=Math.hypot(px-mx,py-my); if(d<bd){bd=d;best={kind,t:p.t};}
+      });
+    });
+    if(best){
+      const t=best.t, win=t.net_pnl_rub>=0;
+      const rs={exit:'возврат к SMA',stop:'стоп σ',time_stop:'тайм-стоп',flat_all:'flat-all'}[t.reason]||t.reason;
+      tip.innerHTML=`<b>${best.kind}</b> · ${t.state==='short_spread'?'шорт':'лонг'} спреда<br>`
+        +`спред ${Math.round(t.entry_spread)}→${Math.round(t.exit_spread)} · ${rs}<br>`
+        +`net <span style="color:${win?'var(--signal)':'var(--loss)'}">${s4money(t.net_pnl_rub)}</span>`;
+      tip.style.display='block'; s4PlaceTip(tip,mx,my,r);
+      return;
+    }
+    if(mx<g.px0||mx>g.px1||my<g.py0||my>g.py1){ tip.style.display='none'; return; }
+    const n=g.series.length, frac=(mx-g.px0)/(g.px1-g.px0);
+    const idx=Math.max(0,Math.min(n-1,Math.round(frac*(n-1)))), p=g.series[idx];
+    const z=p.sigma>0?((p.spread-p.sma)/p.sigma):0;
+    const m=s4msk(p.ts);
+    tip.innerHTML=`<b>${m.hh}:${m.mm}</b> МСК<br>спред <b>${Math.round(p.spread)}</b> · z ${z>=0?'+':''}${z.toFixed(2)}<br>`
+      +`SMA ${Math.round(p.sma)} · полосы [${Math.round(p.lower)}..${Math.round(p.upper)}]`;
+    tip.style.display='block'; s4PlaceTip(tip,mx,my,r);
+  });
+  s4cv.addEventListener('mouseleave',()=>{ const t=$('s4tip'); if(t)t.style.display='none'; });
+
+  $('s4-btn-live').onclick=async()=>{ try{ await s4api('/control/start','POST'); s4Poll(); }catch(e){alert(e.message);} };
+  $('s4-btn-player').onclick=async()=>{ await s4api('/player/start','POST'); s4Poll(); };
+  $('s4-btn-pause').onclick=async()=>{ const s=_s4snap||{}; if(s.live) await s4api('/control/stop','POST'); else if(s.player) await s4api('/player/stop','POST'); else await s4api(s.data_source==='live'?'/control/start':'/player/start','POST'); s4Poll(); };
+  $('s4-btn-flat').onclick=async()=>{ if(!confirm('Закрыть позицию по рынку (flat-all)?')) return; await s4api('/control/flat-all','POST',{confirm:true}); s4Poll(); };
+  $('s4-btn-reset').onclick=async()=>{ if(!confirm('Сбросить сессию st4 (журнал/баланс)?')) return; await s4api('/reset','POST'); s4Poll(); };
+  $('s4-auto').onchange=async(e)=>{ await s4api('/auto?on='+e.target.checked,'POST'); s4Poll(); };
+  $('s4-trading').onchange=async(e)=>{ await s4api('/control/trading?on='+e.target.checked,'POST'); s4Poll(); };
+  $('s4-btn-approve').onclick=async()=>{ await s4api('/approve','POST'); s4Poll(); };
+  $('s4-btn-reject').onclick=async()=>{ await s4api('/reject','POST'); s4Poll(); };
+  $('s4-btn-conn').onclick=async()=>{
+    const mode=$('s4-conn-mode').value, token=$('s4-conn-token').value.trim();
+    $('s4-conn-msg').textContent='применяю…';
+    try{
+      const body={mode}; if(token) body.token=token;
+      const d=await s4api('/connector','POST',body);
+      $('s4-conn-token').value='';
+      $('s4-conn-msg').textContent = d.fell_back
+        ? 'sandbox недоступен — исполнение paper'
+        : ('режим: '+d.connector_mode+(d.token_set?' · токен установлен ✓':''));
+      s4Poll();
+    }catch(e){ $('s4-conn-msg').textContent='ошибка: '+e.message; }
+  };
+  $('s4-btn-forget').onclick=async()=>{
+    if(!confirm('Удалить сохранённый токен T-Bank с диска?')) return;
+    try{ await s4api('/connector/forget-token','POST'); $('s4-conn-msg').textContent='токен удалён, режим paper'; s4Poll(); }
+    catch(e){ $('s4-conn-msg').textContent='ошибка: '+e.message; }
+  };
+  $('s4-btn-apply').onclick=async()=>{
+    const body={ sma_period:+$('s4-p-sma').value, sigma_multiplier:+$('s4-p-sig').value,
+      deviation_pct:(+$('s4-p-dev').value)/100, stop_sigma:+$('s4-p-stop').value, quantity_lots:+$('s4-p-lots').value };
+    try{ await s4api('/config','POST',body); s4Poll(); }catch(e){ alert(e.message); }
+  };
+  $('s4-btn-bt').onclick=async()=>{
+    const days=+$('s4-bt-days').value, stop=+$('s4-bt-stop').value;
+    $('s4-bt-msg').textContent='загрузка истории ISS…'; $('s4-btn-bt').disabled=true;
+    try{
+      const d=await s4api(`/backtest?days=${days}&stop_sigma=${stop}`);
+      if(d.error){ $('s4-bt-msg').textContent=d.error; }
+      else{
+        $('s4-bt-msg').textContent='';
+        $('s4-bt-res').innerHTML=
+          `<b>${d.legs.ord}/${d.legs.pref}</b> · ${d.bars} баров · сделок <b>${d.trades}</b><br>`+
+          `win-rate <b style="color:var(--signal)">${d.win_rate_pct}%</b> · net <b style="color:${d.net_pnl_rub>=0?'var(--signal)':'var(--loss)'}">${s4money(d.net_pnl_rub)}</b> (${fmt(d.return_pct,2)}%)<br>`+
+          `<b>maxDD ${d.max_drawdown_pct}%</b> · стопов ${d.stops} · ср.P&L ${s4money(d.avg_pnl_rub)} · ср.держание ${d.avg_bars_held} бар (макс ${d.max_bars_held})<br>`+
+          `ср.проскальзывание ${d.avg_slippage_ticks}t · комиссии ${s4money(-d.fees_rub)}`+
+          (d.open_position?`<br><span style="color:var(--warn)">осталась открытая ${d.open_position}: нереализ ${s4money(d.open_unrealized_rub)}</span>`:'');
+        s4RenderBtHistoryMoex(d.history||[]);
+      }
+    }catch(e){ $('s4-bt-msg').textContent='ошибка: '+e.message; }
+    $('s4-btn-bt').disabled=false;
+  };
+  $('s4-btn-btb').onclick=async()=>{
+    const stop=+$('s4-btb-stop').value;
+    $('s4-btb-msg').textContent='загрузка котировок T-Bank…'; $('s4-btn-btb').disabled=true;
+    $('s4-btb-table-wrap').style.display='none';
+    try{
+      const d=await s4api(`/backtest_tbank?stop_sigma=${stop}`);
+      if(d.error){ $('s4-btb-msg').textContent=d.error; $('s4-btb-res').innerHTML=''; }
+      else{
+        $('s4-btb-msg').textContent='';
+        $('s4-btb-res').innerHTML=
+          `<b>${d.legs.ord}/${d.legs.pref}</b> · ${d.bars} баров (${d.source}) · сделок <b>${d.trades}</b><br>`+
+          `win-rate <b style="color:var(--signal)">${d.win_rate_pct}%</b> · net <b style="color:${d.net_pnl_rub>=0?'var(--signal)':'var(--loss)'}">${s4money(d.net_pnl_rub)}</b> (${fmt(d.return_pct,2)}%)<br>`+
+          `<b>maxDD ${d.max_drawdown_pct}%</b> · стопов ${d.stops} · ср.держание ${d.avg_bars_held} бар (макс ${d.max_bars_held})<br>`+
+          `ср.проскальзывание ${d.avg_slippage_ticks}t · комиссии ${s4money(-d.fees_rub)}`+
+          (d.open_position?`<br><span style="color:var(--warn)">осталась открытая ${d.open_position}: нереализ ${s4money(d.open_unrealized_rub)}</span>`:'');
+        const tb=$('s4-btb-table').querySelector('tbody'); tb.innerHTML='';
+        const trs=d.trades_detail||[];
+        if(trs.length){
+          $('s4-btb-table-wrap').style.display='';
+          trs.slice().reverse().forEach(t=>{
+            const dir = t.state==='short_spread' ? '<span style="color:var(--short)">шорт спреда</span>' : '<span style="color:var(--signal)">лонг спреда</span>';
+            const reason={exit:'возврат к SMA',stop:'стоп σ',time_stop:'тайм-стоп',flat_all:'flat-all'}[t.reason]||t.reason;
+            const tr=document.createElement('tr');
+            tr.innerHTML=`<td>${dir}</td><td>${Math.round(t.entry_spread)} → ${Math.round(t.exit_spread)}</td>`+
+              `<td>${t.bars_held}</td><td style="color:${t.net_pnl_rub>=0?'var(--signal)':'var(--loss)'};font-weight:600">${s4money(t.net_pnl_rub)}</td>`+
+              `<td style="color:var(--ink-dim)">${reason}</td>`;
+            tb.appendChild(tr);
+          });
+        }
+        s4RenderBtHistory(d.history||[]);
+      }
+    }catch(e){ $('s4-btb-msg').textContent='ошибка: '+e.message; }
+    $('s4-btn-btb').disabled=false;
+  };
+  $('s4-btn-tests').onclick=async()=>{
+    $('s4-tests-badge').textContent='запуск…';
+    try{ const d=await s4api('/tests'); $('s4-tests-badge').innerHTML = d.ok? `<span style="color:var(--signal)">✓ ${d.passed} passed</span>` : `<span style="color:var(--loss)">${d.failed} failed / ${d.passed} passed</span>`; }
+    catch(e){ $('s4-tests-badge').textContent='ошибка'; }
+  };
+  $('s4-btn-margin').onclick=s4LoadMargin;
+
+  s4BuildPairSwitch().then(()=>{
+    s4Poll();
+    s4LoadPairData();
+    s4api('/state').then(s=>{ if(!s.session_started){ s4api('/player/start','POST').then(s4Poll); } });
+  });
+}
+
+addEventListener('resize',()=>{ s4Redraw(); if(_s4snap) s4RenderDaily(_s4snap.trades||[]); });
+setInterval(s4Poll, 1500);
+s4Init();
+</script>
+</body>
+</html>

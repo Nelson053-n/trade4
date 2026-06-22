@@ -1,0 +1,31 @@
+# systemd-сервис backend trade4 (st4 спред-арбитраж) — uvicorn на 127.0.0.1:8001.
+# Отдельный сервис, не пересекается с trade.service (порт 8000). Свой домен trade4.bananagen.ru.
+#
+# Установка на проде (требует sudo, рабочая папка /opt/trade4):
+#   sudo cp /opt/trade4/infra/trade4.service /etc/systemd/system/trade4.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now trade4
+# Проверка:   systemctl status trade4   |   journalctl -u trade4 -f
+#
+# Токен T-Bank подаётся через окружение (Environment=TBANK_TOKEN=... в drop-in
+# /etc/systemd/system/trade4.service.d/token.conf), либо файлом app/st4/.tbank_token.
+
+[Unit]
+Description=trade4 backend (st4 spread arbitrage paper) — uvicorn API + panel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/trade4
+ExecStart=/opt/trade4/.venv/bin/python -m uvicorn app.api:app --host 127.0.0.1 --port 8001
+Restart=always
+RestartSec=3
+# мягкая остановка, чтобы фоновые задачи (плеер/поллер) завершились
+KillSignal=SIGINT
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
