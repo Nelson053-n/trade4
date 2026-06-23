@@ -131,10 +131,10 @@ a{color:var(--accent-2);text-decoration:none}
   background:rgba(255,93,108,.1);border:1px solid rgba(255,93,108,.4);color:var(--loss);font-weight:600;font-size:13px}
 
 /* метрики */
-.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:11px}
+.kpis{display:grid;grid-template-columns:repeat(2,1fr);gap:11px}
 .kpi{background:var(--panel-hi);border:1px solid var(--line-soft);border-radius:var(--r-sm);padding:12px 13px;min-width:0}
 .kpi .k{font-family:var(--mono);font-size:9.5px;letter-spacing:1.2px;color:var(--ink-faint);text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.kpi .v{font-family:var(--mono);font-size:18px;font-weight:600;margin-top:5px;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kpi .v{font-family:var(--mono);font-size:19px;font-weight:600;margin-top:5px;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .kpi .u{font-size:11px;color:var(--ink-faint);font-weight:400}
 @media(max-width:520px){.kpis{grid-template-columns:repeat(2,1fr)}}
 
@@ -618,7 +618,9 @@ function s4DrawChart(hist, trades, openPos){
     // барам, поэтому кольцо должно лежать на ней. Факт. цена входа (entry_spread, исполнение
     // внутри бара по стакану T-Bank) может отличаться — её показываем в тултипе, не на оси.
     const i1=idxAt(t.entry_ts), X1=x(i1), Y1=y(series[i1].spread);
-    if(inRange(t.exit_ts)){
+    // НЕ соединяем вход с выходом, если exit_ts < entry_ts (аномалия данных: вход по live-времени,
+    // выход по ts исторического бара после replay) — иначе линия идёт «назад» через весь график.
+    if(inRange(t.exit_ts) && t.exit_ts>=t.entry_ts){
       const i2=idxAt(t.exit_ts), X2=x(i2), Y2=y(series[i2].spread);
       ctx.save(); ctx.globalAlpha=.35; ctx.strokeStyle=col; ctx.lineWidth=1.5;
       ctx.beginPath();ctx.moveTo(X1,Y1);ctx.lineTo(X2,Y2);ctx.stroke(); ctx.restore();
@@ -640,8 +642,8 @@ function s4DrawChart(hist, trades, openPos){
   window._s4geom = {series, x, y, px0, px1, py0, py1,
     trades:(data.trades||[]).filter(t=>inRange(t.entry_ts)).map(t=>({t,
        xi:x(idxAt(t.entry_ts)), yi:y(series[idxAt(t.entry_ts)].spread),
-       xo:inRange(t.exit_ts)?x(idxAt(t.exit_ts)):null,
-       yo:inRange(t.exit_ts)?y(series[idxAt(t.exit_ts)].spread):null}))};
+       xo:(inRange(t.exit_ts)&&t.exit_ts>=t.entry_ts)?x(idxAt(t.exit_ts)):null,
+       yo:(inRange(t.exit_ts)&&t.exit_ts>=t.entry_ts)?y(series[idxAt(t.exit_ts)].spread):null}))};
 }
 function s4Redraw(){ if(_s4lastHist) s4DrawChart(); }
 function s4PlaceTip(tip, mx, my, r){
