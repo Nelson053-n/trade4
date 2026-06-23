@@ -77,11 +77,22 @@ class TinkoffSandboxExecutor:
         return self.sb.open_account(self.conn.account_name)
 
     def _ensure_started(self) -> None:
-        """Резолв инструментов + счёт + пополнение под ГО. Ошибки T-Bank пробрасываем наверх."""
+        """Резолв инструментов + счёт + пополнение под ГО ТОЛЬКО при нехватке средств.
+
+        Раньше pay_in вызывался при КАЖДОМ старте live → sandbox-счёт раздувался (десятки млн),
+        и частые SandboxPayIn ловили периодический HTTP 500 (T-Bank internal 70001) → откат в
+        paper. Пополняем, только если денег на счёте меньше payin_rub."""
         self._resolve_instruments()
         self._account_id = self._account()
         self.conn.account_id = self._account_id    # запомнить для сериализации/переиспользования
-        self.sb.pay_in(self._account_id, self.conn.payin_rub)
+        need = self.conn.payin_rub
+        try:
+            pf = self.sb.portfolio(self._account_id)
+            cash = self.sb._q_to_float(pf.get("totalAmountCurrencies"))
+        except Exception:  # noqa: BLE001  не смогли прочитать баланс — пополним как раньше
+            cash = 0.0
+        if cash < need:
+            self.sb.pay_in(self._account_id, need)
 
     # ---------- одна нога ----------
     def _post_leg(self, role: Role, side: str, lots: int, ref: float) -> Fill | None:
