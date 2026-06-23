@@ -132,9 +132,9 @@ a{color:var(--accent-2);text-decoration:none}
 
 /* метрики */
 .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:11px}
-.kpi{background:var(--panel-hi);border:1px solid var(--line-soft);border-radius:var(--r-sm);padding:12px 13px}
-.kpi .k{font-family:var(--mono);font-size:9.5px;letter-spacing:1.2px;color:var(--ink-faint);text-transform:uppercase}
-.kpi .v{font-family:var(--mono);font-size:21px;font-weight:600;margin-top:5px;line-height:1}
+.kpi{background:var(--panel-hi);border:1px solid var(--line-soft);border-radius:var(--r-sm);padding:12px 13px;min-width:0}
+.kpi .k{font-family:var(--mono);font-size:9.5px;letter-spacing:1.2px;color:var(--ink-faint);text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kpi .v{font-family:var(--mono);font-size:18px;font-weight:600;margin-top:5px;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .kpi .u{font-size:11px;color:var(--ink-faint);font-weight:400}
 @media(max-width:520px){.kpis{grid-template-columns:repeat(2,1fr)}}
 
