@@ -227,7 +227,7 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
     <div>
       <div class="name">trade<b>4</b></div>
     </div>
-    <span class="tag" id="hdr-tag">phase 1 · paper</span>
+    <span class="tag" id="hdr-tag">T-Bank sandbox</span>
   </div>
   <div class="spacer"></div>
   <div class="flowpill" id="hdr-flow"><span class="dot"></span><span>поток активен</span></div>
@@ -393,11 +393,11 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
       <h2>управление</h2>
       <div class="ctrls">
         <button class="btn primary" id="s4-btn-live">▶ live (ISS)</button>
-        <button class="btn" id="s4-btn-player">▶ демо (синтетика)</button>
         <button class="btn" id="s4-btn-pause">❚❚ пауза</button>
-        <button class="btn warn" id="s4-btn-flat">flat-all</button>
+        <button class="btn warn" id="s4-btn-flat">✕ закрыть позицию</button>
         <button class="btn danger" id="s4-btn-reset">сброс</button>
       </div>
+      <div class="card-sub" id="s4-real-pairs" style="margin-top:12px"></div>
       <div class="toggle-row">
         <label class="toggle"><input type="checkbox" id="s4-auto"> авто-вход (без подтверждения)</label>
         <label class="toggle"><input type="checkbox" id="s4-trading"> торговля разрешена</label>
@@ -408,7 +408,7 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
       <h2>коннектор исполнения <span class="em" id="s4-conn-badge">—</span></h2>
       <div class="params" style="grid-template-columns:1fr">
         <div class="fld"><label>режим</label>
-          <select id="s4-conn-mode"><option value="paper">paper (виртуальное исполнение)</option><option value="tbank_sandbox">T-Bank песочница (виртуальный счёт)</option></select>
+          <select id="s4-conn-mode"><option value="tbank_sandbox">T-Bank песочница (виртуальный счёт)</option></select>
         </div>
         <div class="fld"><label>токен T-Bank</label><input id="s4-conn-token" type="password" placeholder="t.xxx (для sandbox)"></div>
       </div>
@@ -458,7 +458,7 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
   </div>
 </div>
 
-<div class="foot">trade4 · спред-арбитраж обычка/преф на FORTS · paper / T-Bank sandbox · реальные ордера не выставляются</div>
+<div class="foot">trade4 · спред-арбитраж обычка/преф на FORTS · T-Bank sandbox · боевой контур — этап 2</div>
 </div>
 
 <script>
@@ -811,7 +811,7 @@ function s4Render(s){
 
   const sandboxMode = s.connector_mode==='tbank_sandbox';
   const bl=$('s4-btn-live'); if(bl && !s.live) bl.textContent = sandboxMode ? '▶ live (T-Bank)' : '▶ live (ISS)';
-  if($('hdr-tag')) $('hdr-tag').textContent = sandboxMode ? 'phase 2 · sandbox' : 'phase 1 · paper';
+  if($('hdr-tag')) $('hdr-tag').textContent = sandboxMode ? 'T-Bank sandbox' : 'paper (внутр.)';
   if($('hdr-data')) $('hdr-data').textContent = s.data_provider||'—';
   const hf=$('hdr-flow');
   if(hf){
@@ -925,6 +925,26 @@ async function s4BuildPairSwitch(){
     box.appendChild(b);
   });
   s4MarkPair();
+  s4BuildRealPairs();
+}
+/* ---- чекбоксы пар для реальной торговли (этап 1: выбор хранится локально, боевой контур — этап 2) ---- */
+function s4RealPairs(){ try{ return JSON.parse(localStorage.getItem('s4_real_pairs')||'[]'); }catch(e){ return []; } }
+function s4SetRealPair(id,on){
+  let arr=s4RealPairs().filter(x=>x!==id); if(on) arr.push(id);
+  try{ localStorage.setItem('s4_real_pairs', JSON.stringify(arr)); }catch(e){}
+}
+function s4BuildRealPairs(){
+  const box=$('s4-real-pairs'); if(!box) return;
+  const sel=s4RealPairs();
+  box.innerHTML='<div style="font-family:var(--mono);font-size:10px;letter-spacing:1.2px;color:var(--ink-faint);'
+    +'text-transform:uppercase;margin-bottom:7px">реальные ставки по парам · боевой контур — этап 2</div>'
+    +'<div style="display:flex;flex-direction:column;gap:6px">'
+    +S4PAIRS.map(p=>`<label class="toggle" style="font-size:12px"><input type="checkbox" data-rp="${p.id}"`
+      +`${sel.includes(p.id)?' checked':''}> ${p.label} · ${p.ord}/${p.pref}</label>`).join('')
+    +'</div>';
+  box.querySelectorAll('input[data-rp]').forEach(cb=>{
+    cb.onchange=()=>s4SetRealPair(cb.dataset.rp, cb.checked);
+  });
 }
 function s4MarkPair(){
   S4PAIRS.forEach(p=>{ const b=$('s4-pair-'+p.id); if(b) b.classList.toggle('on', S4PAIR===p.id); });
@@ -1010,9 +1030,8 @@ function s4Init(){
   s4cv.addEventListener('mouseleave',()=>{ const t=$('s4tip'); if(t)t.style.display='none'; });
 
   $('s4-btn-live').onclick=async()=>{ try{ await s4api('/control/start','POST'); s4Poll(); }catch(e){alert(e.message);} };
-  $('s4-btn-player').onclick=async()=>{ await s4api('/player/start','POST'); s4Poll(); };
-  $('s4-btn-pause').onclick=async()=>{ const s=_s4snap||{}; if(s.live) await s4api('/control/stop','POST'); else if(s.player) await s4api('/player/stop','POST'); else await s4api(s.data_source==='live'?'/control/start':'/player/start','POST'); s4Poll(); };
-  $('s4-btn-flat').onclick=async()=>{ if(!confirm('Закрыть позицию по рынку (flat-all)?')) return; await s4api('/control/flat-all','POST',{confirm:true}); s4Poll(); };
+  $('s4-btn-pause').onclick=async()=>{ const s=_s4snap||{}; if(s.live) await s4api('/control/stop','POST'); else await s4api('/control/start','POST'); s4Poll(); };
+  $('s4-btn-flat').onclick=async()=>{ if(!confirm('Закрыть позицию по текущей паре по рынку?')) return; await s4api('/control/flat-all','POST',{confirm:true}); s4Poll(); };
   $('s4-btn-reset').onclick=async()=>{ if(!confirm('Сбросить сессию st4 (журнал/баланс)?')) return; await s4api('/reset','POST'); s4Poll(); };
   $('s4-auto').onchange=async(e)=>{ await s4api('/auto?on='+e.target.checked,'POST'); s4Poll(); };
   $('s4-trading').onchange=async(e)=>{ await s4api('/control/trading?on='+e.target.checked,'POST'); s4Poll(); };
@@ -1104,7 +1123,7 @@ function s4Init(){
   s4BuildPairSwitch().then(()=>{
     s4Poll();
     s4LoadPairData();
-    s4api('/state').then(s=>{ if(!s.session_started){ s4api('/player/start','POST').then(s4Poll); } });
+    // боевая подготовка: НЕ автозапускаем демо/синтетику. live запускается вручную кнопкой.
   });
 }
 
