@@ -484,11 +484,12 @@ function s4ApplyTheme(t){
   try{ localStorage.setItem('s4theme', t); }catch(e){}
   const b=$('s4-theme'); if(b) b.textContent = (t==='light' ? '☾' : '☀');
 }
+// первичное применение темы — БЕЗ s4Redraw (граф ещё не создан, _s4lastHist в TDZ)
 (function(){ let t='dark'; try{ t=localStorage.getItem('s4theme')||'dark'; }catch(e){} s4ApplyTheme(t); })();
 function s4ToggleTheme(){
   const cur=document.documentElement.getAttribute('data-theme')==='light'?'light':'dark';
   s4ApplyTheme(cur==='light'?'dark':'light');
-  if(typeof s4Redraw==='function') s4Redraw();   // canvas читает цвета из CSS — перерисовать
+  s4Redraw();   // вызывается по клику (после загрузки) — _s4lastHist уже инициализирована
 }
 
 /* ---- выбор шрифта интерфейса (--disp = текст, --mono = цифры/моно) ---- */
@@ -498,15 +499,16 @@ const S4_FONTS={
   manrope:{disp:"'Manrope',system-ui,sans-serif",         mono:"'Roboto Mono',ui-monospace,monospace"},
   system: {disp:"system-ui,-apple-system,Segoe UI,Roboto,sans-serif", mono:"ui-monospace,SFMono-Regular,Menlo,monospace"},
 };
-function s4ApplyFont(key){
+function s4ApplyFont(key, redraw){
   const f=S4_FONTS[key]||S4_FONTS.sora;
   document.documentElement.style.setProperty('--disp', f.disp);
   document.documentElement.style.setProperty('--mono', f.mono);
   try{ localStorage.setItem('s4font', key); }catch(e){}
   const sel=$('s4-font'); if(sel) sel.value=key;
-  if(typeof s4Redraw==='function') s4Redraw();   // canvas использует шрифт в подписях
+  if(redraw) s4Redraw();   // перерисовать canvas только по клику (не при загрузке: _s4lastHist в TDZ)
 }
-(function(){ let k='sora'; try{ k=localStorage.getItem('s4font')||'sora'; }catch(e){} s4ApplyFont(k); })();
+// первичное применение шрифта — redraw=false (граф ещё не создан)
+(function(){ let k='sora'; try{ k=localStorage.getItem('s4font')||'sora'; }catch(e){} s4ApplyFont(k, false); })();
 const fmt=(n,d=2)=>{ if(n==null||Number.isNaN(n)) return '—'; const v=(+n).toFixed(d); return v; };
 const getCSS=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 function _lighten(hex,t){ // осветлить hex на долю t (0..1) к белому
@@ -1002,7 +1004,7 @@ function s4Init(){
   const s4th=$('s4-theme');
   if(s4th) s4th.onclick=s4ToggleTheme;
   const s4fn=$('s4-font');
-  if(s4fn) s4fn.onchange=()=>s4ApplyFont(s4fn.value);
+  if(s4fn) s4fn.onchange=()=>s4ApplyFont(s4fn.value, true);
   const s4lo=$('s4-logout');
   if(s4lo) s4lo.onclick=async()=>{
     try{ await fetch('/logout',{method:'POST',credentials:'same-origin'}); }catch(_){}
