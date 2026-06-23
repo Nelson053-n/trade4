@@ -532,32 +532,102 @@ def st4_restore_position(payload: dict, pair: str = "sber"):
 
 @app.post("/st4/connector")
 def st4_connector(payload: dict, pair: str = "sber"):
-    """Установить режим исполнителя (paper|tbank_sandbox) и (опц.) API-токен T-Bank.
+    """Установить режим исполнителя (paper|tbank_sandbox|tbank_real) и (опц.) API-токен T-Bank.
 
     Токен сохраняется в файл .tbank_token (0600, в .gitignore) и в env процесса. В ответе
-    НЕ возвращается. Sandbox активен только в live; при недоступности reset откатывает в paper."""
+    НЕ возвращается. Sandbox/real активны только в live; при недоступности reset откатывает в paper.
+
+    ⚠️ tbank_real (боевой) требует ОБЯЗАТЕЛЬНЫЙ account_id, проверяемый против реальных счетов.
+    Установка режима ордера НЕ шлёт — нужен ещё взвод через /st4/control/arm-real."""
     from .st4 import tbank_sandbox as _sb
 
     ST4 = _st4(pair)
     mode = payload.get("mode")
-    if mode not in ("paper", "tbank_sandbox"):
-        raise HTTPException(400, "mode: paper | tbank_sandbox")
+    if mode not in ("paper", "tbank_sandbox", "tbank_real"):
+        raise HTTPException(400, "mode: paper | tbank_sandbox | tbank_real")
     token = (payload.get("token") or "").strip()
     if token:
         _sb.save_token(token)
-    if mode == "tbank_sandbox" and not _sb.has_token():
-        raise HTTPException(400, "для sandbox нужен токен (вставьте в поле API-токен)")
+    if mode in ("tbank_sandbox", "tbank_real") and not _sb.has_token():
+        raise HTTPException(400, "нужен токен T-Bank (вставьте в поле API-токен)")
+    if mode == "tbank_real":
+        from .st4 import tbank_live as _live
+        account_id = str(payload.get("account_id") or ST4.cfg.connector.account_id or "").strip()
+        if not account_id:
+            raise HTTPException(400, "режим tbank_real требует явный account_id реального счёта")
+        try:
+            if not _live.account_is_open(account_id):
+                raise HTTPException(400, f"счёт {account_id} не найден или закрыт")
+        except HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(502, f"не удалось проверить счёт через T-Bank: {e}")
+        ST4.cfg.connector.account_id = account_id
     if "payin_rub" in payload:
         try:
             ST4.cfg.connector.payin_rub = int(payload["payin_rub"])
         except (TypeError, ValueError):
             raise HTTPException(400, "payin_rub: не число")
     ST4.cfg.connector.mode = mode
+    ST4.state["real_trading_armed"] = False    # смена режима снимает взвод (safe)
     ST4.state["live"] = ST4.state["player"] = False
     ST4.reset_engine(real=(ST4.state["data_source"] == "live"))
     return {"ok": True, "connector_mode": ST4.cfg.connector.mode,
             "token_set": _sb.has_token(),
             "fell_back": ST4.cfg.connector.mode != mode}
+
+
+@app.post("/st4/control/arm-real")
+def st4_arm_real(payload: dict, pair: str = "sber"):
+    """⚠️ Двойной включатель реальной торговли. armed=true ВЗВОДИТ отправку боевых ордеров
+    (нужен confirm=true). Действует только в режиме tbank_real. Сбрасывается при рестарте.
+    Без взвода режим tbank_real ордера НЕ шлёт (только читает баланс/ведёт paper-логику)."""
+    ST4 = _st4(pair)
+    armed = bool(payload.get("armed"))
+    if armed:
+        if not payload.get("confirm"):
+            raise HTTPException(400, "взвод реальной торговли требует confirm=true")
+        if ST4.cfg.connector.mode != "tbank_real":
+            raise HTTPException(400, "взвод доступен только в режиме tbank_real")
+    ST4.state["real_trading_armed"] = armed
+    ST4.log_event("warn" if armed else "info",
+                  "🔴 РЕАЛЬНАЯ ТОРГОВЛЯ ВЗВЕДЕНА" if armed else "реальная торговля снята со взвода")
+    ST4.save_session()
+    return {"ok": True, "real_trading_armed": armed}
+
+
+@app.get("/st4/broker-balance")
+async def st4_broker_balance(pair: str = "sber"):
+    """Реальный баланс/позиции с боевого счёта (read-only, OperationsService.GetPortfolio).
+    Доступен при наличии токена и заданного account_id — независимо от текущего режима."""
+    from .st4 import tbank_live as _live
+    ST4 = _st4(pair)
+    account_id = ST4.cfg.connector.account_id
+    if not account_id:
+        return {"ok": False, "error": "account_id не задан (переключите в tbank_real с реальным счётом)"}
+    try:
+        pf = await asyncio.to_thread(_live.portfolio, account_id)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)[:200]}
+    poss = []
+    for p in pf.get("positions", []):
+        poss.append({
+            "type": p.get("instrumentType"),
+            "uid": p.get("instrumentUid", ""),
+            "qty": _live._q_to_float(p.get("quantity")),
+            "avg": _live._q_to_float(p.get("averagePositionPrice")),
+        })
+    return {
+        "ok": True,
+        "account_id": account_id,
+        "total_rub": _live._q_to_float(pf.get("totalAmountPortfolio")),
+        "futures_rub": _live._q_to_float(pf.get("totalAmountFutures")),
+        "money_rub": _live._q_to_float(pf.get("totalAmountCurrencies")),
+        "expected_yield": _live._q_to_float(pf.get("expectedYield")),
+        "positions": poss,
+        "armed": bool(ST4.state.get("real_trading_armed")),
+        "mode": ST4.cfg.connector.mode,
+    }
 
 
 @app.post("/st4/connector/forget-token")

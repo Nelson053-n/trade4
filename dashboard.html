@@ -408,15 +408,27 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
       <h2>коннектор исполнения <span class="em" id="s4-conn-badge">—</span></h2>
       <div class="params" style="grid-template-columns:1fr">
         <div class="fld"><label>режим</label>
-          <select id="s4-conn-mode"><option value="tbank_sandbox">T-Bank песочница (виртуальный счёт)</option></select>
+          <select id="s4-conn-mode">
+            <option value="tbank_sandbox">T-Bank песочница (виртуальный счёт)</option>
+            <option value="tbank_real">🔴 T-Bank БОЕВОЙ (РЕАЛЬНЫЕ ДЕНЬГИ)</option>
+          </select>
         </div>
-        <div class="fld"><label>токен T-Bank</label><input id="s4-conn-token" type="password" placeholder="t.xxx (для sandbox)"></div>
+        <div class="fld" id="s4-conn-acc-fld" style="display:none"><label>реальный счёт (account_id)</label>
+          <input id="s4-conn-account" placeholder="напр. 2019683129"></div>
+        <div class="fld"><label>токен T-Bank</label><input id="s4-conn-token" type="password" placeholder="t.xxx"></div>
       </div>
       <div class="ctrls">
         <button class="btn primary" id="s4-btn-conn">применить</button>
         <button class="btn danger" id="s4-btn-forget">забыть токен</button>
       </div>
       <div class="msg" id="s4-conn-msg"></div>
+      <!-- реальный баланс + взвод боевой торговли (виден только в режиме tbank_real) -->
+      <div id="s4-real-box" style="display:none;margin-top:12px;border-top:1px solid var(--line);padding-top:12px">
+        <div id="s4-real-bal" class="mono" style="font-size:12px;color:var(--ink-dim);line-height:1.7">реальный баланс: —</div>
+        <label class="toggle" style="margin-top:8px;color:var(--loss);font-weight:600">
+          <input type="checkbox" id="s4-real-arm"> 🔴 реальная торговля ВЗВЕДЕНА (боевые ордера)</label>
+        <div class="msg" id="s4-real-msg" style="font-size:11px"></div>
+      </div>
     </div>
 
     <div class="card">
@@ -828,13 +840,22 @@ function s4Render(s){
   $('s4-src').textContent = s.data_provider || (isLive?'MOEX ISS':'синтетика');
   $('s4-src').style.color = (s.data_provider==='T-Bank')?'var(--signal)':(isLive?'var(--ink)':'var(--ink-dim)');
   const sandbox = s.connector_mode==='tbank_sandbox';
+  const real = s.connector_mode==='tbank_real';
   let modeTxt='paper', modeCol='var(--ink)';
   if(sandbox){
     if(s.sandbox_active){ modeTxt='T-Bank ✓'; modeCol='var(--signal)'; }
     else if(s.sandbox_error){ modeTxt='T-Bank — ошибка'; modeCol='var(--loss)'; }
     else { modeTxt='T-Bank — нужен live'; modeCol='var(--warn)'; }
+  } else if(real){
+    if(s.real_trading_armed){ modeTxt='🔴 БОЕВОЙ · ВЗВЕДЕН'; modeCol='var(--loss)'; }
+    else { modeTxt='БОЕВОЙ · не взведён'; modeCol='var(--warn)'; }
   }
   $('s4-mode').textContent=modeTxt; $('s4-mode').style.color=modeCol;
+  // боевой блок: баланс + взвод (виден только в tbank_real)
+  const rbox=$('s4-real-box'); if(rbox) rbox.style.display = real ? 'block' : 'none';
+  if(real) s4LoadBrokerBalance();
+  const accFld=$('s4-conn-acc-fld'); if(accFld) accFld.style.display = (document.activeElement!==$('s4-conn-mode') ? ($('s4-conn-mode').value==='tbank_real'?'block':'none') : accFld.style.display);
+  const armCb=$('s4-real-arm'); if(armCb && document.activeElement!==armCb) armCb.checked = !!s.real_trading_armed;
 
   const flowing = s.live || s.player;
   const inPos = !!s.position;
@@ -893,10 +914,11 @@ function s4Render(s){
   const cm=$('s4-conn-mode'); if(cm && document.activeElement!==cm) cm.value=s.connector_mode||'paper';
   const cbg=$('s4-conn-badge');
   if(cbg){
-    cbg.textContent = (sandbox?'T-Bank песочница':'paper')
+    cbg.textContent = (real?'🔴 БОЕВОЙ':(sandbox?'T-Bank песочница':'paper'))
       + (sandbox ? (s.sandbox_active?' · активна':' · только в live') : '')
+      + (real ? (s.real_trading_armed?' · ВЗВЕДЕН':' · не взведён') : '')
       + (s.token_set?' · токен ✓':'');
-    cbg.style.color = (sandbox && s.sandbox_active) ? 'var(--signal)' : 'var(--ink-faint)';
+    cbg.style.color = real ? 'var(--loss)' : ((sandbox && s.sandbox_active) ? 'var(--signal)' : 'var(--ink-faint)');
   }
   const ctok=$('s4-conn-token');
   if(ctok && document.activeElement!==ctok)
@@ -909,6 +931,18 @@ function s4Render(s){
 }
 
 async function s4Poll(){ try{ s4Render(await s4api('/state')); }catch(e){} }
+let _s4balTs=0;
+async function s4LoadBrokerBalance(){
+  if(Date.now()-_s4balTs < 10000) return;   // троттл: реальный баланс не чаще раза в 10с
+  _s4balTs=Date.now();
+  const el=$('s4-real-bal'); if(!el) return;
+  try{
+    const d=await s4api('/broker-balance');
+    if(!d.ok){ el.textContent='реальный баланс: '+(d.error||'недоступен'); return; }
+    const poss=(d.positions||[]).filter(p=>p.qty).map(p=>`${p.type} ${p.qty}@${Math.round(p.avg)}`).join(', ')||'нет позиций';
+    el.innerHTML=`счёт <b>${d.account_id}</b> · итого <b>${s4money(d.total_rub)}</b> · деньги ${s4money(d.money_rub)}<br>позиции: ${poss}`;
+  }catch(e){ el.textContent='реальный баланс: ошибка'; }
+}
 
 /* ---- переключатель пар ---- */
 let S4PAIRS=[];
@@ -1037,18 +1071,32 @@ function s4Init(){
   $('s4-trading').onchange=async(e)=>{ await s4api('/control/trading?on='+e.target.checked,'POST'); s4Poll(); };
   $('s4-btn-approve').onclick=async()=>{ await s4api('/approve','POST'); s4Poll(); };
   $('s4-btn-reject').onclick=async()=>{ await s4api('/reject','POST'); s4Poll(); };
+  $('s4-conn-mode').onchange=()=>{
+    $('s4-conn-acc-fld').style.display = $('s4-conn-mode').value==='tbank_real' ? 'block' : 'none';
+  };
   $('s4-btn-conn').onclick=async()=>{
     const mode=$('s4-conn-mode').value, token=$('s4-conn-token').value.trim();
+    if(mode==='tbank_real' && !confirm('БОЕВОЙ режим (РЕАЛЬНЫЕ ДЕНЬГИ). Ордера всё равно не пойдут без отдельного взвода. Продолжить?')) return;
     $('s4-conn-msg').textContent='применяю…';
     try{
       const body={mode}; if(token) body.token=token;
+      if(mode==='tbank_real'){ const acc=$('s4-conn-account').value.trim(); if(acc) body.account_id=acc; }
       const d=await s4api('/connector','POST',body);
       $('s4-conn-token').value='';
       $('s4-conn-msg').textContent = d.fell_back
-        ? 'sandbox недоступен — исполнение paper'
+        ? 'брокер недоступен — исполнение paper'
         : ('режим: '+d.connector_mode+(d.token_set?' · токен установлен ✓':''));
       s4Poll();
     }catch(e){ $('s4-conn-msg').textContent='ошибка: '+e.message; }
+  };
+  $('s4-real-arm').onchange=async()=>{
+    const armed=$('s4-real-arm').checked;
+    if(armed && !confirm('🔴 ВЗВЕСТИ реальную торговлю? После этого боевые ордера будут отправляться на реальный счёт.')){ $('s4-real-arm').checked=false; return; }
+    try{
+      await s4api('/control/arm-real','POST',{armed, confirm:true});
+      $('s4-real-msg').textContent = armed ? '🔴 реальная торговля ВЗВЕДЕНА' : 'снято со взвода';
+      s4Poll();
+    }catch(e){ $('s4-real-msg').textContent='ошибка: '+e.message; $('s4-real-arm').checked=!armed; }
   };
   $('s4-btn-forget').onclick=async()=>{
     if(!confirm('Удалить сохранённый токен T-Bank с диска?')) return;

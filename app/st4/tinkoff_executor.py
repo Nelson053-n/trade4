@@ -10,12 +10,14 @@ Engine не знает про figi/uid/счёт — вся реальная ид
 """
 from __future__ import annotations
 
+import time
 import uuid
 
-from . import tbank_sandbox
+from . import tbank_live, tbank_sandbox
 from .config import ConnectorConfig, ExecutionConfig
 from .execution import Fill, PairCloseResult, PairFillResult, UnwindError
 from .models import InstrumentSpec, Position, Role
+from .tbank_sandbox import TBankError
 
 _FILL_OK = "EXECUTION_REPORT_STATUS_FILL"
 
@@ -219,3 +221,64 @@ class TinkoffSandboxExecutor:
             f = self._retry_leg(role, side, abs(bal), 0.0)
             ok = ok and (f is not None)
         return ok
+
+
+class TinkoffLiveExecutor(TinkoffSandboxExecutor):
+    """⚠️ БОЕВОЙ исполнитель пары — реальные деньги через OrdersService.
+
+    Зеркало sandbox-исполнителя (вся логика атомарности/unwind/reconciliation наследуется),
+    но: (1) ходит через tbank_live (боевые сервисы), (2) НЕ открывает и НЕ пополняет счёт —
+    использует существующий реальный account_id, проверяя что он открыт, (3) идемпотентный
+    orderId (повтор при сетевом обрыве не задвоит ордер), (4) ВХОДЫ (execute_pair) отправляются
+    только если взведён флаг реальной торговли (armed_cb) — двойной включатель сверх движка.
+    Закрытие (close_pair/unwind/flat_broker) гейтом НЕ ограничено — снижение риска разрешено всегда.
+    """
+
+    def __init__(self, exec_cfg: ExecutionConfig, conn_cfg: ConnectorConfig,
+                 spec_ord: InstrumentSpec, spec_pref: InstrumentSpec, sb=None,
+                 armed_cb=None) -> None:
+        # armed_cb() -> bool — взведена ли реальная торговля (state['real_trading_armed']).
+        # Если None — считаем НЕ взведённым (safe-by-default): входы не пойдут.
+        self._armed_cb = armed_cb or (lambda: False)
+        # sb по умолчанию — боевой модуль tbank_live (а не sandbox).
+        super().__init__(exec_cfg, conn_cfg, spec_ord, spec_pref,
+                         sb=sb if sb is not None else tbank_live)
+
+    def _account(self) -> str:
+        """Реальный счёт: ТОЛЬКО проверка существующего account_id (НЕ открываем новый)."""
+        if not self.conn.account_id:
+            raise TBankError("боевой режим: account_id не задан (нужен явный реальный счёт)")
+        if not self.sb.account_is_open(self.conn.account_id):
+            raise TBankError(f"боевой режим: счёт {self.conn.account_id} не найден или закрыт")
+        return self.conn.account_id
+
+    def _ensure_started(self) -> None:
+        """Резолв инструментов + проверка реального счёта. БЕЗ pay_in (реальный счёт не пополняем)."""
+        self._resolve_instruments()
+        self._account_id = self._account()
+        self.conn.account_id = self._account_id
+
+    def _post_leg(self, role: Role, side: str, lots: int, ref: float) -> Fill | None:
+        """Одна БОЕВАЯ нога с идемпотентным orderId (повтор не задвоит ордер)."""
+        it = self._inst[role]
+        spec = self.spec[role]
+        direction = "ORDER_DIRECTION_BUY" if side == "buy" else "ORDER_DIRECTION_SELL"
+        uid = self.sb._uid(it)
+        order_id = self.sb.make_order_id(self._account_id, uid, lots, direction, time.time())
+        resp = self.sb.post_order(self._account_id, uid, lots, direction,
+                                  order_id, order_type="ORDER_TYPE_MARKET")
+        status = resp.get("executionReportStatus")
+        executed = int(resp.get("lotsExecuted") or lots) or lots
+        avg = self.sb._q_to_float(resp.get("executedOrderPrice")) / executed
+        if status != _FILL_OK or avg <= 0:
+            return None
+        slip = (avg - ref) / spec.tick_size * (1 if side == "buy" else -1)
+        return Fill(code=spec.code, role=spec.role, side=side, lots=executed,
+                    avg_price=avg, reference_price=ref, slippage_ticks=slip)
+
+    def execute_pair(self, *args, **kwargs) -> PairFillResult:
+        """Боевой ВХОД — только при взведённом флаге реальной торговли (двойной включатель)."""
+        if not self._armed_cb():
+            return PairFillResult(ok=False, aborted=True,
+                                  reason="реальная торговля не взведена — боевой вход заблокирован")
+        return super().execute_pair(*args, **kwargs)

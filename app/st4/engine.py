@@ -44,7 +44,10 @@ class StepResult:
 
 
 class TradingEngine:
-    def __init__(self, cfg: St4Config, spec_ord: InstrumentSpec, spec_pref: InstrumentSpec) -> None:
+    def __init__(self, cfg: St4Config, spec_ord: InstrumentSpec, spec_pref: InstrumentSpec,
+                 armed_cb=None) -> None:
+        # armed_cb() -> bool — взведена ли реальная торговля (только для tbank_real). Передаёт
+        # service из state['real_trading_armed']. None → реальные входы заблокированы (safe).
         self.cfg = cfg
         self.spec_ord = spec_ord
         self.spec_pref = spec_pref
@@ -60,6 +63,12 @@ class TradingEngine:
             from .tinkoff_executor import TinkoffSandboxExecutor
             self.executor = TinkoffSandboxExecutor(cfg.execution, cfg.connector,
                                                    spec_ord, spec_pref)
+        elif cfg.connector.mode == "tbank_real":
+            # ⚠️ БОЕВОЙ контур. Входы отправляются только при взведённом armed_cb (двойной
+            # включатель) — сверх trading_enabled, проверяемого движком перед входом.
+            from .tinkoff_executor import TinkoffLiveExecutor
+            self.executor = TinkoffLiveExecutor(cfg.execution, cfg.connector,
+                                                spec_ord, spec_pref, armed_cb=armed_cb)
         else:
             self.executor = OrderExecutor(cfg.execution, cfg.paper, spec_ord, spec_pref)
         self.risk = RiskManager(cfg.risk, cfg.session)

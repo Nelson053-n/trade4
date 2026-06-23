@@ -116,15 +116,19 @@ class Paper(BaseModel):
 
 
 class ConnectorConfig(BaseModel):
-    """Выбор исполнителя ордеров (§14.3). Только paper или sandbox — боевой контур запрещён.
+    """Выбор исполнителя ордеров (§14.3): paper | tbank_sandbox | tbank_real.
 
     ВНИМАНИЕ: токена здесь НЕТ — секрет не сериализуется в session_state_4.json. Токен T-Bank
     живёт только в окружении процесса (env TBANK_TOKEN). account_id/payin_rub несекретны и
-    переживают рестарт. Sandbox-режим активен только в live (на синтетике трактуется как paper).
+    переживают рестарт. Sandbox/real активны только в live (на синтетике трактуются как paper).
+
+    tbank_real — БОЕВОЙ контур (реальные деньги). Сама по себе установка mode=tbank_real ордера
+    НЕ отправляет: нужен ещё явный взвод (state['real_trading_armed'], сбрасывается при рестарте)
+    И trading_enabled. account_id для real ОБЯЗАТЕЛЕН и проверяется против реальных счетов.
     """
-    mode: Literal["paper", "tbank_sandbox"] = "paper"
-    account_id: str = ""                  # переиспользуемый sandbox-счёт; пусто → открыть новый
-    payin_rub: int = 200_000              # пополнение sandbox-счёта под ГО при старте
+    mode: Literal["paper", "tbank_sandbox", "tbank_real"] = "paper"
+    account_id: str = ""                  # переиспользуемый счёт; для real — обязателен и проверяется
+    payin_rub: int = 200_000              # пополнение sandbox-счёта под ГО при старте (real НЕ пополняем)
     account_name: str = "st4-spread-sandbox"
 
 

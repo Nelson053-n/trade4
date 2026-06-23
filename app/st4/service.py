@@ -233,11 +233,28 @@ class St4Session:
         # активен ли реальный исполнитель сейчас. Sandbox активируется только в live (real=True);
         # на синтетике движок строим как paper (рыночные ордера по выдуманным барам бессмысленны).
         want_sandbox = self.cfg.connector.mode == "tbank_sandbox"
+        want_real = self.cfg.connector.mode == "tbank_real"
+        want_broker = want_sandbox or want_real    # реальный исполнитель (sandbox ИЛИ боевой)
         self.state["sandbox_active"] = False
         self.state["sandbox_error"] = None
-        if want_sandbox and real:
+        # боевой контур: входы шлются только при взведённом флаге (двойной включатель). Флаг
+        # живёт в state, сбрасывается в False при рестарте (см. load_session) — safe-by-default.
+        if not want_real:
+            self.state["real_trading_armed"] = False
+        # armed_cb для боевого executor: входы разрешены только если (1) взведена реальная
+        # торговля И (2) прошёл cooldown после старта (защита от автоордеров на восстановленной
+        # позиции/всплеске сразу после live). Закрытие/unwind гейтом НЕ ограничены.
+        _COOLDOWN_S = 600
+        def _real_armed() -> bool:
+            if not self.state.get("real_trading_armed"):
+                return False
+            started = self.state.get("session_started") or 0
+            return (time.time() - started) >= _COOLDOWN_S
+        armed_cb = _real_armed if want_real else None
+        if want_broker and real:
             try:
-                self.engine = TradingEngine(self.cfg, self.spec_ord, self.spec_pref)
+                self.engine = TradingEngine(self.cfg, self.spec_ord, self.spec_pref,
+                                            armed_cb=armed_cb)
                 # восстановить позицию из сессии ДО reconciliation: если на счёте та же
                 # позиция, что вёл движок до рестарта — она ЛЕГИТИМНА, не закрываем.
                 self._restore_engine_position()
@@ -271,13 +288,17 @@ class St4Session:
                                 self.log_event("warn", "reconciliation: не удалось закрыть все ноги")
                 except Exception as e:  # noqa: BLE001  сверка не должна ронять старт
                     self.log_event("warn", f"reconciliation пропущена: {e}")
-            except Exception as e:  # noqa: BLE001  sandbox недоступен → откат в paper-движок
+            except Exception as e:  # noqa: BLE001  брокер недоступен → откат в paper-движок
                 # частый случай — HTTP 401 (токен невалиден/отозван): сообщаем явно
                 msg = str(e)
                 if "401" in msg:
                     msg = "токен T-Bank невалиден или отозван (HTTP 401) — выпустите новый"
                 self.state["sandbox_error"] = msg
-                self.log_event("warn", f"sandbox не активирован: {msg} → исполнение paper")
+                # боевой контур при сбое НЕ должен молча торговать paper'ом реальными намерениями —
+                # просто логируем и строим paper-движок (ордеров не будет: armed сбрасывается ниже).
+                self.state["real_trading_armed"] = False
+                self.log_event("warn", f"{'боевой' if want_real else 'sandbox'} не активирован: "
+                               f"{msg} → исполнение paper")
                 paper_cfg = self.cfg.model_copy(deep=True)
                 paper_cfg.connector.mode = "paper"
                 self.engine = TradingEngine(paper_cfg, self.spec_ord, self.spec_pref)
@@ -285,10 +306,11 @@ class St4Session:
         else:
             # синтетика или paper-намерение: строим paper-движок (не трогая cfg.connector.mode)
             paper_cfg = self.cfg
-            if want_sandbox:
+            if want_broker:
                 paper_cfg = self.cfg.model_copy(deep=True)
                 paper_cfg.connector.mode = "paper"
-                self.state["last_event"] = "sandbox активен только в live — на синтетике paper"
+                self.state["last_event"] = (f"{'боевой' if want_real else 'sandbox'} активен "
+                                            "только в live — на синтетике paper")
             self.engine = TradingEngine(paper_cfg, self.spec_ord, self.spec_pref)
         self.history = []
         self.player_df = None
@@ -476,10 +498,13 @@ class St4Session:
             # делает сетевые вызовы (счёт + pay_in). Sandbox активируется только через
             # reset_engine(real=True) при старте live.
             cfg = self.cfg
-            if cfg.connector.mode == "tbank_sandbox":
+            if cfg.connector.mode in ("tbank_sandbox", "tbank_real"):
                 cfg = self.cfg.model_copy(deep=True)
                 cfg.connector.mode = "paper"
             self.engine = TradingEngine(cfg, self.spec_ord, self.spec_pref)
+            # БЕЗОПАСНОСТЬ: рестарт ВСЕГДА снимает взвод реальной торговли — после
+            # перезапуска сервиса оператор должен взвести её заново осознанно.
+            self.state["real_trading_armed"] = False
             self.engine.balance_rub = data.get("balance_rub", self.engine.balance_rub)
             self.engine.risk.day_pnl_rub = data.get("day_pnl_rub", 0.0)
             self.engine.risk._day = data.get("day_key", "")
@@ -750,6 +775,7 @@ class St4Session:
             "connector_mode": self.cfg.connector.mode,
             "sandbox_active": self.state.get("sandbox_active", False),
             "sandbox_error": self.state.get("sandbox_error"),   # почему sandbox не активен
+            "real_trading_armed": bool(self.state.get("real_trading_armed")),  # боевой взвод
             "token_set": _has_token(),
             "connector_account": self.cfg.connector.account_id or None,
             "fsm_state": eng.state.value,

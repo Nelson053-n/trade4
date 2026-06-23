@@ -823,3 +823,100 @@ def test_adopt_position_from_account_restores_on_restart():
     # непарная (одна нога) — не восстанавливаем (вернёт False → дальше flat_broker)
     s.engine.position = None
     assert not s._adopt_position_from_account({Role.ORDINARY: -10, Role.PREFERRED: 0})
+
+
+# ============================ БОЕВОЙ контур tbank_real ============================
+
+class FakeLive(FakeSB):
+    """Мок боевого модуля tbank_live: те же fill-ответы, но боевые методы счёта."""
+
+    def __init__(self, account_id="acc-real", **kw):
+        super().__init__(**kw)
+        self._real_account = account_id
+
+    def account_is_open(self, account_id):
+        return account_id == self._real_account
+
+    def make_order_id(self, account_id, uid, lots, direction, ts):
+        # детерминированный (как боевой): одинаковые аргументы → одинаковый id
+        import hashlib
+        raw = f"{account_id}|{uid}|{int(lots)}|{direction}|{int(ts)}"
+        return hashlib.sha256(raw.encode()).hexdigest()[:32]
+
+    def post_order(self, acc, uid, lots, direction, order_id,
+                   order_type="ORDER_TYPE_MARKET", price=None):
+        # боевой orderId НЕ UUID (32-символьный hex) — НЕ валидируем как UUID
+        self.orders.append((uid, direction, order_id))
+        n = len(self.orders)
+        reject = (self.fail_from is not None and n >= self.fail_from) or (n in self.fail_only)
+        if reject:
+            return {"executionReportStatus": "EXECUTION_REPORT_STATUS_REJECTED",
+                    "executedOrderPrice": None}
+        p = 32100 if "SP" in uid else 32000
+        return {"executionReportStatus": "EXECUTION_REPORT_STATUS_FILL",
+                "lotsExecuted": lots,
+                "executedOrderPrice": {"units": str(p * lots), "nano": 0}}
+
+
+def _live_exec(armed=True, account_id="acc-real", conn_account="acc-real"):
+    from app.st4.tinkoff_executor import TinkoffLiveExecutor
+    cfg = St4Config()
+    cfg.connector.account_id = conn_account
+    so = feed.synthetic_spec(Role.ORDINARY); so.code = "SRM6"
+    sp = feed.synthetic_spec(Role.PREFERRED); sp.code = "SPM6"
+    sb = FakeLive(account_id=account_id)
+    ex = TinkoffLiveExecutor(cfg.execution, cfg.connector, so, sp, sb=sb,
+                             armed_cb=lambda: armed)
+    return ex, sb
+
+
+def test_live_executor_no_account_open():
+    """Боевой executor НЕ открывает и НЕ пополняет счёт (в отличие от sandbox)."""
+    ex, sb = _live_exec()
+    assert sb.opened == []        # счёт не открывали
+    assert sb.payins == []        # не пополняли
+    assert ex._account_id == "acc-real"
+
+
+def test_live_executor_rejects_unknown_account():
+    """account_id, которого нет среди открытых реальных счетов → ошибка (не торгуем)."""
+    from app.st4.tbank_sandbox import TBankError
+    with pytest.raises(TBankError):
+        _live_exec(account_id="acc-real", conn_account="acc-WRONG")
+
+
+def test_live_executor_blocks_entry_when_not_armed():
+    """Не взведено → execute_pair НЕ шлёт ордера (двойной включатель)."""
+    ex, sb = _live_exec(armed=False)
+    r = ex.execute_pair(buy_ord=True, buy_pref=False, lots=1,
+                        book_ord=(32000, 32000), book_pref=(32100, 32100),
+                        ref_ord=32000, ref_pref=32100)
+    assert not r.ok and r.aborted
+    assert sb.orders == []        # ни одного боевого ордера
+
+
+def test_live_executor_armed_sends_orders():
+    """Взведено → обе ноги исполняются реальными ордерами."""
+    ex, sb = _live_exec(armed=True)
+    r = ex.execute_pair(buy_ord=True, buy_pref=False, lots=1,
+                        book_ord=(32000, 32000), book_pref=(32100, 32100),
+                        ref_ord=32000, ref_pref=32100)
+    assert r.ok
+    assert len(sb.orders) == 2    # две ноги
+    # orderId детерминированный 32-символьный hex (идемпотентность)
+    for _uid, _dir, oid in sb.orders:
+        assert len(oid) == 32 and all(c in "0123456789abcdef" for c in oid)
+
+
+def test_live_executor_close_works_unarmed():
+    """Закрытие (снижение риска) работает даже без взвода."""
+    ex, sb = _live_exec(armed=False)
+    from app.st4.models import LegPosition, Position, BotState
+    pos = Position(
+        state=BotState.SHORT_SPREAD,
+        leg_ord=LegPosition(code="SRM6", role=Role.ORDINARY, side="buy", lots=1, entry_price=32000),
+        leg_pref=LegPosition(code="SPM6", role=Role.PREFERRED, side="sell", lots=1, entry_price=32100),
+        entry_ts=0, entry_spread=100, entry_beta=1.0, sma_at_entry=100, entry_fee_rub=0)
+    res = ex.close_pair(pos, 32000, 32100)
+    assert res.exit_ord > 0 and res.exit_pref > 0
+    assert len(sb.orders) == 2    # закрытие прошло, несмотря на не-взведённость
