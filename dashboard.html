@@ -149,10 +149,10 @@ a{color:var(--accent-2);text-decoration:none}
 .legend i{display:inline-block;width:13px;height:0;border-top-width:2px;border-top-style:solid;vertical-align:middle;margin-right:6px}
 
 /* readouts + gauge */
-.readouts{display:grid;grid-template-columns:repeat(4,1fr);gap:11px;margin-top:14px}
-.ro{background:var(--panel-hi);border:1px solid var(--line-soft);border-radius:var(--r-sm);padding:10px 12px}
-.ro label{display:block;font-family:var(--mono);font-size:9px;letter-spacing:1px;color:var(--ink-faint);text-transform:uppercase}
-.ro .v{font-family:var(--mono);font-size:18px;font-weight:600;margin-top:4px}
+.readouts{display:grid;grid-template-columns:repeat(auto-fit,minmax(82px,1fr));gap:9px;margin-top:14px}
+.ro{background:var(--panel-hi);border:1px solid var(--line-soft);border-radius:var(--r-sm);padding:9px 10px;min-width:0}
+.ro label{display:block;font-family:var(--mono);font-size:9px;letter-spacing:1px;color:var(--ink-faint);text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ro .v{font-family:var(--mono);font-size:16px;font-weight:600;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .gauge{margin-top:14px}
 .gauge .scale{position:relative;height:8px;border-radius:6px;
   background:linear-gradient(90deg, rgba(255,93,108,.5), rgba(138,152,172,.18) 50%, rgba(46,230,166,.5));
@@ -236,14 +236,7 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
     <span class="clock" id="s4-msk-clock">--:--:--</span>
     <span class="sess" id="s4-session">●</span>
   </div>
-  <select id="s4-font" title="Шрифт интерфейса" style="margin-left:14px;background:var(--panel-2);border:1px solid var(--line);
-    color:var(--ink-dim);font-family:var(--mono);font-size:11px;border-radius:8px;padding:6px 8px;cursor:pointer">
-    <option value="sora">Sora + Plex</option>
-    <option value="inter">Inter</option>
-    <option value="manrope">Manrope</option>
-    <option value="system">Системный</option>
-  </select>
-  <button id="s4-theme" title="Светлая / тёмная тема" style="margin-left:8px;background:transparent;border:1px solid var(--line);
+  <button id="s4-theme" title="Светлая / тёмная тема" style="margin-left:14px;background:transparent;border:1px solid var(--line);
     color:var(--ink-dim);font-family:var(--mono);font-size:13px;border-radius:8px;padding:6px 10px;cursor:pointer;line-height:1">☀</button>
   <button id="s4-logout" title="Выйти" style="margin-left:8px;background:transparent;border:1px solid var(--line);
     color:var(--ink-dim);font-family:var(--mono);font-size:11px;border-radius:8px;padding:6px 12px;cursor:pointer">выйти</button>
@@ -470,7 +463,18 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
   </div>
 </div>
 
-<div class="foot">trade4 · спред-арбитраж обычка/преф на FORTS · T-Bank sandbox · боевой контур — этап 2</div>
+<div class="foot" style="display:flex;align-items:center;justify-content:center;gap:14px;flex-wrap:wrap">
+  <span>trade4 · спред-арбитраж обычка/преф на FORTS · T-Bank sandbox · боевой контур — этап 2</span>
+  <label style="display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px;color:var(--ink-faint)">шрифт
+    <select id="s4-font" title="Шрифт интерфейса" style="background:var(--panel-2);border:1px solid var(--line);
+      color:var(--ink-dim);font-family:var(--mono);font-size:11px;border-radius:8px;padding:4px 8px;cursor:pointer">
+      <option value="system">Системный</option>
+      <option value="sora">Sora + Plex</option>
+      <option value="inter">Inter</option>
+      <option value="manrope">Manrope</option>
+    </select>
+  </label>
+</div>
 </div>
 
 <script>
@@ -508,7 +512,7 @@ function s4ApplyFont(key, redraw){
   if(redraw) s4Redraw();   // перерисовать canvas только по клику (не при загрузке: _s4lastHist в TDZ)
 }
 // первичное применение шрифта — redraw=false (граф ещё не создан)
-(function(){ let k='sora'; try{ k=localStorage.getItem('s4font')||'sora'; }catch(e){} s4ApplyFont(k, false); })();
+(function(){ let k='system'; try{ k=localStorage.getItem('s4font')||'system'; }catch(e){} s4ApplyFont(k, false); })();
 const fmt=(n,d=2)=>{ if(n==null||Number.isNaN(n)) return '—'; const v=(+n).toFixed(d); return v; };
 const getCSS=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 function _lighten(hex,t){ // осветлить hex на долю t (0..1) к белому
@@ -559,7 +563,10 @@ function s4DrawChart(hist, trades, openPos){
            ax:cs.getPropertyValue('--ink-faint').trim(),grid:cs.getPropertyValue('--line').trim()};
   const ML=52,MB=22,MT=6,MR=8;
   const px0=ML,px1=W-MR,py0=MT,py1=H-MB;
-  const all=series.flatMap(p=>[p.upper,p.lower,p.spread]);
+  // в диапазон оси включаем и фактические спреды сделок — иначе кольцо входа/выхода,
+  // исполненного по цене вне диапазона баров, уедет за край графика
+  const tradeSpreads=(data.trades||[]).flatMap(t=>[t.entry_spread,t.exit_spread]).filter(v=>v!=null);
+  const all=series.flatMap(p=>[p.upper,p.lower,p.spread]).concat(tradeSpreads);
   let lo=Math.min(...all), hi=Math.max(...all); const pad=(hi-lo)*0.12||1; lo-=pad; hi+=pad;
   const x=i=>px0+i/(series.length-1)*(px1-px0), y=v=>py1-(v-lo)/(hi-lo)*(py1-py0);
 
@@ -610,9 +617,12 @@ function s4DrawChart(hist, trades, openPos){
   (data.trades||[]).forEach(t=>{
     if(!inRange(t.entry_ts)) return;
     const col = t.net_pnl_rub>=0 ? win : loss;
-    const i1=idxAt(t.entry_ts), X1=x(i1), Y1=y(series[i1].spread);
+    // Y — по ФАКТИЧЕСКОМУ спреду сделки (entry_spread/exit_spread), а НЕ по спреду бара:
+    // в live сделка исполняется по цене T-Bank, бар строится по close MOEX — они расходятся,
+    // и точка по spread бара «съезжала» с линии (выглядело как вход/выход не на месте).
+    const i1=idxAt(t.entry_ts), X1=x(i1), Y1=y(t.entry_spread!=null?t.entry_spread:series[i1].spread);
     if(inRange(t.exit_ts)){
-      const i2=idxAt(t.exit_ts), X2=x(i2), Y2=y(series[i2].spread);
+      const i2=idxAt(t.exit_ts), X2=x(i2), Y2=y(t.exit_spread!=null?t.exit_spread:series[i2].spread);
       ctx.save(); ctx.globalAlpha=.35; ctx.strokeStyle=col; ctx.lineWidth=1.5;
       ctx.beginPath();ctx.moveTo(X1,Y1);ctx.lineTo(X2,Y2);ctx.stroke(); ctx.restore();
       ring(X2,Y2,col);
@@ -631,8 +641,10 @@ function s4DrawChart(hist, trades, openPos){
   const lastp=series[series.length-1], lx=x(series.length-1), ly=y(lastp.spread);
   ctx.beginPath();ctx.arc(lx,ly,3.5,0,7);ctx.fillStyle=C.line;ctx.shadowColor=C.line;ctx.shadowBlur=10;ctx.fill();ctx.shadowBlur=0;
   window._s4geom = {series, x, y, px0, px1, py0, py1,
-    trades:(data.trades||[]).filter(t=>inRange(t.entry_ts)).map(t=>({t, xi:x(idxAt(t.entry_ts)), yi:y(series[idxAt(t.entry_ts)].spread),
-       xo:inRange(t.exit_ts)?x(idxAt(t.exit_ts)):null, yo:inRange(t.exit_ts)?y(series[idxAt(t.exit_ts)].spread):null}))};
+    trades:(data.trades||[]).filter(t=>inRange(t.entry_ts)).map(t=>({t,
+       xi:x(idxAt(t.entry_ts)), yi:y(t.entry_spread!=null?t.entry_spread:series[idxAt(t.entry_ts)].spread),
+       xo:inRange(t.exit_ts)?x(idxAt(t.exit_ts)):null,
+       yo:inRange(t.exit_ts)?y(t.exit_spread!=null?t.exit_spread:series[idxAt(t.exit_ts)].spread):null}))};
 }
 function s4Redraw(){ if(_s4lastHist) s4DrawChart(); }
 function s4PlaceTip(tip, mx, my, r){
