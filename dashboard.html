@@ -22,13 +22,33 @@
   --mono:'IBM Plex Mono',ui-monospace,monospace; --disp:'Sora',system-ui,sans-serif;
   --r:14px; --r-sm:9px;
   --shadow:0 1px 0 rgba(255,255,255,.02) inset, 0 18px 40px -24px rgba(0,0,0,.9);
+  /* фоновые радиальные подсветки body + производные (переопределяются в светлой теме) */
+  --body-glow1:rgba(76,182,255,.07); --body-glow2:rgba(46,230,166,.06);
+  --topbar-grad:linear-gradient(180deg, rgba(10,14,21,.92), rgba(6,8,12,.78));
+  --scroll-thumb:#1d2836;
+}
+/* ---------- светлая тема ---------- */
+[data-theme="light"]{
+  --bg:#f4f6fa; --bg2:#eef1f6;
+  --panel:#ffffff; --panel-2:#f7f9fc; --panel-hi:#eef2f8;
+  --line:#d7dee8; --line-soft:#e6ebf2;
+  --ink:#16202e; --ink-dim:#566273; --ink-faint:#94a1b4;
+  --signal:#12a878; --short:#2b7fd4; --warn:#c98717; --loss:#dc3b4c;
+  --accent:#12a878; --accent-2:#2b7fd4;
+  --glow:0 0 24px rgba(18,168,120,.14);
+  --chart-fill:rgba(18,168,120,.07); --chart-band:rgba(43,127,212,.30);
+  --chart-mid:rgba(86,98,115,.55); --chart-line:#16202e;
+  --shadow:0 1px 0 rgba(255,255,255,.6) inset, 0 18px 40px -28px rgba(40,60,90,.35);
+  --body-glow1:rgba(43,127,212,.08); --body-glow2:rgba(18,168,120,.07);
+  --topbar-grad:linear-gradient(180deg, rgba(255,255,255,.94), rgba(244,246,250,.82));
+  --scroll-thumb:#c2ccd9;
 }
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
 body{
   background:
-    radial-gradient(1200px 600px at 78% -8%, rgba(76,182,255,.07), transparent 60%),
-    radial-gradient(900px 500px at 8% 4%, rgba(46,230,166,.06), transparent 55%),
+    radial-gradient(1200px 600px at 78% -8%, var(--body-glow1), transparent 60%),
+    radial-gradient(900px 500px at 8% 4%, var(--body-glow2), transparent 55%),
     var(--bg);
   color:var(--ink); font-family:var(--disp); font-size:14px; line-height:1.5;
   -webkit-font-smoothing:antialiased; letter-spacing:.1px;
@@ -41,7 +61,7 @@ a{color:var(--accent-2);text-decoration:none}
 .topbar{
   position:sticky; top:0; z-index:40;
   display:flex; align-items:center; gap:18px; padding:14px 26px;
-  background:linear-gradient(180deg, rgba(10,14,21,.92), rgba(6,8,12,.78));
+  background:var(--topbar-grad);
   backdrop-filter:blur(14px) saturate(140%);
   border-bottom:1px solid var(--line);
 }
@@ -142,7 +162,7 @@ a{color:var(--accent-2);text-decoration:none}
 /* журналы / таблицы */
 .jscroll{max-height:210px;overflow:auto;font-family:var(--mono);font-size:11.5px}
 .jscroll::-webkit-scrollbar{width:8px;height:8px}
-.jscroll::-webkit-scrollbar-thumb{background:#1d2836;border-radius:8px}
+.jscroll::-webkit-scrollbar-thumb{background:var(--scroll-thumb);border-radius:8px}
 table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11.5px}
 thead th{position:sticky;top:0;background:var(--panel);text-align:left;color:var(--ink-faint);
   font-weight:500;font-size:9.5px;letter-spacing:.8px;text-transform:uppercase;padding:7px 8px;border-bottom:1px solid var(--line)}
@@ -213,7 +233,9 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
     <span class="clock" id="s4-msk-clock">--:--:--</span>
     <span class="sess" id="s4-session">●</span>
   </div>
-  <button id="s4-logout" title="Выйти" style="margin-left:14px;background:transparent;border:1px solid var(--line);
+  <button id="s4-theme" title="Светлая / тёмная тема" style="margin-left:14px;background:transparent;border:1px solid var(--line);
+    color:var(--ink-dim);font-family:var(--mono);font-size:13px;border-radius:8px;padding:6px 10px;cursor:pointer;line-height:1">☀</button>
+  <button id="s4-logout" title="Выйти" style="margin-left:8px;background:transparent;border:1px solid var(--line);
     color:var(--ink-dim);font-family:var(--mono);font-size:11px;border-radius:8px;padding:6px 12px;cursor:pointer">выйти</button>
 </div>
 
@@ -433,6 +455,19 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
 /* ============================ ядро (без мультистратегийных артефактов) ============================ */
 const API='';                                   // same-origin
 const $=id=>document.getElementById(id);
+
+/* ---- тема (светлая/тёмная), сохраняется в localStorage; применяется ДО рендера ---- */
+function s4ApplyTheme(t){
+  document.documentElement.setAttribute('data-theme', t);
+  try{ localStorage.setItem('s4theme', t); }catch(e){}
+  const b=$('s4-theme'); if(b) b.textContent = (t==='light' ? '☾' : '☀');
+}
+(function(){ let t='dark'; try{ t=localStorage.getItem('s4theme')||'dark'; }catch(e){} s4ApplyTheme(t); })();
+function s4ToggleTheme(){
+  const cur=document.documentElement.getAttribute('data-theme')==='light'?'light':'dark';
+  s4ApplyTheme(cur==='light'?'dark':'light');
+  if(typeof s4Redraw==='function') s4Redraw();   // canvas читает цвета из CSS — перерисовать
+}
 const fmt=(n,d=2)=>{ if(n==null||Number.isNaN(n)) return '—'; const v=(+n).toFixed(d); return v; };
 const getCSS=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 function _lighten(hex,t){ // осветлить hex на долю t (0..1) к белому
@@ -883,6 +918,8 @@ async function s4SwitchPair(p){
 }
 
 function s4Init(){
+  const s4th=$('s4-theme');
+  if(s4th) s4th.onclick=s4ToggleTheme;
   const s4lo=$('s4-logout');
   if(s4lo) s4lo.onclick=async()=>{
     try{ await fetch('/logout',{method:'POST',credentials:'same-origin'}); }catch(_){}

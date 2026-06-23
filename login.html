@@ -1,9 +1,10 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="ru" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>trade4 · вход</title>
+<script>try{document.documentElement.setAttribute('data-theme',localStorage.getItem('s4theme')||'dark');}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Sora:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -12,15 +13,24 @@
   --bg:#06080c; --panel:#0d1219; --line:#1b2533;
   --ink:#e8eef6; --ink-dim:#8a98ac; --ink-faint:#4a586c;
   --accent:#2ee6a6; --accent-2:#4cb6ff; --loss:#ff5d6c;
+  --glow1:rgba(76,182,255,.07); --glow2:rgba(46,230,166,.06);
+  --inp:#070b11;
   --mono:'IBM Plex Mono',ui-monospace,monospace; --disp:'Sora',system-ui,sans-serif;
   --r:14px; --r-sm:9px;
+}
+[data-theme="light"]{
+  --bg:#f4f6fa; --panel:#ffffff; --line:#d7dee8;
+  --ink:#16202e; --ink-dim:#566273; --ink-faint:#94a1b4;
+  --accent:#12a878; --accent-2:#2b7fd4; --loss:#dc3b4c;
+  --glow1:rgba(43,127,212,.08); --glow2:rgba(18,168,120,.07);
+  --inp:#f7f9fc;
 }
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
 body{
   background:
-    radial-gradient(1200px 600px at 78% -8%, rgba(76,182,255,.07), transparent 60%),
-    radial-gradient(900px 500px at 8% 4%, rgba(46,230,166,.06), transparent 55%),
+    radial-gradient(1200px 600px at 78% -8%, var(--glow1), transparent 60%),
+    radial-gradient(900px 500px at 8% 4%, var(--glow2), transparent 55%),
     var(--bg);
   color:var(--ink); font-family:var(--disp); font-size:14px;
   display:flex; align-items:center; justify-content:center; min-height:100vh;
@@ -37,7 +47,7 @@ body{
 label{display:block;font-family:var(--mono);font-size:10px;letter-spacing:1.4px;
   color:var(--ink-faint);text-transform:uppercase;margin:0 0 6px 2px}
 input{
-  width:100%;background:#070b11;border:1px solid var(--line);border-radius:var(--r-sm);
+  width:100%;background:var(--inp);border:1px solid var(--line);border-radius:var(--r-sm);
   color:var(--ink);font-family:var(--mono);font-size:14px;padding:11px 12px;margin-bottom:16px;
   outline:none;transition:border-color .15s}
 input:focus{border-color:#2a3a4d}
