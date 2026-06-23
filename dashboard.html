@@ -213,6 +213,8 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
     <span class="clock" id="s4-msk-clock">--:--:--</span>
     <span class="sess" id="s4-session">●</span>
   </div>
+  <button id="s4-logout" title="Выйти" style="margin-left:14px;background:transparent;border:1px solid var(--line);
+    color:var(--ink-dim);font-family:var(--mono);font-size:11px;border-radius:8px;padding:6px 12px;cursor:pointer">выйти</button>
 </div>
 
 <div class="pairbar">
@@ -444,9 +446,10 @@ let S4PAIR='sber'; try{ S4PAIR=localStorage.getItem('s4pair')||'sber'; }catch(e)
 
 async function s4api(path, method='GET', body=null){
   const sep=path.includes('?')?'&':'?';
-  const opt={method, headers:{}};
+  const opt={method, headers:{}, credentials:'same-origin'};
   if(body){ opt.headers['Content-Type']='application/json'; opt.body=JSON.stringify(body); }
   const r=await fetch(`${API}/st4${path}${sep}pair=${S4PAIR}`, opt);
+  if(r.status===401){ location.href='/login.html'; throw new Error('не авторизован'); }
   if(!r.ok){ let d=''; try{ d=(await r.json()).detail; }catch(e){} throw new Error(d||('HTTP '+r.status)); }
   return r.json();
 }
@@ -880,6 +883,11 @@ async function s4SwitchPair(p){
 }
 
 function s4Init(){
+  const s4lo=$('s4-logout');
+  if(s4lo) s4lo.onclick=async()=>{
+    try{ await fetch('/logout',{method:'POST',credentials:'same-origin'}); }catch(_){}
+    location.href='/login.html';
+  };
   const s4cv=$('s4chart');
   s4cv.addEventListener('wheel',e=>{
     e.preventDefault();

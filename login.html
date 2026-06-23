@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>trade4 · вход</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Sora:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#06080c; --panel:#0d1219; --line:#1b2533;
+  --ink:#e8eef6; --ink-dim:#8a98ac; --ink-faint:#4a586c;
+  --accent:#2ee6a6; --accent-2:#4cb6ff; --loss:#ff5d6c;
+  --mono:'IBM Plex Mono',ui-monospace,monospace; --disp:'Sora',system-ui,sans-serif;
+  --r:14px; --r-sm:9px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{
+  background:
+    radial-gradient(1200px 600px at 78% -8%, rgba(76,182,255,.07), transparent 60%),
+    radial-gradient(900px 500px at 8% 4%, rgba(46,230,166,.06), transparent 55%),
+    var(--bg);
+  color:var(--ink); font-family:var(--disp); font-size:14px;
+  display:flex; align-items:center; justify-content:center; min-height:100vh;
+}
+.card{
+  width:340px; background:var(--panel); border:1px solid var(--line);
+  border-radius:var(--r); padding:34px 30px;
+  box-shadow:0 1px 0 rgba(255,255,255,.02) inset, 0 18px 50px -24px rgba(0,0,0,.9);
+}
+.brand{font-weight:800;font-size:26px;letter-spacing:.5px;margin-bottom:4px}
+.brand b{color:var(--accent)}
+.tag{font-family:var(--mono);font-size:10.5px;letter-spacing:1.5px;color:var(--ink-faint);
+  text-transform:uppercase;margin-bottom:26px}
+label{display:block;font-family:var(--mono);font-size:10px;letter-spacing:1.4px;
+  color:var(--ink-faint);text-transform:uppercase;margin:0 0 6px 2px}
+input{
+  width:100%;background:#070b11;border:1px solid var(--line);border-radius:var(--r-sm);
+  color:var(--ink);font-family:var(--mono);font-size:14px;padding:11px 12px;margin-bottom:16px;
+  outline:none;transition:border-color .15s}
+input:focus{border-color:#2a3a4d}
+button{
+  width:100%;border:0;border-radius:var(--r-sm);padding:12px;cursor:pointer;
+  font-family:var(--disp);font-weight:700;font-size:14px;color:#06120e;
+  background:linear-gradient(135deg,var(--accent),#46d6f0);transition:transform .12s,filter .12s}
+button:hover{transform:translateY(-1px);filter:brightness(1.05)}
+button:disabled{opacity:.6;cursor:default;transform:none}
+.err{color:var(--loss);font-family:var(--mono);font-size:12px;min-height:18px;margin-top:12px;text-align:center}
+</style>
+</head>
+<body>
+  <form class="card" id="form">
+    <div class="brand">trade<b>4</b></div>
+    <div class="tag">спред-арбитраж FORTS</div>
+    <label for="u">логин</label>
+    <input id="u" name="username" autocomplete="username" autofocus required>
+    <label for="p">пароль</label>
+    <input id="p" name="password" type="password" autocomplete="current-password" required>
+    <button id="btn" type="submit">Войти</button>
+    <div class="err" id="err"></div>
+  </form>
+<script>
+const form=document.getElementById('form'), err=document.getElementById('err'), btn=document.getElementById('btn');
+form.addEventListener('submit', async (e)=>{
+  e.preventDefault();
+  err.textContent=''; btn.disabled=true;
+  try{
+    const r=await fetch('/login',{
+      method:'POST', credentials:'same-origin',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({username:document.getElementById('u').value, password:document.getElementById('p').value})
+    });
+    if(r.ok){ location.href='/'; return; }
+    let d='неверный логин или пароль'; try{ d=(await r.json()).detail||d; }catch(_){}
+    err.textContent=d;
+  }catch(_){ err.textContent='ошибка соединения'; }
+  btn.disabled=false;
+});
+</script>
+</body>
+</html>

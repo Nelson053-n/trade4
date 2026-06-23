@@ -8,15 +8,20 @@ RTKM/RTKMP) на FORTS. Выделен из общего проекта trade в
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
+import os
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime as _dt
 from datetime import timedelta as _td
 from datetime import timezone as _tz
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
 
 from .st4 import data_feed as feed
 from .st4.backtest import band_frame_for_chart, run_backtest
@@ -24,7 +29,57 @@ from .st4.service import ST4_PAIRS, St4Session, _clean
 
 _BASE = Path(__file__).resolve().parent.parent          # корень проекта trade4
 DASHBOARD = _BASE / "dashboard.html"
+LOGIN_PAGE = _BASE / "login.html"
 _MSK = _tz(_td(hours=3))                                 # московское время для меток
+
+# ====================== авторизация (логин/пароль + подписанная cookie) ======================
+# Один пользователь из окружения. Авторизация ВКЛЮЧАЕТСЯ только когда заданы оба
+# TRADE4_USER и TRADE4_PASS (на проде — через systemd drop-in). Без них (локальная
+# разработка, тесты) AUTH_ENABLED=False и middleware пропускает всё.
+_AUTH_USER = os.environ.get("TRADE4_USER", "")
+_AUTH_PASS = os.environ.get("TRADE4_PASS", "")
+AUTH_ENABLED = bool(_AUTH_USER and _AUTH_PASS)
+# Секрет подписи cookie: явный TRADE4_SECRET либо дериват от пароля (смена пароля
+# разлогинивает все сессии — это нормально).
+_AUTH_SECRET = (os.environ.get("TRADE4_SECRET", "")
+                or hashlib.sha256(("trade4-cookie-v1|" + _AUTH_PASS).encode()).hexdigest())
+_COOKIE_NAME = "trade4_session"
+_SESSION_TTL = 7 * 86400                                 # 7 дней
+# пути, доступные без авторизации
+_AUTH_WHITELIST = {"/login", "/logout", "/login.html", "/health", "/favicon.ico"}
+
+
+def _b64u(b: bytes) -> str:
+    return base64.urlsafe_b64encode(b).decode().rstrip("=")
+
+
+def _b64u_dec(s: str) -> bytes:
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+
+def _sign(payload: str) -> str:
+    """payload + '.' + base64url(HMAC-SHA256(secret, payload)). Подписанный токен сессии."""
+    sig = hmac.new(_AUTH_SECRET.encode(), payload.encode(), hashlib.sha256).digest()
+    return _b64u(payload.encode()) + "." + _b64u(sig)
+
+
+def _make_session() -> str:
+    payload = f"{_AUTH_USER}|{int(time.time()) + _SESSION_TTL}"
+    return _sign(payload)
+
+
+def _verify(token: str) -> bool:
+    """Проверить подпись и срок токена. Постоянное время сравнения подписи."""
+    try:
+        raw, sig = token.split(".", 1)
+        payload = _b64u_dec(raw).decode()
+        expected = _sign(payload).split(".", 1)[1]
+        if not hmac.compare_digest(sig, expected):
+            return False
+        user, exp = payload.rsplit("|", 1)
+        return user == _AUTH_USER and int(exp) > int(time.time())
+    except Exception:
+        return False
 
 # независимая форвард-тест сессия на каждую пару обычка/преф (?pair=, см. ST4_PAIRS)
 ST4S: dict[str, St4Session] = {p: St4Session(p) for p in ST4_PAIRS}
@@ -137,6 +192,55 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="trade4 — st4 spread arbitrage", version="1.0", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def _auth_gate(request: Request, call_next):
+    """Закрывает весь сервис за авторизацией (safe-by-default). Без валидной сессии
+    «/» отдаёт страницу логина, остальное — 401. Whitelist: логин/логаут/health."""
+    if not AUTH_ENABLED or request.url.path in _AUTH_WHITELIST:
+        return await call_next(request)
+    if _verify(request.cookies.get(_COOKIE_NAME, "")):
+        return await call_next(request)
+    if request.url.path == "/":
+        if LOGIN_PAGE.exists():
+            return FileResponse(LOGIN_PAGE, headers={"Cache-Control": "no-cache"})
+        return JSONResponse({"detail": "login.html не найден"}, status_code=500)
+    return JSONResponse({"detail": "не авторизован"}, status_code=401)
+
+
+@app.post("/login")
+async def login(request: Request):
+    """Вход по логину/паролю (form-data или JSON). Успех → подписанная HttpOnly cookie."""
+    ct = request.headers.get("content-type", "")
+    if "application/json" in ct:
+        data = await request.json()
+    else:
+        data = dict(await request.form())
+    user = str(data.get("username", ""))
+    pw = str(data.get("password", ""))
+    ok = (hmac.compare_digest(user, _AUTH_USER)
+          and hmac.compare_digest(pw, _AUTH_PASS)) if AUTH_ENABLED else True
+    if not ok:
+        return JSONResponse({"detail": "неверный логин или пароль"}, status_code=401)
+    resp = JSONResponse({"ok": True})
+    resp.set_cookie(_COOKIE_NAME, _make_session(), max_age=_SESSION_TTL,
+                    httponly=True, samesite="lax", secure=True, path="/")
+    return resp
+
+
+@app.post("/logout")
+def logout():
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(_COOKIE_NAME, path="/")
+    return resp
+
+
+@app.get("/login.html")
+def login_page():
+    if not LOGIN_PAGE.exists():
+        raise HTTPException(404, "login.html не найден")
+    return FileResponse(LOGIN_PAGE, headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/")
