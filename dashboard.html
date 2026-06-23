@@ -4,9 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <title>trade4 · спред-арбитраж FORTS</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Sora:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Sora:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&family=Manrope:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Roboto+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
 /* ============================ премиум тёмная тема ============================ */
 :root{
@@ -26,6 +27,7 @@
   --body-glow1:rgba(76,182,255,.07); --body-glow2:rgba(46,230,166,.06);
   --topbar-grad:linear-gradient(180deg, rgba(10,14,21,.92), rgba(6,8,12,.78));
   --scroll-thumb:#1d2836;
+  --tip-bg:rgba(8,12,18,.96);
 }
 /* ---------- светлая тема ---------- */
 [data-theme="light"]{
@@ -42,6 +44,7 @@
   --body-glow1:rgba(43,127,212,.08); --body-glow2:rgba(18,168,120,.07);
   --topbar-grad:linear-gradient(180deg, rgba(255,255,255,.94), rgba(244,246,250,.82));
   --scroll-thumb:#c2ccd9;
+  --tip-bg:rgba(255,255,255,.97);
 }
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
@@ -138,10 +141,10 @@ a{color:var(--accent-2);text-decoration:none}
 /* график */
 .chartwrap{position:relative}
 #s4chart{width:100%;height:380px;display:block;cursor:crosshair}
-.an-tip{position:absolute;display:none;pointer-events:none;z-index:20;
-  background:rgba(8,12,18,.96);border:1px solid var(--line);border-radius:8px;
+.an-tip{position:absolute;display:none;pointer-events:none;z-index:20;color:var(--ink);
+  background:var(--tip-bg);border:1px solid var(--line);border-radius:8px;
   padding:8px 11px;font-family:var(--mono);font-size:11px;line-height:1.55;
-  box-shadow:0 12px 30px -8px rgba(0,0,0,.8);max-width:230px}
+  backdrop-filter:blur(4px);box-shadow:0 12px 30px -8px rgba(0,0,0,.35);max-width:230px}
 .legend{display:flex;gap:16px;flex-wrap:wrap;margin-top:10px;font-family:var(--mono);font-size:10.5px;color:var(--ink-dim)}
 .legend i{display:inline-block;width:13px;height:0;border-top-width:2px;border-top-style:solid;vertical-align:middle;margin-right:6px}
 
@@ -233,7 +236,14 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
     <span class="clock" id="s4-msk-clock">--:--:--</span>
     <span class="sess" id="s4-session">●</span>
   </div>
-  <button id="s4-theme" title="Светлая / тёмная тема" style="margin-left:14px;background:transparent;border:1px solid var(--line);
+  <select id="s4-font" title="Шрифт интерфейса" style="margin-left:14px;background:var(--panel-2);border:1px solid var(--line);
+    color:var(--ink-dim);font-family:var(--mono);font-size:11px;border-radius:8px;padding:6px 8px;cursor:pointer">
+    <option value="sora">Sora + Plex</option>
+    <option value="inter">Inter</option>
+    <option value="manrope">Manrope</option>
+    <option value="system">Системный</option>
+  </select>
+  <button id="s4-theme" title="Светлая / тёмная тема" style="margin-left:8px;background:transparent;border:1px solid var(--line);
     color:var(--ink-dim);font-family:var(--mono);font-size:13px;border-radius:8px;padding:6px 10px;cursor:pointer;line-height:1">☀</button>
   <button id="s4-logout" title="Выйти" style="margin-left:8px;background:transparent;border:1px solid var(--line);
     color:var(--ink-dim);font-family:var(--mono);font-size:11px;border-radius:8px;padding:6px 12px;cursor:pointer">выйти</button>
@@ -468,6 +478,23 @@ function s4ToggleTheme(){
   s4ApplyTheme(cur==='light'?'dark':'light');
   if(typeof s4Redraw==='function') s4Redraw();   // canvas читает цвета из CSS — перерисовать
 }
+
+/* ---- выбор шрифта интерфейса (--disp = текст, --mono = цифры/моно) ---- */
+const S4_FONTS={
+  sora:   {disp:"'Sora',system-ui,sans-serif",            mono:"'IBM Plex Mono',ui-monospace,monospace"},
+  inter:  {disp:"'Inter',system-ui,sans-serif",           mono:"'JetBrains Mono',ui-monospace,monospace"},
+  manrope:{disp:"'Manrope',system-ui,sans-serif",         mono:"'Roboto Mono',ui-monospace,monospace"},
+  system: {disp:"system-ui,-apple-system,Segoe UI,Roboto,sans-serif", mono:"ui-monospace,SFMono-Regular,Menlo,monospace"},
+};
+function s4ApplyFont(key){
+  const f=S4_FONTS[key]||S4_FONTS.sora;
+  document.documentElement.style.setProperty('--disp', f.disp);
+  document.documentElement.style.setProperty('--mono', f.mono);
+  try{ localStorage.setItem('s4font', key); }catch(e){}
+  const sel=$('s4-font'); if(sel) sel.value=key;
+  if(typeof s4Redraw==='function') s4Redraw();   // canvas использует шрифт в подписях
+}
+(function(){ let k='sora'; try{ k=localStorage.getItem('s4font')||'sora'; }catch(e){} s4ApplyFont(k); })();
 const fmt=(n,d=2)=>{ if(n==null||Number.isNaN(n)) return '—'; const v=(+n).toFixed(d); return v; };
 const getCSS=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 function _lighten(hex,t){ // осветлить hex на долю t (0..1) к белому
@@ -920,6 +947,8 @@ async function s4SwitchPair(p){
 function s4Init(){
   const s4th=$('s4-theme');
   if(s4th) s4th.onclick=s4ToggleTheme;
+  const s4fn=$('s4-font');
+  if(s4fn) s4fn.onchange=()=>s4ApplyFont(s4fn.value);
   const s4lo=$('s4-logout');
   if(s4lo) s4lo.onclick=async()=>{
     try{ await fetch('/logout',{method:'POST',credentials:'same-origin'}); }catch(_){}

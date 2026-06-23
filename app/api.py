@@ -46,7 +46,7 @@ _AUTH_SECRET = (os.environ.get("TRADE4_SECRET", "")
 _COOKIE_NAME = "trade4_session"
 _SESSION_TTL = 7 * 86400                                 # 7 дней
 # пути, доступные без авторизации
-_AUTH_WHITELIST = {"/login", "/logout", "/login.html", "/health", "/favicon.ico"}
+_AUTH_WHITELIST = {"/login", "/logout", "/login.html", "/health", "/favicon.ico", "/favicon.svg"}
 
 
 def _b64u(b: bytes) -> str:
@@ -241,6 +241,15 @@ def login_page():
     if not LOGIN_PAGE.exists():
         raise HTTPException(404, "login.html не найден")
     return FileResponse(LOGIN_PAGE, headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/favicon.svg")
+def favicon():
+    f = _BASE / "favicon.svg"
+    if not f.exists():
+        raise HTTPException(404)
+    return FileResponse(f, media_type="image/svg+xml",
+                        headers={"Cache-Control": "max-age=86400"})
 
 
 @app.get("/")
