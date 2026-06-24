@@ -90,6 +90,23 @@ a{color:var(--accent-2);text-decoration:none}
   border:1px solid var(--line);border-radius:999px;padding:5px 12px}
 .flowpill .dot{width:8px;height:8px;border-radius:50%;background:var(--signal);box-shadow:0 0 10px var(--signal)}
 
+/* ---------- инфо-бар сессии биржи ---------- */
+.sessbar{display:flex;align-items:center;gap:12px;padding:9px 26px;
+  border-bottom:1px solid var(--line);background:var(--sess-bg, rgba(127,127,127,.05));
+  font-family:var(--mono);font-size:13px;flex-wrap:wrap}
+.sessbar .sb-dot{width:9px;height:9px;border-radius:50%;background:var(--ink-dim);flex:none;
+  box-shadow:0 0 0 0 currentColor}
+.sessbar.live .sb-dot{background:var(--signal);color:var(--signal);animation:sbpulse 2s infinite}
+.sessbar.warn .sb-dot{background:var(--warn);color:var(--warn)}
+.sessbar.closed .sb-dot{background:var(--ink-faint)}
+@keyframes sbpulse{0%{box-shadow:0 0 0 0 currentColor}70%{box-shadow:0 0 0 6px transparent}100%{box-shadow:0 0 0 0 transparent}}
+.sessbar .sb-state{font-weight:600;letter-spacing:.3px}
+.sessbar.live .sb-state{color:var(--signal)}
+.sessbar.warn .sb-state{color:var(--warn)}
+.sessbar.closed .sb-state{color:var(--ink-dim)}
+.sessbar .sb-count{color:var(--ink-dim)}
+.sessbar .sb-clock{margin-left:auto;color:var(--ink-faint);font-size:12px;letter-spacing:.5px}
+
 /* ---------- переключатель пар ---------- */
 .pairbar{display:flex;align-items:center;gap:10px;padding:14px 26px 0;flex-wrap:wrap}
 .pairbar .lab{font-family:var(--mono);font-size:10px;letter-spacing:1.5px;color:var(--ink-faint);text-transform:uppercase}
@@ -240,6 +257,13 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
     color:var(--ink-dim);font-family:var(--mono);font-size:13px;border-radius:8px;padding:6px 10px;cursor:pointer;line-height:1">☀</button>
   <button id="s4-logout" title="Выйти" style="margin-left:8px;background:transparent;border:1px solid var(--line);
     color:var(--ink-dim);font-family:var(--mono);font-size:11px;border-radius:8px;padding:6px 12px;cursor:pointer">выйти</button>
+</div>
+
+<div class="sessbar" id="s4-sessbar">
+  <span class="sb-dot" id="s4-sb-dot"></span>
+  <span class="sb-state" id="s4-sb-state">—</span>
+  <span class="sb-count" id="s4-sb-count"></span>
+  <span class="sb-clock" id="s4-sb-clock">--:--:-- МСК</span>
 </div>
 
 <div class="pairbar">
@@ -798,19 +822,41 @@ function s4msk(ms){
   return {hh:String(m.getHours()).padStart(2,'0'),mm:String(m.getMinutes()).padStart(2,'0'),
           ss:String(m.getSeconds()).padStart(2,'0'),min:m.getHours()*60+m.getMinutes(),dow:m.getDay()};
 }
-function s4fortsSession(min,dow){
+// расписание FORTS по минутам от полуночи MSK (пн–пт). Возвращает состояние + сек до след. события.
+function s4fortsSession(min,sec,dow){
   const inR=(a,b)=>min>=a&&min<b;
-  if(inR(14*60,14*60+5)) return {txt:'клиринг (14:00–14:05)',color:'var(--warn)'};
-  if(inR(18*60+45,19*60+5)) return {txt:'вечерний клиринг (18:45–19:05)',color:'var(--warn)'};
-  if(inR(9*60,10*60)) return {txt:'утренняя сессия',color:'var(--signal)'};
-  if(inR(10*60,14*60)||inR(14*60+5,18*60+45)) return {txt:'основная сессия',color:'var(--signal)'};
-  if(inR(19*60+5,23*60+50)) return {txt:'вечерняя сессия',color:'var(--signal)'};
-  return {txt:'торги закрыты',color:'var(--ink-dim)'};
+  const weekend = (dow===0||dow===6);          // вс=0, сб=6 — биржа закрыта
+  // секунд до момента mm (минута дня), если он сегодня впереди; иначе null
+  const until=mm=>{ const d=(mm*60)-(min*60+sec); return d>0?d:null; };
+  if(weekend) return {kind:'closed',txt:'торги закрыты — выходной',count:'',color:'var(--ink-dim)'};
+  if(inR(14*60,14*60+5))   return {kind:'warn',txt:'клиринг',count:'возобновление в 14:05',color:'var(--warn)'};
+  if(inR(18*60+45,19*60+5))return {kind:'warn',txt:'вечерний клиринг',count:'возобновление в 19:05',color:'var(--warn)'};
+  if(inR(9*60,10*60))      return {kind:'live',txt:'торги идут — утренняя сессия',count:'',color:'var(--signal)'};
+  if(inR(10*60,14*60)||inR(14*60+5,18*60+45)) return {kind:'live',txt:'торги идут — основная сессия',count:'',color:'var(--signal)'};
+  if(inR(19*60+5,23*60+50))return {kind:'live',txt:'торги идут — вечерняя сессия',count:'',color:'var(--signal)'};
+  // закрыто — считаем до открытия в 09:00 (сегодня или след. рабочий день)
+  const sUntil=until(9*60);
+  const dd=v=>{ const h=Math.floor(v/3600),mm2=Math.floor(v%3600/60),ss=v%60;
+    return (h?h+' ч ':'')+(mm2||h?String(mm2).padStart(h?2:1,'0')+' мин ':'')+(h?'':String(ss).padStart(2,'0')+' с'); };
+  if(sUntil!==null && dow>=1 && dow<=5)
+    return {kind:'closed',txt:'торги закрыты',count:'до открытия '+dd(sUntil),color:'var(--ink-dim)'};
+  // после закрытия (≥23:50) или пятница вечером → открытие в след. рабочий день
+  const nextDay = dow===5?3:(dow===0?1:1);   // пт→пн(+3), вс уже отсечён, иначе завтра
+  return {kind:'closed',txt:'торги закрыты',count:'открытие '+(nextDay>1?'в понедельник ':'завтра ')+'09:00',color:'var(--ink-dim)'};
 }
 function s4Clock(){
   const m=s4msk(Date.now());
+  const s=s4fortsSession(m.min,m.ss==null?0:+m.ss,m.dow);
   const el=$('s4-msk-clock'); if(el) el.textContent=`${m.hh}:${m.mm}:${m.ss}`;
-  const se=$('s4-session'); if(se){ const s=s4fortsSession(m.min,m.dow); se.textContent='● '+s.txt; se.style.color=s.color; }
+  const se=$('s4-session'); if(se){ se.textContent='● '+s.txt.replace(/^торги идут — /,''); se.style.color=s.color; }
+  // полноразмерный инфо-бар сверху
+  const bar=$('s4-sessbar');
+  if(bar){
+    bar.classList.remove('live','warn','closed'); bar.classList.add(s.kind);
+    const st=$('s4-sb-state'); if(st) st.textContent=s.txt;
+    const ct=$('s4-sb-count'); if(ct) ct.textContent=s.count?('· '+s.count):'';
+    const ck=$('s4-sb-clock'); if(ck) ck.textContent=`${m.hh}:${m.mm}:${m.ss} МСК`;
+  }
 }
 setInterval(s4Clock,1000); s4Clock();
 
