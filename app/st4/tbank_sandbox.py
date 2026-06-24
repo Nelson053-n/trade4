@@ -289,6 +289,12 @@ def close_account(account_id: str) -> None:
     _call(_SANDBOX, "CloseSandboxAccount", {"accountId": account_id})
 
 
+def last_entry_ts_for(account_id: str, instrument_uid: str, days: int = 7) -> int | None:
+    """История операций sandbox через REST недоступна (GetOperations→401, GetSandboxOperations
+    →404). Возвращаем None → caller делает fallback на last_live_ts (время последнего бара)."""
+    return None
+
+
 # ---------------------------------------------------------------- сценарий
 
 def _uid(it: dict) -> str:

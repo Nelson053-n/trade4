@@ -218,6 +218,23 @@ class TinkoffSandboxExecutor:
                 out[Role.PREFERRED] = avg
         return out
 
+    def broker_entry_ts(self) -> int | None:
+        """Реальное время (unix ms) последней сделки по любой ноге — для усыновления позиции
+        со счёта с КОРРЕКТНЫМ entry_ts (а не моментом рестарта). None, если недоступно
+        (sandbox: история операций недоступна → caller сделает fallback на last_live_ts)."""
+        if not hasattr(self.sb, "last_entry_ts_for"):
+            return None
+        best = None
+        for role in (Role.ORDINARY, Role.PREFERRED):
+            uid = self.sb._uid(self._inst[role])
+            try:
+                ts = self.sb.last_entry_ts_for(self._account_id, uid)
+            except Exception:  # noqa: BLE001
+                ts = None
+            if ts and (best is None or ts > best):
+                best = ts
+        return best
+
     def flat_broker(self) -> bool:
         """Закрыть ВСЕ реальные позиции на sandbox-счёте по рынку (привести к FLAT).
 

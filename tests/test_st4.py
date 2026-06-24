@@ -814,15 +814,55 @@ def test_adopt_position_from_account_restores_on_restart():
     class _FakeEx:
         def entry_prices(self):
             return {Role.ORDINARY: 29597.0, Role.PREFERRED: 29533.0}
+        def broker_entry_ts(self):
+            return 1700000000000   # брокер знает реальное время входа
     s.engine.executor = _FakeEx()
     # на счёте short_spread: обычка -10 / преф +10
     assert s._adopt_position_from_account({Role.ORDINARY: -10, Role.PREFERRED: 10})
     assert s.engine.state == BotState.SHORT_SPREAD
     assert s.engine.position.leg_ord.side == "sell" and s.engine.position.leg_ord.lots == 10
     assert s.engine.position.leg_pref.side == "buy"
+    # entry_ts взят из брокера, а НЕ time.time() (регресс: точка входа была в момент рестарта)
+    assert s.engine.position.entry_ts == 1700000000000
     # непарная (одна нога) — не восстанавливаем (вернёт False → дальше flat_broker)
     s.engine.position = None
     assert not s._adopt_position_from_account({Role.ORDINARY: -10, Role.PREFERRED: 0})
+
+
+def test_adopt_position_entry_ts_fallback_to_last_bar():
+    """Если брокер не отдал время (sandbox), entry_ts = last_live_ts (время бара), не time.time()."""
+    from app.st4.service import St4Session
+    from app.st4.models import Role
+    s = St4Session("sber")
+    s.last_live_ts = 1699999000000
+
+    class _FakeEx:
+        def entry_prices(self):
+            return {Role.ORDINARY: 29597.0, Role.PREFERRED: 29533.0}
+        def broker_entry_ts(self):
+            return None   # история недоступна (sandbox)
+    s.engine.executor = _FakeEx()
+    assert s._adopt_position_from_account({Role.ORDINARY: -10, Role.PREFERRED: 10})
+    assert s.engine.position.entry_ts == 1699999000000   # = last_live_ts, не «сейчас»
+
+
+def test_close_position_exit_ts_not_before_entry():
+    """Инвариант: exit_ts >= entry_ts даже если позицию закрывает бар старше входа."""
+    from app.st4.models import LegPosition, Position, BotState, SpreadBar, Role
+    cfg = St4Config()
+    so = feed.synthetic_spec(Role.ORDINARY); sp = feed.synthetic_spec(Role.PREFERRED)
+    eng = TradingEngine(cfg, so, sp)
+    eng.position = Position(
+        state=BotState.LONG_SPREAD,
+        leg_ord=LegPosition(code="O", role=Role.ORDINARY, side="sell", lots=1, entry_price=100),
+        leg_pref=LegPosition(code="P", role=Role.PREFERRED, side="buy", lots=1, entry_price=200),
+        entry_ts=2000, entry_spread=100, entry_beta=1.0, sma_at_entry=100, entry_fee_rub=0)
+    eng.state = BotState.LONG_SPREAD
+    eng._last_spread_bar = SpreadBar(ts=1000, spread=100, close_ord=100, close_pref=200,
+                                     volume=0)   # бар СТАРШE входа (ts=1000 < 2000)
+    tr = eng.flat_all("flat_all")
+    assert tr is not None
+    assert tr.exit_ts >= tr.entry_ts   # выход не раньше входа
 
 
 # ============================ БОЕВОЙ контур tbank_real ============================

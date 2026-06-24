@@ -91,3 +91,43 @@ def post_order(account_id: str, instrument_uid: str, lots: int, direction: str,
 def cancel_order(account_id: str, order_id: str) -> dict:
     """Отменить боевой ордер (OrdersService.CancelOrder) — для unwind при частичном входе."""
     return _call(_ORDERS, "CancelOrder", {"accountId": account_id, "orderId": order_id})
+
+
+# ---------------------------------------------------------------- история операций (read)
+def operations(account_id: str, frm_iso: str, to_iso: str) -> list[dict]:
+    """История операций по счёту за период (OperationsService.GetOperations).
+    frm_iso/to_iso — UTC ISO8601 ('...Z'). Возвращает список операций."""
+    r = _call(_OPERATIONS, "GetOperations",
+              {"accountId": account_id, "from": frm_iso, "to": to_iso})
+    return r.get("operations", [])
+
+
+def last_entry_ts_for(account_id: str, instrument_uid: str, days: int = 7) -> int | None:
+    """Время (unix ms) последней торговой операции по инструменту — реальное время входа в
+    позицию для усыновления. None, если операций нет или API недоступен."""
+    from datetime import datetime, timedelta, timezone
+    to = datetime.now(timezone.utc)
+    frm = to - timedelta(days=days)
+    fi = frm.strftime("%Y-%m-%dT%H:%M:%SZ")
+    ti = to.strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        ops = operations(account_id, fi, ti)
+    except Exception:  # noqa: BLE001  API недоступен → пусть caller сделает fallback
+        return None
+    best = None
+    for o in ops:
+        uid = o.get("instrumentUid", "")
+        otype = o.get("operationType", "")
+        # только торговые операции (покупка/продажа) по нужной ноге
+        if uid != instrument_uid or "BUY" not in otype and "SELL" not in otype:
+            continue
+        d = o.get("date")
+        if not d:
+            continue
+        try:
+            ts = int(datetime.fromisoformat(d.replace("Z", "+00:00")).timestamp() * 1000)
+        except Exception:  # noqa: BLE001
+            continue
+        if best is None or ts > best:
+            best = ts
+    return best

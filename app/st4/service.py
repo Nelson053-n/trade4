@@ -215,9 +215,21 @@ class St4Session:
         leg_pref = LegPosition(code=self.spec_pref.code, role=Role.PREFERRED,
                                side="buy" if bal_p > 0 else "sell",
                                lots=abs(bal_p), entry_price=pref_entry)
+        # entry_ts: реальное время входа. Каскад источников (раньше всегда был time.time() —
+        # это давало точку входа на графике в момент рестарта, а не на сигнальном баре):
+        #   1) время последней сделки из брокера (GetOperations) — точно;
+        #   2) время последнего обработанного бара (last_live_ts) — приближённо, но не «сейчас»;
+        #   3) текущее время — только если ничего из выше недоступно.
+        entry_ts = None
+        try:
+            entry_ts = self.engine.executor.broker_entry_ts()
+        except Exception:  # noqa: BLE001
+            entry_ts = None
+        if not entry_ts:
+            entry_ts = self.last_live_ts or int(time.time() * 1000)
         self.engine.position = Position(
             state=state, leg_ord=leg_ord, leg_pref=leg_pref,
-            entry_ts=int(time.time() * 1000), entry_spread=pref_entry - ord_entry,
+            entry_ts=entry_ts, entry_spread=pref_entry - ord_entry,
             entry_beta=1.0, sma_at_entry=pref_entry - ord_entry, entry_fee_rub=0.0)
         self.engine.state = state
         return True

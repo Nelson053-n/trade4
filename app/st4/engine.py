@@ -396,8 +396,12 @@ class TradingEngine:
         net = gross - p.entry_fee_rub - exit_fee   # полный результат сделки: обе комиссии
         self.balance_rub += gross - exit_fee       # entry_fee уже списан при открытии
 
+        # инвариант: выход не может быть РАНЬШE входа (страховка от рассинхрона live/replay —
+        # напр. усыновлённая позиция закрывается баром старше её entry_ts). max() не даёт
+        # сделке записаться с exit_ts < entry_ts (иначе на графике линия идёт «назад»).
+        exit_ts = max(bar.ts, p.entry_ts)
         trade = Trade(
-            state=p.state, entry_ts=p.entry_ts, exit_ts=bar.ts,
+            state=p.state, entry_ts=p.entry_ts, exit_ts=exit_ts,
             entry_spread=p.entry_spread, exit_spread=bar.spread, lots=lots,
             gross_pnl_rub=gross, fees_rub=p.entry_fee_rub + exit_fee, net_pnl_rub=net,
             reason=reason, bars_held=self._bars_held,
