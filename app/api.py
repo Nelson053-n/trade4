@@ -314,6 +314,20 @@ def _st5_guard_no_position(action: str) -> None:
                                  "Сначала закройте позиции (flat-all).")
 
 
+_ST5_BT_HISTORY: list[dict] = []   # журнал прошлых бэктест-прогонов (последние 40)
+
+
+def _st5_bt_log(entry: dict) -> None:
+    entry["ts"] = _dt.now(_MSK).strftime("%m-%d %H:%M")
+    _ST5_BT_HISTORY.insert(0, entry)
+    del _ST5_BT_HISTORY[40:]
+
+
+@app.get("/st5/backtest_history")
+def st5_backtest_history():
+    return {"history": _ST5_BT_HISTORY}
+
+
 @app.get("/st5/state")
 def st5_state():
     return _clean(ST5.snapshot())
@@ -476,7 +490,12 @@ async def st5_backtest(pair: str = "sber", days: int = 180):
                 "sharpe": round(m.sharpe, 2), "max_drawdown_pct": round(m.max_drawdown_pct, 1),
                 "reasons": m.reasons}
 
-    return _clean(await asyncio.to_thread(_run))
+    res = _clean(await asyncio.to_thread(_run))
+    if "error" not in res:
+        _st5_bt_log({"kind": "ISS", "pair": pair, "days": days, "trades": res["trades"],
+                     "win_rate_pct": res["win_rate_pct"], "net_pnl_rub": res["net_pnl_rub"],
+                     "sharpe": res["sharpe"], "max_drawdown_pct": res["max_drawdown_pct"]})
+    return res
 
 
 @app.get("/st5/grid")

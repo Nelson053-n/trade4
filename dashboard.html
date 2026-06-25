@@ -549,7 +549,7 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
       <div class="card">
         <h2>Спред / z-score <span id="s5-chart-pair" style="font-family:var(--mono);color:var(--ink)">—</span>
           <span class="tf-switch" id="s5-chart-switch" style="float:right;font-size:11px;font-weight:400"></span></h2>
-        <div class="chartwrap"><canvas id="s5chart" style="width:100%;height:300px;display:block"></canvas></div>
+        <div class="chartwrap"><canvas id="s5chart" style="width:100%;height:400px;display:block"></canvas></div>
         <div class="legend" style="margin-top:6px">
           <span><i style="border-color:var(--chart-line)"></i>z-score</span>
           <span><i style="border-color:var(--chart-band);border-top-style:dashed"></i>±2.25 вход / ±4.25 стоп</span>
@@ -609,6 +609,12 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
         <div id="s5-calib-res" style="font-size:12px;margin-top:8px"></div>
         <div id="s5-grid-wrap" style="display:none;margin-top:8px">
           <table id="s5-grid"><thead><tr><th>z_in</th><th>z_stop</th><th>H_max</th><th>сделок</th><th>win%</th><th>net ₽</th><th>Sharpe</th><th>PF</th><th>maxDD</th></tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Журнал прогонов <span class="em" id="s5-bth-sub"></span></h2>
+        <div class="tblwrap" style="max-height:220px">
+          <table id="s5-bth"><thead><tr><th>время</th><th>тип</th><th>пара</th><th>дней</th><th>сделок</th><th>win%</th><th>net ₽</th><th>Sharpe</th><th>maxDD</th></tr></thead><tbody><tr><td colspan="9" class="empty">прогонов пока нет</td></tr></tbody></table>
         </div>
       </div>
     </div>
@@ -1477,7 +1483,7 @@ function s5DrawChart(){
            grid:cs.getPropertyValue('--line').trim(),win:cs.getPropertyValue('--signal').trim(),
            loss:cs.getPropertyValue('--loss').trim(),warn:cs.getPropertyValue('--warn').trim(),
            short:cs.getPropertyValue('--short').trim(),ink:cs.getPropertyValue('--ink').trim(),panel:cs.getPropertyValue('--panel').trim()};
-  const ML=34,MB=18,MT=8,MR=8, px0=ML,px1=W-MR,py0=MT,py1=H-MB;
+  const ML=40,MB=22,MT=12,MR=70, px0=ML,px1=W-MR,py0=MT,py1=H-MB;   // MR шире — место для подписей уровней справа
   const zs=hist.map(p=>p.z);
   let lo=Math.min(-4.8,...zs), hi=Math.max(4.8,...zs); const pad=(hi-lo)*0.05; lo-=pad; hi+=pad;
   const x=i=>px0+i/(hist.length-1)*(px1-px0), y=v=>py1-(v-lo)/(hi-lo)*(py1-py0);
@@ -1489,11 +1495,11 @@ function s5DrawChart(){
   zone(-1,1,C.mid,0.05);                                           // зона фиксации/выхода
   // уровни
   const levels=[[0,C.mid,'0 равновесие'],[2.25,C.band,'+2.25 вход'],[-2.25,C.band,'−2.25 вход'],[4.25,C.loss,'+4.25 стоп'],[-4.25,C.loss,'−4.25 стоп'],[1,C.ax,'+1 фикс'],[-1,C.ax,'−1 фикс']];
-  ctx.font='8px IBM Plex Mono,monospace'; ctx.textAlign='right'; ctx.textBaseline='middle';
+  ctx.font='9px IBM Plex Mono,monospace'; ctx.textAlign='left'; ctx.textBaseline='middle';
   levels.forEach(([v,col,lbl])=>{ if(v<lo||v>hi) return; const yy=y(v);
     ctx.strokeStyle=col; ctx.lineWidth=1; ctx.globalAlpha=v===0?.55:.3; ctx.setLineDash(v===0?[]:[4,4]);
     ctx.beginPath(); ctx.moveTo(px0,yy); ctx.lineTo(px1,yy); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha=1;
-    ctx.fillStyle=C.ax; ctx.fillText(lbl,px1,yy-5); });
+    ctx.fillStyle=col; ctx.globalAlpha=.85; ctx.fillText(lbl,px1+5,yy); ctx.globalAlpha=1; });   // подписи в правом поле
   // линия z
   ctx.beginPath(); hist.forEach((p,i)=>{const X=x(i),Y=y(p.z); i?ctx.lineTo(X,Y):ctx.moveTo(X,Y);});
   ctx.strokeStyle=C.line; ctx.lineWidth=1.6; ctx.stroke();
@@ -1561,7 +1567,14 @@ function s5BuildChartSwitch(pairs){
     el.appendChild(b);
   });
 }
-async function s5Poll(){ if(_s5strat!=='st5') return; try{ const s=await s5api('/state'); _s5hist=s.history||{}; _s5trades=s.trades||[]; s5BuildChartSwitch(s.pairs); s5Render(s); s5DrawChart(); }catch(e){} }
+async function s5RenderBtHistory(){
+  try{ const d=await s5api('/backtest_history'); const h=d.history||[];
+    const tb=$('s5-bth').querySelector('tbody'); $('s5-bth-sub').textContent=h.length?h.length+' прогонов':'';
+    if(!h.length){ tb.innerHTML='<tr><td colspan="9" class="empty">прогонов пока нет</td></tr>'; return; }
+    tb.innerHTML=h.map(r=>`<tr><td style="color:var(--ink-dim)">${r.ts}</td><td>${r.kind}</td><td>${r.pair}</td><td>${r.days||'—'}</td><td>${r.trades}</td><td>${r.win_rate_pct}%</td><td style="color:${r.net_pnl_rub>=0?'var(--signal)':'var(--loss)'}">${s5money(r.net_pnl_rub)}</td><td>${r.sharpe}</td><td>${r.max_drawdown_pct}%</td></tr>`).join('');
+  }catch(e){}
+}
+async function s5Poll(){ if(_s5strat!=='st5') return; try{ const s=await s5api('/state'); _s5hist=s.history||{}; _s5trades=s.trades||[]; s5BuildChartSwitch(s.pairs); s5Render(s); s5DrawChart(); s5RenderBtHistory(); }catch(e){} }
 function s5Init(){
   document.querySelectorAll('.strat-tab').forEach(b=> b.onclick=()=>s5Switch(b.dataset.strat));
   $('s5-btn-start').onclick=async()=>{ try{ await s5api('/control/start','POST'); s5Poll(); }catch(e){alert(e.message);} };
