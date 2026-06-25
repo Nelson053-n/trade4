@@ -146,13 +146,26 @@ def test_portfolio_limits_gate():
     assert ok
     ok2, reason = s.portfolio.can_open("sber", "SBER", 6000.0, s.engines, ST5_PAIRS)
     assert not ok2 and "сделк" in reason
-    # открыта позиция по эмитенту SBER → вход в sber запрещён (≤1 на эмитента)
+    # лимит числа позиций: открыты sngr+tatn (2 из 3) → третья (sber) проходит,
+    # а если max_open_positions=2 — нет
+    for pid, st in (("sngr", St5State.LONG_SPREAD), ("tatn", St5State.SHORT_SPREAD)):
+        s.engines[pid].position = St5Position(
+            pair=pid, state=st, entry_ts=0, entry_z=-2.5, entry_spread=0.0, entry_beta=1.0,
+            lots=10, entry_lots=10, ord_entry=100.0, pref_entry=100.0, half_life=10)
+    okN, _ = s.portfolio.can_open("sber", "SBER", 1000.0, s.engines, ST5_PAIRS)
+    assert okN   # 2 открыто, лимит 3 → третья проходит
+    s.cfg.risk.max_open_positions = 2
+    okL, reasonL = s.portfolio.can_open("sber", "SBER", 1000.0, s.engines, ST5_PAIRS)
+    assert not okL and "лимит позиций" in reasonL
+    s.cfg.risk.max_open_positions = 3
+    # кандидат НЕ блокируется собственной позицией (exclude=pair): открыта sber → вход в sber ок
     s.engines["sber"].position = St5Position(
         pair="sber", state=St5State.LONG_SPREAD, entry_ts=0, entry_z=-2.5, entry_spread=0.0,
         entry_beta=1.0, lots=10, entry_lots=10, ord_entry=100.0, pref_entry=100.0, half_life=10)
-    ok3, reason3 = s.portfolio.can_open("sber", "SBER", 1000.0, s.engines, ST5_PAIRS)
-    assert not ok3 and "эмитент" in reason3
-    s.engines["sber"].position = None
+    okSelf, _ = s.portfolio.can_open("sber", "SBER", 1000.0, s.engines, ST5_PAIRS)
+    assert okSelf   # своя позиция не считается «уже есть по эмитенту»
+    for pid in ("sber", "sngr", "tatn"):
+        s.engines[pid].position = None
     # HALT блокирует всё
     s.portfolio.halt("тест")
     ok4, _ = s.portfolio.can_open("sber", "SBER", 1000.0, s.engines, ST5_PAIRS)

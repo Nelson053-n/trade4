@@ -41,19 +41,24 @@ class St5Portfolio:
         self.halt_reason: str = ""
         self.pair_halted: dict[str, str] = {}    # per-pair HALT (изоляция отказа одной пары)
 
-    def open_count(self, engines: dict[str, ST5Engine]) -> int:
-        return sum(1 for e in engines.values() if e.position is not None)
+    def open_count(self, engines: dict[str, ST5Engine], exclude: str | None = None) -> int:
+        return sum(1 for pid, e in engines.items()
+                   if e.position is not None and pid != exclude)
 
-    def open_issuers(self, engines: dict[str, ST5Engine], pairs: dict) -> set[str]:
+    def open_issuers(self, engines: dict[str, ST5Engine], pairs: dict,
+                     exclude: str | None = None) -> set[str]:
         out = set()
         for pid, e in engines.items():
-            if e.position is not None:
+            if e.position is not None and pid != exclude:
                 out.add(pairs[pid][2])
         return out
 
     def can_open(self, pair: str, issuer: str, notional_rub: float,
                  engines: dict[str, ST5Engine], pairs: dict) -> tuple[bool, str]:
-        """Разрешён ли вход в новую позицию по pair с заданным нотионалом. (ok, причина-отказа)."""
+        """Разрешён ли вход в новую позицию по pair. (ok, причина).
+
+        ВАЖНО: движок к этому моменту уже выставил eng.position кандидата → исключаем pair
+        из подсчёта открытых (иначе сам себя блокирует как «уже есть позиция по эмитенту»)."""
         r = self.cfg.risk
         if self.halted:
             return False, f"портфель HALTED: {self.halt_reason}"
@@ -61,15 +66,16 @@ class St5Portfolio:
             return False, f"пара HALTED: {self.pair_halted[pair]}"
         if not r.trading_enabled:
             return False, "торговля выключена"
-        if self.open_count(engines) >= r.max_open_positions:
+        if self.open_count(engines, exclude=pair) >= r.max_open_positions:
             return False, f"лимит позиций ({r.max_open_positions})"
-        if issuer in self.open_issuers(engines, pairs):
+        if issuer in self.open_issuers(engines, pairs, exclude=pair):
             return False, f"уже есть позиция по эмитенту {issuer}"
         # лимит на сделку
         if notional_rub > r.risk_per_trade_pct * self.capital_rub:
             return False, "превышен лимит на сделку (0.5%)"
-        # лимит на портфель: сумма нотионалов открытых + новая
-        cur = sum(self._pos_notional(e) for e in engines.values() if e.position is not None)
+        # лимит на портфель: сумма нотионалов УЖЕ открытых (кроме кандидата) + новая
+        cur = sum(self._pos_notional(e) for pid, e in engines.items()
+                  if e.position is not None and pid != pair)
         if cur + notional_rub > r.risk_per_portfolio_pct * self.capital_rub:
             return False, "превышен портфельный лимит (5%)"
         # дневной лимит убытка
