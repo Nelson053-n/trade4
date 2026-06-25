@@ -268,6 +268,12 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
     color:var(--ink-dim);font-family:var(--mono);font-size:11px;border-radius:8px;padding:6px 12px;cursor:pointer">выйти</button>
 </div>
 
+<div class="strat-tabs" style="display:flex;gap:6px;padding:10px 26px 0">
+  <button class="strat-tab on" data-strat="st4" style="background:var(--chart-line);color:#fff;border:1px solid var(--chart-line);border-radius:8px 8px 0 0;padding:8px 18px;cursor:pointer;font:inherit;font-weight:600">ST4 · спред-арбитраж</button>
+  <button class="strat-tab" data-strat="st5" style="background:var(--panel);color:var(--ink-dim);border:1px solid var(--line);border-bottom:none;border-radius:8px 8px 0 0;padding:8px 18px;cursor:pointer;font:inherit">ST5 · statarb (β/коинтеграция)</button>
+</div>
+
+<div id="tab-st4">
 <div class="sessbar" id="s4-sessbar">
   <span class="sb-dot" id="s4-sb-dot"></span>
   <span class="sb-state" id="s4-sb-state">—</span>
@@ -518,6 +524,83 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
   </label>
 </div>
 </div>
+</div><!-- /tab-st4 -->
+
+<div id="tab-st5" hidden>
+  <div class="sessbar" id="s5-sessbar" style="margin-top:8px">
+    <span class="sb-dot" id="s5-sb-dot"></span>
+    <span class="sb-state" id="s5-sb-state">ST5 остановлен</span>
+    <span class="sb-count" id="s5-sb-count"></span>
+    <span style="flex:1"></span>
+    <span class="sb-count" id="s5-sb-pnl"></span>
+  </div>
+  <div class="wrap">
+  <div class="grid">
+    <div>
+      <div class="card">
+        <h2>Портфель ST5 <span class="em" id="s5-portfolio-sub">institutional statarb</span></h2>
+        <div class="readouts">
+          <div class="ro"><label>капитал</label><div class="v" id="s5-ro-capital">—</div></div>
+          <div class="ro"><label>P&L день</label><div class="v" id="s5-ro-daypnl">—</div></div>
+          <div class="ro"><label>позиций</label><div class="v" id="s5-ro-positions">0 / 3</div></div>
+          <div class="ro"><label>net P&L</label><div class="v" id="s5-ro-net">—</div></div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Пары и фильтры <span class="em">коинтеграция · Hurst · режим</span></h2>
+        <table id="s5-pairs"><thead><tr><th>пара</th><th>z</th><th>β</th><th>ADF p</th><th>Hurst</th><th>RV</th><th>статус</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="card">
+        <h2>Открытые позиции <span class="em" id="s5-pos-sub"></span></h2>
+        <table id="s5-positions"><thead><tr><th>пара</th><th>напр.</th><th>z вх→тек</th><th>лот</th><th>держ</th><th>½</th><th>нереал ₽</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="card">
+        <h2>Журнал сделок ST5 <span class="em" id="s5-trades-sub"></span></h2>
+        <table id="s5-trades"><thead><tr><th>пара</th><th>напр.</th><th>z вх→вых</th><th>лот</th><th>net ₽</th><th>причина</th></tr></thead><tbody></tbody></table>
+      </div>
+    </div>
+    <div>
+      <div class="card">
+        <h2>Управление ST5</h2>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+          <button class="btn primary" id="s5-btn-start">▶ старт</button>
+          <button class="btn" id="s5-btn-stop">❚❚ стоп</button>
+          <button class="btn warn" id="s5-btn-flat">✕ закрыть всё</button>
+          <button class="btn danger" id="s5-btn-resume">снять HALT</button>
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px"><input type="checkbox" id="s5-trading"> торговля разрешена</label>
+        <div id="s5-halt-msg" style="color:var(--loss);font-size:12px;margin-top:6px"></div>
+      </div>
+      <div class="card">
+        <h2>Коннектор / боевой контур</h2>
+        <div class="fld"><label>режим</label><select id="s5-conn-mode">
+          <option value="paper">paper (виртуально)</option>
+          <option value="tbank_sandbox">T-Bank песочница</option>
+          <option value="tbank_real">🔴 БОЕВОЙ (реальные деньги)</option>
+        </select></div>
+        <div class="fld" id="s5-acc-fld" style="display:none"><label>account_id</label><input id="s5-conn-account" placeholder="реальный счёт T-Bank"></div>
+        <div class="fld"><label>токен T-Bank</label><input id="s5-conn-token" type="password" placeholder="t.xxx"></div>
+        <button class="btn primary" id="s5-btn-conn">применить</button>
+        <div id="s5-conn-msg" style="font-size:12px;margin-top:6px;color:var(--ink-dim)"></div>
+        <div id="s5-real-box" style="display:none;margin-top:10px;padding:10px;border:1px solid var(--loss);border-radius:8px">
+          <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--loss)"><input type="checkbox" id="s5-real-arm"> 🔴 ВЗВЕСТИ реальную торговлю</label>
+          <div id="s5-real-msg" style="font-size:11px;margin-top:4px;color:var(--ink-dim)">боевые ордера идут только при взводе + cooldown 10 мин</div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Бэктест / калибровка</h2>
+        <div class="fld"><label>пара</label><select id="s5-bt-pair"><option value="sber">Сбербанк</option><option value="sngr">Сургут</option><option value="tatn">Татнефть</option></select></div>
+        <div style="display:flex;gap:8px">
+          <button class="btn" id="s5-btn-bt">бэктест 180д</button>
+          <button class="btn" id="s5-btn-calib">walk-forward</button>
+        </div>
+        <div id="s5-bt-res" style="font-size:12px;margin-top:8px"></div>
+        <div id="s5-calib-res" style="font-size:12px;margin-top:8px"></div>
+      </div>
+    </div>
+  </div>
+  </div>
+</div><!-- /tab-st5 -->
 
 <script>
 /* ============================ ядро (без мультистратегийных артефактов) ============================ */
@@ -1295,6 +1378,114 @@ function s4Init(){
 addEventListener('resize',()=>{ s4Redraw(); if(_s4snap) s4RenderDaily(_s4snap.trades||[]); });
 setInterval(s4Poll, 1500);
 s4Init();
+
+/* ============================ ST5 ============================ */
+let _s5snap=null, _s5strat='st4';
+async function s5api(path, method='GET', body=null){
+  const opt={method, headers:{'Content-Type':'application/json'}, credentials:'same-origin'};
+  if(body!=null) opt.body=JSON.stringify(body);
+  const r=await fetch('/st5'+path, opt);
+  if(!r.ok){ const e=await r.json().catch(()=>({detail:r.statusText})); throw new Error(e.detail||r.statusText); }
+  return r.json();
+}
+function s5money(v){ if(v==null||Number.isNaN(v)) return '—'; const n=Math.round(v); return (n>=0?'+':'')+n.toLocaleString('ru')+' ₽'; }
+function s5Switch(strat){
+  _s5strat=strat;
+  document.querySelectorAll('.strat-tab').forEach(b=>{
+    const on=b.dataset.strat===strat;
+    b.classList.toggle('on',on);
+    b.style.background=on?'var(--chart-line)':'var(--panel)'; b.style.color=on?'#fff':'var(--ink-dim)';
+  });
+  $('tab-st4').hidden = strat!=='st4';
+  $('tab-st5').hidden = strat!=='st5';
+  if(strat==='st5') s5Poll();
+}
+function s5Render(s){
+  _s5snap=s;
+  const sb=$('s5-sessbar'); sb.className='sessbar'+(s.live?' live':'')+(s.halted?' warn':'');
+  $('s5-sb-state').textContent = s.halted?('HALTED: '+s.halt_reason) : (s.live?'ST5 live':'ST5 остановлен');
+  $('s5-sb-count').textContent = `${s.open_positions}/${s.max_open_positions} позиций · ${s.connector_mode}`+(s.real_trading_armed?' · 🔴ВЗВЕДЕН':'');
+  $('s5-sb-pnl').innerHTML = `net <b style="color:${s.net_pnl_rub>=0?'var(--signal)':'var(--loss)'}">${s5money(s.net_pnl_rub)}</b>`;
+  $('s5-ro-capital').textContent = Math.round(s.capital_rub).toLocaleString('ru')+' ₽';
+  $('s5-ro-daypnl').textContent = s5money(s.day_pnl_rub); $('s5-ro-daypnl').style.color=s.day_pnl_rub>=0?'var(--signal)':'var(--loss)';
+  $('s5-ro-positions').textContent = `${s.open_positions} / ${s.max_open_positions}`;
+  $('s5-ro-net').textContent = s5money(s.net_pnl_rub);
+  // пары + фильтры
+  const tb=$('s5-pairs').querySelector('tbody'); tb.innerHTML='';
+  (s.pairs||[]).forEach(p=>{
+    const ok=p.entry_allowed, col=ok?'var(--signal)':'var(--ink-dim)';
+    const flags=[p.cointegrated?'coint':'', p.mean_reverting?'MR':'', p.calm?'calm':''].filter(Boolean).join(' ');
+    const st = p.has_position?'<span style="color:var(--warn)">в позиции</span>':(p.halted?'<span style="color:var(--loss)">HALT</span>':`<span style="color:${col}">${ok?'готов':flags||'ждёт'}</span>`);
+    tb.insertAdjacentHTML('beforeend', `<tr><td>${p.label}</td><td style="color:${Math.abs(p.z||0)>=2.25?'var(--warn)':'var(--ink)'}">${p.z!=null?(p.z>=0?'+':'')+p.z.toFixed(2):'—'}</td><td>${p.beta!=null?p.beta.toFixed(3):'—'}</td><td>${p.adf_p!=null?p.adf_p.toFixed(3):'—'}</td><td>${p.hurst!=null?p.hurst.toFixed(2):'—'}</td><td>${p.rv_ratio!=null?p.rv_ratio.toFixed(2):'—'}</td><td>${st}</td></tr>`);
+  });
+  // позиции
+  const pb=$('s5-positions').querySelector('tbody'); pb.innerHTML='';
+  if(!(s.positions||[]).length) pb.innerHTML='<tr><td colspan="7" class="empty">нет открытых позиций</td></tr>';
+  (s.positions||[]).forEach(p=>{
+    const dir=p.state==='long_spread'?'<span style="color:var(--signal)">лонг</span>':'<span style="color:var(--short)">шорт</span>';
+    pb.insertAdjacentHTML('beforeend', `<tr><td>${p.label}</td><td>${dir}</td><td>${p.entry_z>=0?'+':''}${p.entry_z.toFixed(2)}→${p.cur_z!=null?(p.cur_z>=0?'+':'')+p.cur_z.toFixed(2):'?'}</td><td>${p.lots}/${p.entry_lots}</td><td>${p.bars_held}</td><td>${p.partial_done?'✓':''}</td><td style="color:${p.unrealized_rub>=0?'var(--signal)':'var(--loss)'}">${s5money(p.unrealized_rub)}</td></tr>`);
+  });
+  // сделки
+  const trb=$('s5-trades').querySelector('tbody'); trb.innerHTML='';
+  const trs=(s.trades||[]).slice().reverse();
+  $('s5-trades-sub').textContent = s.trades.length?s.trades.length+' сделок':'';
+  if(!trs.length) trb.innerHTML='<tr><td colspan="6" class="empty">сделок пока нет</td></tr>';
+  trs.forEach(t=>{
+    const dir=t.state==='long_spread'?'лонг':'шорт';
+    const reason={take_partial:'фикс 50%',exit:'выход z<0.35',z_stop:'стоп z',time_stop:'тайм-стоп',adf_break:'разрыв коинт.',flat_all:'flat-all'}[t.reason]||t.reason;
+    trb.insertAdjacentHTML('beforeend', `<tr><td>${t.pair}</td><td>${dir}</td><td>${t.entry_z>=0?'+':''}${t.entry_z.toFixed(1)}→${t.exit_z>=0?'+':''}${t.exit_z.toFixed(1)}</td><td>${t.lots}</td><td style="color:${t.net_pnl_rub>=0?'var(--signal)':'var(--loss)'}">${s5money(t.net_pnl_rub)}</td><td style="color:var(--ink-dim)">${reason}</td></tr>`);
+  });
+  // управление
+  if(document.activeElement!==$('s5-trading')) $('s5-trading').checked=s.trading_enabled;
+  $('s5-halt-msg').textContent = s.halted?('⚠ '+s.halt_reason):'';
+  const cm=$('s5-conn-mode'); if(document.activeElement!==cm) cm.value=s.connector_mode;
+  $('s5-real-box').style.display = s.connector_mode==='tbank_real'?'block':'none';
+  if(document.activeElement!==$('s5-real-arm')) $('s5-real-arm').checked=s.real_trading_armed;
+  // блокировка опасных кнопок при открытых позициях
+  const hasPos=s.open_positions>0;
+  ['s5-conn-mode','s5-conn-token','s5-btn-conn','s5-btn-stop','s5-bt-pair'].forEach(id=>{ const e=$(id); if(e){e.disabled=hasPos; e.title=hasPos?'Активные позиции — действие невозможно':''}});
+}
+async function s5Poll(){ if(_s5strat!=='st5') return; try{ s5Render(await s5api('/state')); }catch(e){} }
+function s5Init(){
+  document.querySelectorAll('.strat-tab').forEach(b=> b.onclick=()=>s5Switch(b.dataset.strat));
+  $('s5-btn-start').onclick=async()=>{ try{ await s5api('/control/start','POST'); s5Poll(); }catch(e){alert(e.message);} };
+  $('s5-btn-stop').onclick=async()=>{ try{ await s5api('/control/stop','POST'); s5Poll(); }catch(e){alert(e.message);} };
+  $('s5-btn-flat').onclick=async()=>{ if(!confirm('Закрыть ВСЕ позиции ST5 по рынку?'))return; try{ await s5api('/control/flat-all','POST',{confirm:true}); s5Poll(); }catch(e){alert(e.message);} };
+  $('s5-btn-resume').onclick=async()=>{ await s5api('/control/resume','POST'); s5Poll(); };
+  $('s5-trading').onchange=async(e)=>{ await s5api('/control/trading?on='+e.target.checked,'POST'); s5Poll(); };
+  $('s5-conn-mode').onchange=()=>{ $('s5-acc-fld').style.display=$('s5-conn-mode').value==='tbank_real'?'block':'none'; };
+  $('s5-btn-conn').onclick=async()=>{
+    const mode=$('s5-conn-mode').value, token=$('s5-conn-token').value.trim();
+    if(mode==='tbank_real'&&!confirm('БОЕВОЙ режим — РЕАЛЬНЫЕ ДЕНЬГИ. Ордера не пойдут без отдельного взвода. Продолжить?'))return;
+    const body={mode}; if(token)body.token=token;
+    if(mode==='tbank_real'){ const a=$('s5-conn-account').value.trim(); if(a)body.account_id=a; }
+    try{ const d=await s5api('/connector','POST',body); $('s5-conn-token').value=''; $('s5-conn-msg').textContent='режим: '+d.connector_mode+(d.token_set?' · токен ✓':''); s5Poll(); }
+    catch(e){ $('s5-conn-msg').textContent='ошибка: '+e.message; }
+  };
+  $('s5-real-arm').onchange=async()=>{
+    const armed=$('s5-real-arm').checked;
+    if(armed&&!confirm('🔴 ВЗВЕСТИ реальную торговлю ST5? Боевые ордера пойдут на реальный счёт (после cooldown 10 мин).')){ $('s5-real-arm').checked=false; return; }
+    try{ await s5api('/control/arm-real','POST',{armed,confirm:true}); $('s5-real-msg').textContent=armed?'🔴 ВЗВЕДЕНА':'снято'; s5Poll(); }
+    catch(e){ $('s5-real-msg').textContent='ошибка: '+e.message; $('s5-real-arm').checked=!armed; }
+  };
+  $('s5-btn-bt').onclick=async()=>{
+    const pair=$('s5-bt-pair').value; $('s5-bt-res').textContent='бэктест…';
+    try{ const d=await s5api('/backtest?pair='+pair+'&days=180');
+      if(d.error){ $('s5-bt-res').textContent=d.error; return; }
+      $('s5-bt-res').innerHTML=`<b>${d.legs}</b> ${d.bars}бар · сделок <b>${d.trades}</b> win <b style="color:var(--signal)">${d.win_rate_pct}%</b> net <b style="color:${d.net_pnl_rub>=0?'var(--signal)':'var(--loss)'}">${s5money(d.net_pnl_rub)}</b><br>PF ${d.profit_factor} · Sharpe ${d.sharpe} · maxDD ${d.max_drawdown_pct}%`;
+    }catch(e){ $('s5-bt-res').textContent='ошибка: '+e.message; }
+  };
+  $('s5-btn-calib').onclick=async()=>{
+    const pair=$('s5-bt-pair').value; $('s5-calib-res').textContent='walk-forward (может занять минуту)…';
+    try{ const d=await s5api('/calibrate?pair='+pair+'&days=180','POST');
+      if(d.error){ $('s5-calib-res').textContent=d.error; return; }
+      $('s5-calib-res').innerHTML=`лучшие: z_entry ${d.best_params.z_entry} z_stop ${d.best_params.z_stop} hurst ${d.best_params.hurst_max}<br>OOS net ${s5money(d.oos_total_net)} Sharpe ${d.oos_sharpe} · ${d.segments} сегм · стабильность ${(d.stability*100).toFixed(0)}% <button class="btn" onclick="s5ApplyCalib('${pair}')">применить</button>`;
+    }catch(e){ $('s5-calib-res').textContent='ошибка: '+e.message; }
+  };
+}
+async function s5ApplyCalib(pair){ if(!confirm('Применить откалиброванные параметры к ST5?'))return; try{ await s5api('/calibrate/apply?pair='+pair+'&confirm=true','POST'); alert('применено'); s5Poll(); }catch(e){alert(e.message);} }
+s5Init();
+setInterval(s5Poll, 2500);
 </script>
 </body>
 </html>

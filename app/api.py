@@ -430,6 +430,86 @@ def st5_arm_real(payload: dict):
     return {"ok": True, "real_trading_armed": ST5.state["real_trading_armed"]}
 
 
+_ST5_CALIB_STAGING: dict = {}   # результат автокалибровки до подтверждения (НЕ применяется авто)
+
+
+@app.get("/st5/backtest")
+async def st5_backtest(pair: str = "sber", days: int = 180):
+    """Бэктест ST5 на истории MOEX за период (для проверки/калибровки в UI)."""
+    from .st5.service import ST5_PAIRS
+    if pair not in ST5_PAIRS:
+        raise HTTPException(400, "pair: " + " | ".join(ST5_PAIRS))
+    ao, ap = ST5_PAIRS[pair][0], ST5_PAIRS[pair][1]
+
+    def _run():
+        from .st4.config import St4Config as _C4
+        from .st4 import data_feed as _feed
+        from .st5.backtest import run_backtest
+        c4 = _C4(); c4.instruments.asset_ordinary = ao; c4.instruments.asset_preferred = ap
+        c4.strategy.candle_interval_minutes = ST5.cfg.strategy.candle_interval_minutes
+        try:
+            so, sp = _feed.resolve_legs(c4)
+            since = _dt.now(_tz.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+            since = _dt.fromtimestamp(since.timestamp() - days * 86400, tz=_tz.utc)
+            df = _feed.read_ohlcv_moex_range(c4, since, so.code, sp.code)
+        except Exception as e:  # noqa: BLE001
+            return {"error": f"данные недоступны: {e}"}
+        if len(df) < 600:
+            return {"error": f"мало баров: {len(df)}"}
+        m = run_backtest(df, ST5.cfg, pair=pair, base_lots=10, fee_per_lot=2.0, half_spread_pts=0.5)
+        return {"pair": pair, "legs": f"{so.code}/{sp.code}", "bars": m.bars, "trades": m.trades,
+                "win_rate_pct": round(m.win_rate_pct, 0), "net_pnl_rub": round(m.net_pnl_rub, 0),
+                "profit_factor": round(m.profit_factor, 2) if m.profit_factor != float("inf") else 999,
+                "sharpe": round(m.sharpe, 2), "max_drawdown_pct": round(m.max_drawdown_pct, 1),
+                "reasons": m.reasons}
+
+    return _clean(await asyncio.to_thread(_run))
+
+
+@app.post("/st5/calibrate")
+async def st5_calibrate(pair: str = "sber", days: int = 180):
+    """Walk-forward автокалибровка → STAGING (НЕ применяется авто, нужно подтверждение)."""
+    from .st5.service import ST5_PAIRS
+    if pair not in ST5_PAIRS:
+        raise HTTPException(400, "pair: " + " | ".join(ST5_PAIRS))
+    ao, ap = ST5_PAIRS[pair][0], ST5_PAIRS[pair][1]
+
+    def _run():
+        from .st4.config import St4Config as _C4
+        from .st4 import data_feed as _feed
+        from .st5.calibrate import walk_forward
+        c4 = _C4(); c4.instruments.asset_ordinary = ao; c4.instruments.asset_preferred = ap
+        try:
+            so, sp = _feed.resolve_legs(c4)
+            since = _dt.now(_tz.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+            since = _dt.fromtimestamp(since.timestamp() - days * 86400, tz=_tz.utc)
+            df = _feed.read_ohlcv_moex_range(c4, since, so.code, sp.code)
+        except Exception as e:  # noqa: BLE001
+            return {"error": f"данные недоступны: {e}"}
+        return walk_forward(df, ST5.cfg, pair=pair)
+
+    res = await asyncio.to_thread(_run)
+    if "error" not in res:
+        _ST5_CALIB_STAGING[pair] = res   # в staging — применение отдельным эндпоинтом
+    return _clean(res)
+
+
+@app.post("/st5/calibrate/apply")
+def st5_calibrate_apply(pair: str = "sber", confirm: bool = False):
+    """Применить параметры из staging (требует confirm и отсутствия открытых позиций)."""
+    if not confirm:
+        raise HTTPException(400, "нужно подтверждение: confirm=true")
+    _st5_guard_no_position("применение калибровки")
+    if pair not in _ST5_CALIB_STAGING:
+        raise HTTPException(404, "нет staging-калибровки для пары")
+    params = _ST5_CALIB_STAGING[pair]["best_params"]
+    for k, v in params.items():
+        setattr(ST5.cfg.strategy, k, v)
+    ST5.log_event("info", f"калибровка применена ({pair}): {params}")
+    ST5.save_session()
+    return {"ok": True, "applied": params}
+
+
 @app.post("/st5/connector")
 def st5_connector(payload: dict):
     """Режим исполнителя st5: paper | tbank_sandbox | tbank_real (+account_id для real)."""
