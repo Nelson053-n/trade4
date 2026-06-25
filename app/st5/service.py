@@ -357,11 +357,13 @@ class St5Session:
             self.log_event("warn", f"{pid}: данные недоступны: {e}")
             return
         last_ts = self.last_live_ts.get(pid, 0)
+        # «холодный» движок после рестарта: last_ts большой, но spread_buf пуст. Прогреваем ВСЕМИ
+        # доступными историческими барами (≤ last_ts) без сделок, чтобы набрать ADF/Hurst-окна.
+        cold = len(eng.spread_buf) < min(len(df), self.cfg.strategy.adf_window)
         for ts, row in df.iterrows():
             ts = int(ts)
             if ts <= last_ts:
-                # прогрев движка прошлыми барами (без сделок) до last_ts
-                if eng.kalman.ready is False or len(eng.spread_buf) < 50:
+                if cold:   # прогрев историей до last_ts (без сделок)
                     eng.step(ts, float(row["price_a"]), float(row["price_b"]))
                 continue
             tr = eng.step(ts, float(row["price_a"]), float(row["price_b"]))
