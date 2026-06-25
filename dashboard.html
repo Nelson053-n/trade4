@@ -805,50 +805,17 @@ function s4DrawDailyBars(days){
   ctx.fillText(Math.round(hi).toLocaleString('ru'),padL-4,y(hi)+4);
   if(lo<0) ctx.fillText(Math.round(lo).toLocaleString('ru'),padL-4,y(lo)+4);
   ctx.textAlign='center';
-  const rad=Math.min(6,bw/2);
-  const _dark=(hex,t)=>{ // затемнить hex к чёрному на долю t (для глубины/объёма)
-    hex=rgb2hex(hex).replace('#',''); if(hex.length===3) hex=hex.split('').map(c=>c+c).join('');
-    const r=parseInt(hex.slice(0,2),16),g2=parseInt(hex.slice(2,4),16),b=parseInt(hex.slice(4,6),16);
-    const D=x=>Math.round(x*(1-t)); return `rgb(${D(r)},${D(g2)},${D(b)})`;
-  };
+  // плоский минимализм: ровный однотонный цвет, тонкие скруглённые верхушки, без градиентов/бликов
+  const rad=Math.min(3,bw/2);
   days.forEach((d,i)=>{
     const xx=padL+4+i*(bw+gap);
     const yy=y(d.net), top=Math.min(yy,y0), h=Math.max(2,Math.abs(yy-y0));
-    const base=d.net>=0?getCSS('--signal'):getCSS('--loss');
-    const hx=rgb2hex(base);
     const rr=Math.min(rad,h);
-    // вертикальный объёмный градиент: насыщенная середина, светлый блик к «свету», тёмная глубина
-    const g=ctx.createLinearGradient(0,top,0,top+h);
-    if(d.net>=0){
-      g.addColorStop(0,_lighten(hx,0.55));   // блик на вершине столбца
-      g.addColorStop(0.18,_lighten(hx,0.18));
-      g.addColorStop(0.6,hx);                 // насыщенный корпус
-      g.addColorStop(1,_dark(hx,0.28));       // тёмное основание (глубина)
-    } else {
-      g.addColorStop(0,_dark(hx,0.28));
-      g.addColorStop(0.4,hx);
-      g.addColorStop(0.82,_lighten(hx,0.18));
-      g.addColorStop(1,_lighten(hx,0.55));
-    }
-    // мягкое свечение под столбцом — придаёт объём и «отрыв» от фона
-    ctx.save();
-    ctx.shadowColor=hx; ctx.shadowBlur=10; ctx.shadowOffsetY=d.net>=0?2:-2;
-    ctx.fillStyle=g;
-    if(ctx.roundRect){ ctx.beginPath(); ctx.roundRect(xx,top,bw,h,d.net>=0?[rr,rr,1,1]:[1,1,rr,rr]); ctx.fill(); }
+    ctx.fillStyle=d.net>=0?getCSS('--signal'):getCSS('--loss');
+    if(ctx.roundRect){ ctx.beginPath(); ctx.roundRect(xx,top,bw,h,d.net>=0?[rr,rr,0,0]:[0,0,rr,rr]); ctx.fill(); }
     else ctx.fillRect(xx,top,bw,h);
-    ctx.restore();
-    // вертикальный блик-хайлайт по левой грани (глянец, эффект цилиндра)
-    if(bw>=5){
-      const hl=ctx.createLinearGradient(xx,0,xx+bw,0);
-      hl.addColorStop(0,'rgba(255,255,255,0.28)');
-      hl.addColorStop(0.35,'rgba(255,255,255,0.05)');
-      hl.addColorStop(1,'rgba(255,255,255,0)');
-      ctx.fillStyle=hl;
-      if(ctx.roundRect){ ctx.beginPath(); ctx.roundRect(xx,top,bw,h,d.net>=0?[rr,rr,1,1]:[1,1,rr,rr]); ctx.fill(); }
-      else ctx.fillRect(xx,top,bw,h);
-    }
     // подпись суммы над/под столбцом
-    ctx.fillStyle=getCSS('--ink-dim'); ctx.font='600 9px IBM Plex Mono,monospace';
+    ctx.fillStyle=getCSS('--ink-dim'); ctx.font='9px IBM Plex Mono,monospace';
     ctx.fillText(d.n, xx+bw/2, d.net>=0?top-4:top+h+11);
     if(n<=12 || i%Math.ceil(n/12)===0){
       const dm=d.date.slice(8,10)+'.'+d.date.slice(5,7);
