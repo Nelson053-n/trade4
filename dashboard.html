@@ -1456,6 +1456,7 @@ function s5Render(s){
   ['s5-conn-mode','s5-conn-token','s5-btn-conn','s5-btn-stop','s5-bt-pair'].forEach(id=>{ const e=$(id); if(e){e.disabled=hasPos; e.title=hasPos?'Активные позиции — действие невозможно':''}});
 }
 let _s5chartPair='sber', _s5hist={};
+let _s5trades=[], _s5geom=null, _s5pulse=0;
 function s5DrawChart(){
   const cv=$('s5chart'); if(!cv) return;
   const r=cv.getBoundingClientRect();
@@ -1468,27 +1469,85 @@ function s5DrawChart(){
   if(hist.length<2){ ctx.fillStyle=getCSS('--ink-dim'); ctx.font='12px IBM Plex Mono,monospace'; ctx.fillText('прогрев индикаторов…',12,24); return; }
   const cs=getComputedStyle(document.documentElement);
   const C={line:cs.getPropertyValue('--chart-line').trim(),band:cs.getPropertyValue('--chart-band').trim(),
-           mid:cs.getPropertyValue('--chart-mid').trim(),ax:cs.getPropertyValue('--ink-faint').trim(),grid:cs.getPropertyValue('--line').trim()};
+           mid:cs.getPropertyValue('--chart-mid').trim(),ax:cs.getPropertyValue('--ink-faint').trim(),
+           grid:cs.getPropertyValue('--line').trim(),win:cs.getPropertyValue('--signal').trim(),
+           loss:cs.getPropertyValue('--loss').trim(),warn:cs.getPropertyValue('--warn').trim(),
+           short:cs.getPropertyValue('--short').trim(),ink:cs.getPropertyValue('--ink').trim(),panel:cs.getPropertyValue('--panel').trim()};
   const ML=34,MB=18,MT=8,MR=8, px0=ML,px1=W-MR,py0=MT,py1=H-MB;
   const zs=hist.map(p=>p.z);
-  let lo=Math.min(-4.5,...zs), hi=Math.max(4.5,...zs); const pad=(hi-lo)*0.05; lo-=pad; hi+=pad;
+  let lo=Math.min(-4.8,...zs), hi=Math.max(4.8,...zs); const pad=(hi-lo)*0.05; lo-=pad; hi+=pad;
   const x=i=>px0+i/(hist.length-1)*(px1-px0), y=v=>py1-(v-lo)/(hi-lo)*(py1-py0);
-  // горизонтальные уровни z: 0, ±2.25, ±4.25
-  const levels=[[0,C.mid,'0'],[2.25,C.band,'+2.25'],[-2.25,C.band,'−2.25'],[4.25,C.grid,'+4.25'],[-4.25,C.grid,'−4.25']];
-  ctx.font='9px IBM Plex Mono,monospace'; ctx.textAlign='right'; ctx.textBaseline='middle';
-  levels.forEach(([v,col,lbl])=>{
-    if(v<lo||v>hi) return; const yy=y(v);
-    ctx.strokeStyle=col; ctx.lineWidth=1; ctx.globalAlpha=v===0?.6:.35; ctx.setLineDash(v===0?[]:[4,4]);
+  const yClip=v=>Math.max(py0,Math.min(py1,y(v)));
+  // ЗОНЫ: вход (между ±2.25 и ±4) зелёным, стоп (за ±4.25) красным, take (|z|<1) нейтрально
+  const zone=(z1,z2,col,a)=>{ const Y1=yClip(z1),Y2=yClip(z2); ctx.fillStyle=col; ctx.globalAlpha=a; ctx.fillRect(px0,Math.min(Y1,Y2),px1-px0,Math.abs(Y2-Y1)); ctx.globalAlpha=1; };
+  zone(2.25,4.0,C.short,0.07); zone(-2.25,-4.0,C.win,0.07);        // зоны входа SHORT/LONG
+  zone(4.0,hi,C.loss,0.06); zone(-4.0,lo,C.loss,0.06);             // запрет входа (|z|>4)
+  zone(-1,1,C.mid,0.05);                                           // зона фиксации/выхода
+  // уровни
+  const levels=[[0,C.mid,'0 равновесие'],[2.25,C.band,'+2.25 вход'],[-2.25,C.band,'−2.25 вход'],[4.25,C.loss,'+4.25 стоп'],[-4.25,C.loss,'−4.25 стоп'],[1,C.ax,'+1 фикс'],[-1,C.ax,'−1 фикс']];
+  ctx.font='8px IBM Plex Mono,monospace'; ctx.textAlign='right'; ctx.textBaseline='middle';
+  levels.forEach(([v,col,lbl])=>{ if(v<lo||v>hi) return; const yy=y(v);
+    ctx.strokeStyle=col; ctx.lineWidth=1; ctx.globalAlpha=v===0?.55:.3; ctx.setLineDash(v===0?[]:[4,4]);
     ctx.beginPath(); ctx.moveTo(px0,yy); ctx.lineTo(px1,yy); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha=1;
-    ctx.fillStyle=C.ax; ctx.fillText(lbl,px0-4,yy);
-  });
+    ctx.fillStyle=C.ax; ctx.fillText(lbl,px1,yy-5); });
   // линия z
   ctx.beginPath(); hist.forEach((p,i)=>{const X=x(i),Y=y(p.z); i?ctx.lineTo(X,Y):ctx.moveTo(X,Y);});
   ctx.strokeStyle=C.line; ctx.lineWidth=1.6; ctx.stroke();
-  // последняя точка
+  // СДЕЛКИ: точки входа/частичной фиксации/выхода по ts на линии z. idxAt — ближайший бар.
+  const t0=hist[0].ts, t1=hist[hist.length-1].ts;
+  const idxAt=ts=>{ let bi=-1,bd=Infinity; hist.forEach((p,i)=>{const d=Math.abs(p.ts-ts); if(d<bd){bd=d;bi=i;}}); return bd<6e5*3?bi:-1; };
+  const ring=(X,Y,col,rd)=>{ ctx.beginPath();ctx.arc(X,Y,rd||4.5,0,7);ctx.fillStyle=C.panel;ctx.fill();ctx.lineWidth=2;ctx.strokeStyle=col;ctx.stroke(); };
+  const reasonCol={take_partial:C.warn,exit:C.win,z_stop:C.loss,time_stop:C.loss,adf_break:C.loss,flat_all:C.ink};
+  const geomPts=[];
+  (_s5trades||[]).filter(t=>t.pair===_s5chartPair).forEach(t=>{
+    const ei=idxAt(t.entry_ts), xi=idxAt(t.exit_ts);
+    if(ei>=0){ const X=x(ei),Y=y(t.entry_z); // вход — кольцо цвета направления
+      const col=t.state==='long_spread'?C.win:C.short;
+      if(xi>=0){ const X2=x(xi),Y2=y(t.exit_z); ctx.save();ctx.globalAlpha=.4;ctx.strokeStyle=reasonCol[t.reason]||C.ax;ctx.lineWidth=1.4;ctx.beginPath();ctx.moveTo(X,Y);ctx.lineTo(X2,Y2);ctx.stroke();ctx.restore();
+        ring(X2,Y2,reasonCol[t.reason]||C.ax,t.reason==='take_partial'?3.5:4.5); geomPts.push({X:X2,Y:Y2,t,kind:'exit'}); }
+      ring(X,Y,col); geomPts.push({X,Y,t,kind:'entry'});
+    }
+  });
+  // последняя точка z — пульсация (анимация «живого» сигнала)
   const lp=hist[hist.length-1], lx=x(hist.length-1), ly=y(lp.z);
+  _s5pulse=(_s5pulse+0.08)%(Math.PI*2);
+  const pr=3.5+Math.sin(_s5pulse)*1.5;
+  ctx.beginPath(); ctx.arc(lx,ly,pr+3,0,7); ctx.fillStyle=C.line; ctx.globalAlpha=.15; ctx.fill(); ctx.globalAlpha=1;
   ctx.beginPath(); ctx.arc(lx,ly,3.5,0,7); ctx.fillStyle=C.line; ctx.shadowColor=C.line; ctx.shadowBlur=8; ctx.fill(); ctx.shadowBlur=0;
+  // текущее z крупно в углу
+  ctx.fillStyle=Math.abs(lp.z)>=2.25?C.warn:C.ink; ctx.font='600 13px IBM Plex Mono,monospace'; ctx.textAlign='left'; ctx.textBaseline='top';
+  ctx.fillText('z = '+(lp.z>=0?'+':'')+lp.z.toFixed(2), px0+4, py0+2);
+  ctx.fillStyle=C.ax; ctx.font='9px IBM Plex Mono,monospace'; ctx.fillText('β '+lp.beta.toFixed(3)+' · ADF '+lp.adf_p.toFixed(2)+' · H '+lp.hurst.toFixed(2), px0+4, py0+18);
+  _s5geom={x,y,hist,px0,px1,py0,py1,pts:geomPts};
 }
+// единый аниматор пульса (не плодим rAF в каждом draw) — перерисовка ~20fps когда вкладка ST5
+let _s5anim=0;
+function s5AnimLoop(){ _s5anim++; if(_s5strat==='st5' && _s5anim%3===0 && _s5hist[_s5chartPair] && _s5hist[_s5chartPair].length>1) s5DrawChart(); requestAnimationFrame(s5AnimLoop); }
+requestAnimationFrame(s5AnimLoop);
+// тултип графика ST5
+(function(){
+  document.addEventListener('mousemove',e=>{
+    if(_s5strat!=='st5') return;
+    const cv=$('s5chart'); if(!cv||!_s5geom) return;
+    const r=cv.getBoundingClientRect(); const mx=e.clientX-r.left,my=e.clientY-r.top;
+    let tip=$('s5tip');
+    if(!tip){ tip=document.createElement('div'); tip.id='s5tip'; tip.className='an-tip'; cv.parentElement.style.position='relative'; cv.parentElement.appendChild(tip); }
+    // ближайшая точка сделки
+    let best=null,bd=16;
+    (_s5geom.pts||[]).forEach(p=>{ const d=Math.hypot(p.X-mx,p.Y-my); if(d<bd){bd=d;best=p;} });
+    if(best){ const t=best.t;
+      const rs={take_partial:'фиксация 50% (z вернулся к ±1)',exit:'полный выход (z<0.35, к равновесию)',z_stop:'СТОП: z>4.25 (разошлось дальше)',time_stop:'тайм-стоп (3×half-life)',adf_break:'разрыв коинтеграции (ADF>0.15)',flat_all:'аварийное закрытие'}[t.reason]||t.reason;
+      tip.innerHTML=`<b>${best.kind==='entry'?'ВХОД':'ВЫХОД'}</b> · ${t.state==='long_spread'?'лонг':'шорт'} спреда<br>z ${best.kind==='entry'?t.entry_z.toFixed(2):t.exit_z.toFixed(2)} · ${t.lots} лот<br>${best.kind==='exit'?rs+'<br>':''}net <span style="color:${t.net_pnl_rub>=0?'var(--signal)':'var(--loss)'}">${s5money(t.net_pnl_rub)}</span>`;
+      tip.style.display='block'; tip.style.left=Math.min(mx+14,r.width-160)+'px'; tip.style.top=(my+14)+'px'; return;
+    }
+    // иначе значение бара под курсором
+    const g=_s5geom; if(mx<g.px0||mx>g.px1||my<g.py0||my>g.py1){ tip.style.display='none'; return; }
+    const idx=Math.max(0,Math.min(g.hist.length-1,Math.round((mx-g.px0)/(g.px1-g.px0)*(g.hist.length-1)))); const p=g.hist[idx];
+    const m=s4msk(p.ts);
+    tip.innerHTML=`<b>${m.hh}:${m.mm}</b><br>z <b>${p.z>=0?'+':''}${p.z.toFixed(2)}</b> · спред ${Math.round(p.spread)}<br>β ${p.beta.toFixed(3)} · ADF ${p.adf_p.toFixed(2)} · Hurst ${p.hurst.toFixed(2)}`;
+    tip.style.display='block'; tip.style.left=Math.min(mx+14,r.width-160)+'px'; tip.style.top=(my+14)+'px';
+  });
+})();
 function s5BuildChartSwitch(pairs){
   const el=$('s5-chart-switch'); if(!el||el.childElementCount) return;
   (pairs||[]).forEach(p=>{
@@ -1498,7 +1557,7 @@ function s5BuildChartSwitch(pairs){
     el.appendChild(b);
   });
 }
-async function s5Poll(){ if(_s5strat!=='st5') return; try{ const s=await s5api('/state'); _s5hist=s.history||{}; s5BuildChartSwitch(s.pairs); s5Render(s); s5DrawChart(); }catch(e){} }
+async function s5Poll(){ if(_s5strat!=='st5') return; try{ const s=await s5api('/state'); _s5hist=s.history||{}; _s5trades=s.trades||[]; s5BuildChartSwitch(s.pairs); s5Render(s); s5DrawChart(); }catch(e){} }
 function s5Init(){
   document.querySelectorAll('.strat-tab').forEach(b=> b.onclick=()=>s5Switch(b.dataset.strat));
   $('s5-btn-start').onclick=async()=>{ try{ await s5api('/control/start','POST'); s5Poll(); }catch(e){alert(e.message);} };
