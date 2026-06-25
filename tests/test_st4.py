@@ -817,9 +817,11 @@ def test_adopt_position_from_account_restores_on_restart():
         def broker_entry_ts(self):
             return 1700000000000   # брокер знает реальное время входа
     s.engine.executor = _FakeEx()
-    # на счёте short_spread: обычка -10 / преф +10
+    # на счёте обычка -10 (sell) / преф +10 (buy). Канон: обычка sell/преф buy = LONG_SPREAD
+    # (engine._open_position: LONG = sell обычка + buy преф). Регресс на инверсию метки при
+    # усыновлении (раньше тут ошибочно ожидался SHORT_SPREAD → знак P&L расходился с направлением).
     assert s._adopt_position_from_account({Role.ORDINARY: -10, Role.PREFERRED: 10})
-    assert s.engine.state == BotState.SHORT_SPREAD
+    assert s.engine.state == BotState.LONG_SPREAD
     assert s.engine.position.leg_ord.side == "sell" and s.engine.position.leg_ord.lots == 10
     assert s.engine.position.leg_pref.side == "buy"
     # entry_ts взят из брокера, а НЕ time.time() (регресс: точка входа была в момент рестарта)
@@ -827,6 +829,34 @@ def test_adopt_position_from_account_restores_on_restart():
     # непарная (одна нога) — не восстанавливаем (вернёт False → дальше flat_broker)
     s.engine.position = None
     assert not s._adopt_position_from_account({Role.ORDINARY: -10, Role.PREFERRED: 0})
+
+
+def test_adopt_position_sign_matches_direction():
+    """Регресс: усыновлённая позиция должна иметь знак P&L, согласованный с направлением.
+
+    Баг: метка state при усыновлении была инвертирована (+обычка→LONG), из-за чего, например,
+    позиция с обычка buy / преф sell получала метку long_spread, но фактически вела себя как
+    шорт — лонг при РОСТЕ спреда уходил в минус (так в live sngr 24.06: спред +127 → net −143).
+    Канон: обычка buy(+) / преф sell(−) = SHORT_SPREAD."""
+    from app.st4.service import St4Session
+    from app.st4.models import Role, BotState
+    s = St4Session("sber")
+
+    class _FakeEx:
+        def entry_prices(self):
+            return {Role.ORDINARY: 29597.0, Role.PREFERRED: 29533.0}
+        def broker_entry_ts(self):
+            return 1700000000000
+    s.engine.executor = _FakeEx()
+    # обычка +10 (buy) / преф -10 (sell) → по канону это SHORT_SPREAD
+    assert s._adopt_position_from_account({Role.ORDINARY: 10, Role.PREFERRED: -10})
+    assert s.engine.state == BotState.SHORT_SPREAD
+    assert s.engine.position.leg_ord.side == "buy"
+    assert s.engine.position.leg_pref.side == "sell"
+    # зеркально: обычка -10 / преф +10 → LONG_SPREAD
+    s.engine.position = None
+    assert s._adopt_position_from_account({Role.ORDINARY: -10, Role.PREFERRED: 10})
+    assert s.engine.state == BotState.LONG_SPREAD
 
 
 def test_adopt_position_entry_ts_fallback_to_last_bar():

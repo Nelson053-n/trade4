@@ -182,7 +182,7 @@ class St4Session:
 
     def _position_matches_lots(self, lots: dict) -> bool:
         """Совпадает ли позиция движка с фактическими лотами sandbox-счёта (по знаку и модулю).
-        long_spread = обычка buy(+) / преф sell(−); short_spread — наоборот."""
+        short_spread = обычка buy(+) / преф sell(−); long_spread — наоборот."""
         p = self.engine.position
         if p is None:
             return False
@@ -194,7 +194,7 @@ class St4Session:
     def _adopt_position_from_account(self, lots: dict) -> bool:
         """Восстановить позицию ДВИЖКА из реальных лотов sandbox-счёта (при рестарте движок
         стартует flat, но на счёте висит легитимная позиция). Направление — по знаку лотов
-        обычки: +обычка/−преф = long_spread, иначе short_spread. Цены входа — из портфеля
+        обычки: +обычка/−преф = short_spread, иначе long_spread. Цены входа — из портфеля
         (entry_prices). Так рестарт НЕ закрывает живую сделку, а продолжает её вести.
         True — позиция восстановлена."""
         from .models import LegPosition, Position
@@ -202,7 +202,12 @@ class St4Session:
         bal_p = lots.get(Role.PREFERRED, 0)
         if bal_o == 0 or bal_p == 0 or (bal_o > 0) == (bal_p > 0):
             return False   # не парная позиция (одна нога/одинаковый знак) — не восстановить
-        state = BotState.LONG_SPREAD if bal_o > 0 else BotState.SHORT_SPREAD
+        # Канон направления (engine._open_position + test_short_spread_profits_when_spread_falls):
+        #   SHORT_SPREAD = обычка buy(+) / преф sell(−);  LONG_SPREAD = обычка sell(−) / преф buy(+).
+        # Раньше здесь было инвертировано (+обычка→LONG), из-за чего усыновлённая позиция
+        # получала зеркальную метку, а знак P&L расходился с направлением (лонг при росте спреда
+        # уходил в минус). Ноги ниже ставятся по фактическому знаку лотов — они корректны.
+        state = BotState.SHORT_SPREAD if bal_o > 0 else BotState.LONG_SPREAD
         try:
             prices = self.engine.executor.entry_prices()
         except Exception:  # noqa: BLE001
