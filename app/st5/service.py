@@ -320,19 +320,32 @@ class St5Session:
             await asyncio.sleep(self.cfg.poll_seconds)
 
     async def _step_pair(self, pid: str, eng, warmup_limit: int, replayed: bool) -> None:
-        """Один проход по паре: тянем свежие бары, прогоняем движок, исполняем сделки."""
+        """Один проход по паре: тянем свежие бары, прогоняем движок, исполняем сделки.
+
+        Источник: в sandbox/real — T-Bank real-time (без лага/обрывов ISS); paper — MOEX ISS.
+        """
         from .service import ST5_PAIRS as _P
         ao, ap = _P[pid][0], _P[pid][1]
-        # резолвим серии (роллровер) через st4 data_feed
         from ..st4.config import St4Config as _C4
         c4 = _C4()
         c4.instruments.asset_ordinary = ao
         c4.instruments.asset_preferred = ap
         c4.strategy.candle_interval_minutes = self.cfg.strategy.candle_interval_minutes
+        sandbox = self.state.get("sandbox_active", False)
+        # после прогрева тянем только хвост (60 баров), не весь warmup — снижает нагрузку/обрывы
+        warm = len(eng.spread_buf) < 50
+        limit = warmup_limit if warm else 80
         try:
             so, sp = await asyncio.to_thread(feed.resolve_legs, c4)
-            df = await asyncio.to_thread(feed.read_ohlcv_moex, c4, warmup_limit, so.code, sp.code)
-            df = df.iloc[:-1]   # без формирующегося бара
+            if sandbox:
+                # T-Bank real-time по uid ног (как st4 в sandbox)
+                from ..st4 import tbank_sandbox as _sb
+                uid_o = _sb.find_future(so.code)["uid"]
+                uid_p = _sb.find_future(sp.code)["uid"]
+                df = await asyncio.to_thread(feed.read_ohlcv_tbank, c4, limit, uid_o, uid_p)
+            else:
+                df = await asyncio.to_thread(feed.read_ohlcv_moex, c4, limit, so.code, sp.code)
+                df = df.iloc[:-1]   # ISS: без формирующегося бара
         except Exception as e:  # noqa: BLE001
             self.log_event("warn", f"{pid}: данные недоступны: {e}")
             return
