@@ -110,6 +110,43 @@ def test_half_life_positive_for_mean_reverting():
     assert hl_rw == float("inf") or hl_rw > hl * 5
 
 
+def test_engine_trades_on_cointegrated_pair():
+    """Движок ST5 открывает и закрывает сделки на синтетической коинтегрированной паре."""
+    import pandas as pd
+    from app.st5.backtest import run_backtest
+    from app.st5.config import St5Config
+    rng = np.random.default_rng(42)
+    n = 2000
+    ord_ = np.cumsum(rng.normal(0, 1, n)) + 1000
+    spread = np.zeros(n)
+    for i in range(1, n):
+        spread[i] = 0.97 * spread[i - 1] + rng.normal(0, 3)   # OU mean-reverting
+    pref = 1.5 * ord_ + spread
+    df = pd.DataFrame({"price_a": ord_, "price_b": pref},
+                      index=[i * 600000 for i in range(n)])
+    cfg = St5Config()
+    cfg.strategy.adf_window = 300
+    cfg.strategy.hurst_window = 300
+    cfg.strategy.filter_recalc_bars = 20
+    cfg.strategy.hurst_max = 0.70   # синтетика даёт высокий R/S Hurst
+    m = run_backtest(df, cfg, pair="syn", base_lots=10, fee_per_lot=2.0, half_spread_pts=0.5)
+    assert m.trades > 0, "движок не открыл ни одной сделки на mean-reverting паре"
+    # причины закрытия осмысленны
+    assert set(m.reasons) <= {"exit", "take_partial", "z_stop", "time_stop", "adf_break", "flat_all"}
+
+
+def test_size_multiplier_tiers():
+    """Сайзинг по |z|: тиры 1x/1.5x/2x, запрет при |z|>4."""
+    from app.st5.config import St5StrategyConfig
+    from app.st5.engine import size_multiplier
+    s = St5StrategyConfig()
+    assert size_multiplier(2.5, s) == 1.0
+    assert size_multiplier(3.0, s) == 1.5
+    assert size_multiplier(3.5, s) == 2.0
+    assert size_multiplier(4.5, s) is None   # > z_no_entry
+    assert size_multiplier(2.0, s) is None   # ниже первого тира
+
+
 def test_rv_ratio_spikes_on_volatility_burst():
     """RV-ratio > 1 при всплеске краткосрочной волатильности."""
     rng = np.random.default_rng(9)

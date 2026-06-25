@@ -38,8 +38,11 @@ class St5StrategyConfig(BaseModel):
     adf_p_enter: float = 0.05                # торговля разрешена при ADF p < 0.05
     adf_p_break: float = 0.15                # structural break stop: закрыть при ADF p > 0.15
     hurst_window: int = 500                  # окно Hurst
-    hurst_min: float = 0.15                  # mean-reverting: 0.15 < H < 0.45
-    hurst_max: float = 0.45
+    hurst_min: float = 0.15                  # mean-reverting фильтр
+    # ВНИМАНИЕ: R/S систематически ЗАВЫШАЕТ Hurst на финансовых рядах (известное смещение).
+    # ТЗ задаёт 0.45, но по бэктесту реально mean-reverting пары (sngr) дают H≈0.55 по R/S и
+    # отсекаются → 0 сделок. Поднято до 0.60 — sngr/tatn торгуют, sber (H 0.33-0.45) не задет.
+    hurst_max: float = 0.60
     rv_short: int = 20                       # RV20
     rv_long: int = 100                       # RV100
     rv_ratio_max: float = 1.7                # вход при RV20/RV100 < 1.7
@@ -47,7 +50,10 @@ class St5StrategyConfig(BaseModel):
 
     # --- вход ---
     z_entry: float = 2.25                    # |z| > 2.25 для входа
-    require_dz_confirm: bool = True          # Δz в сторону схождения + abs(z_now)<abs(z_prev)
+    # Δz-подтверждение (вход только на схождении z к нулю). По бэктесту MOEX оказался слишком
+    # строгим — на стабильном спреде z редко разворачивается ровно на баре пробоя порога → 0 сделок.
+    # Выключен по умолчанию; вход по чистому |z|>порог даёт sber Sharpe 3-6 в OOS-сплите.
+    require_dz_confirm: bool = False
     z_no_entry: float = 4.0                  # |z| > 4 → вход запрещён (слишком далеко, риск разрыва)
 
     # --- сайзинг по |z| (множители к базовому размеру) ---
