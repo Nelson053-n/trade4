@@ -65,10 +65,14 @@ def run_backtest(df: pd.DataFrame, cfg: St5Config, pair: str = "test",
         pnls = np.array([t.net_pnl_rub for t in trades], float)
         sd = pnls.std(ddof=1)
         m.sharpe = float(pnls.mean() / sd * math.sqrt(len(pnls))) if sd > 1e-9 else 0.0
-        # Sortino: нормируем только на downside-отклонение (риск только убытков)
+        # Sortino: нормируем только на downside-отклонение (риск только убытков).
+        # Нет убытков → downside-риска нет → Sortino "бесконечный" (показываем 999 как PF).
         downside = pnls[pnls < 0]
-        dd = downside.std(ddof=1) if len(downside) >= 2 else (abs(downside).mean() if len(downside) else 0.0)
-        m.sortino = float(pnls.mean() / dd * math.sqrt(len(pnls))) if dd > 1e-9 else 0.0
+        if len(downside) == 0:
+            m.sortino = 999.0 if pnls.mean() > 0 else 0.0
+        else:
+            dd = downside.std(ddof=1) if len(downside) >= 2 else abs(downside).mean()
+            m.sortino = float(pnls.mean() / dd * math.sqrt(len(pnls))) if dd > 1e-9 else 999.0
     return m
 
 
