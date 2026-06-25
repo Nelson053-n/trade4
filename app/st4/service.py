@@ -153,6 +153,8 @@ class St4Session:
         self.player_idx = 0
         self.last_live_ts = 0
         self._lock = asyncio.Lock()            # сериализация шагов движка между потоками
+        self._chart_task = None                # отдельный поток графика (1m) при разнесённых ТФ
+        self.last_chart_ts = 0                 # последний обработанный chart-бар (1m)
 
     # ---------- инструменты ----------
     def resolve_real_legs(self) -> None:
@@ -449,6 +451,27 @@ class St4Session:
         if len(self.history) > HISTORY_LEN:
             del self.history[0]
 
+    def _chart_split(self) -> bool:
+        """График ведётся ОТДЕЛЬНЫМ потоком (chart_interval < торгового)? Тогда торговый поток
+        НЕ пишет в history — её целиком формирует run_chart_feed по chart-барам."""
+        ci = getattr(self.cfg.strategy, "chart_interval_minutes", 0) or 0
+        return 0 < ci < self.cfg.strategy.candle_interval_minutes
+
+    def push_history_chart(self, ts: int, spread: float) -> None:
+        """Точка графика по CHART-бару (детальный спред), полосы BB/SMA/σ — из последнего
+        торгового бара (engine.last_band, «ступеньками»). Используется при разнесённых ТФ."""
+        b = self.engine.last_band
+        if b is None or not b.is_ready:
+            return
+        if any(v is None or (isinstance(v, float) and math.isnan(v))
+               for v in (b.sma, b.upper, b.lower)):
+            return
+        self.history.append({"ts": ts, "spread": round(spread, 1), "sma": round(b.sma, 1),
+                             "upper": round(b.upper, 1), "lower": round(b.lower, 1),
+                             "sigma": round(b.sigma, 1)})
+        if len(self.history) > HISTORY_LEN:
+            del self.history[0]
+
     def warmup_limit(self) -> int:
         """Сколько баров тянуть, чтобы прогреть BB(sma_period) + дать запас на сигналы."""
         return int(self.cfg.strategy.sma_period * 1.5) + 120
@@ -598,6 +621,13 @@ class St4Session:
         mode_lbl = "T-Bank sandbox" if sandbox else "paper"
         self.log_event("info", f"live запущен ({mode_lbl}, данные {src_lbl}): "
                        f"{self.spec_ord.code}/{self.spec_pref.code}, прогрев BB({self.cfg.strategy.sma_period})…")
+        # разнесённые ТФ: график детальнее торговли → отдельный 1m-поток с T-Bank. Требует
+        # sandbox (нужны uid ног T-Bank); на ISS/paper детального графика нет — остаётся торговый.
+        if self._chart_split() and tbank_uids and (self._chart_task is None or self._chart_task.done()):
+            self.last_chart_ts = 0
+            self._chart_task = asyncio.create_task(self.run_chart_feed(tbank_uids))
+            self.log_event("info", f"график {self.cfg.strategy.chart_interval_minutes}m "
+                           f"(торговля {self.cfg.strategy.candle_interval_minutes}m) — отдельный поток T-Bank")
         while self.state["live"]:
             try:
                 # авто-роллировер: серия у экспирации, позиции нет → следующая серия
@@ -657,7 +687,10 @@ class St4Session:
                         self.last_live_ts = ts
                         new_bars += 1
                         if res is not None:
-                            self.push_history(ts)
+                            # при разнесённых ТФ history ведёт run_chart_feed (1m); торговый
+                            # поток только торгует, чтобы не мешать 10m-точки с 1m-точками
+                            if not self._chart_split():
+                                self.push_history(ts)
                             for ev in (res.events or []):
                                 if ev.kind in ("position", "exit", "halt", "warn"):
                                     self.log_event(ev.kind, ev.message)
@@ -683,6 +716,35 @@ class St4Session:
                 self.log_event("warn", f"ошибка ISS: {e}")
             replayed = True
             self.save_session()
+            await asyncio.sleep(self.cfg.poll_seconds)
+
+    async def run_chart_feed(self, uids: tuple) -> None:
+        """Отдельный поток ГРАФИКА: тянет 1m-свечи с T-Bank и пишет детальный спред в history
+        (полосы BB/SMA/σ — из последнего торгового бара, см. push_history_chart). Сам НЕ торгует
+        и НЕ трогает движок. Работает только при разнесённых ТФ (chart_interval < торгового) и
+        активном sandbox. Запускается из run_live, живёт пока state['live']."""
+        from .config import St4Config as _Cfg
+        # отдельный конфиг с chart-интервалом, чтобы read_ohlcv_tbank тянул именно 1m
+        ccfg = _Cfg(**self.cfg.model_dump())
+        ccfg.strategy.candle_interval_minutes = self.cfg.strategy.chart_interval_minutes
+        chart_limit = HISTORY_LEN + 20
+        while self.state["live"] and self._chart_split():
+            try:
+                df = await asyncio.to_thread(feed.read_ohlcv_tbank, ccfg, chart_limit,
+                                             uids[0], uids[1])
+                async with self._lock:
+                    # backfill при первом проходе: заполняем history свежими 1m-барами в пределах
+                    # окна торговой истории (старше первого торгового бара рисовать нет смысла —
+                    # там нет полос). На последующих проходах берём только новые (> last_chart_ts).
+                    for ts, row in df.iterrows():
+                        ts = int(ts)
+                        if ts <= self.last_chart_ts:
+                            continue
+                        spread = float(row["price_b"]) - float(row["price_a"])
+                        self.push_history_chart(ts, spread)
+                        self.last_chart_ts = ts
+            except Exception as e:  # noqa: BLE001
+                self.log_event("warn", f"график 1m: ошибка T-Bank: {e}")
             await asyncio.sleep(self.cfg.poll_seconds)
 
     async def run_player(self) -> None:
@@ -808,6 +870,7 @@ class St4Session:
             "legs": {"ord": self.spec_ord.code, "pref": self.spec_pref.code,
                      "ord_expiry": self.spec_ord.expiry, "pref_expiry": self.spec_pref.expiry},
             "interval_min": self.cfg.strategy.candle_interval_minutes,
+            "chart_interval_min": getattr(self.cfg.strategy, "chart_interval_minutes", 0),
             "sma_period": self.cfg.strategy.sma_period,
             "sigma_mult": self.cfg.strategy.sigma_multiplier,
             "deviation_mode": self.cfg.strategy.deviation_mode,

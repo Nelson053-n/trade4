@@ -456,6 +456,12 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
         <div class="fld"><label>гейт %</label><input id="s4-p-dev" type="number" value="2" step="0.5" min="0"></div>
         <div class="fld"><label>стоп σ</label><input id="s4-p-stop" type="number" value="0" step="0.5" min="0"></div>
         <div class="fld"><label>лотов</label><input id="s4-p-lots" type="number" value="1" min="1"></div>
+        <div class="fld"><label>торговля ТФ</label><select id="s4-p-tf">
+          <option value="1">1 мин</option><option value="10" selected>10 мин</option><option value="60">60 мин</option>
+        </select></div>
+        <div class="fld"><label>график ТФ</label><select id="s4-p-chart-tf">
+          <option value="0" selected>= торговый</option><option value="1">1 мин</option><option value="5">5 мин</option>
+        </select></div>
       </div>
       <button class="btn primary" id="s4-btn-apply">применить параметры</button>
     </div>
@@ -971,6 +977,9 @@ function s4Render(s){
 
   $('s4-auto').checked=s.auto_approve; $('s4-trading').checked=s.trading_enabled;
   const cm=$('s4-conn-mode'); if(cm && document.activeElement!==cm) cm.value=s.connector_mode||'paper';
+  // ТФ торговли/графика — синхронизируем из снапшота, но не перетираем пока пользователь меняет селект
+  const tf=$('s4-p-tf'); if(tf && s.interval_min && document.activeElement!==tf) tf.value=String(s.interval_min);
+  const ctf=$('s4-p-chart-tf'); if(ctf && s.chart_interval_min!=null && document.activeElement!==ctf) ctf.value=String(s.chart_interval_min);
   const cbg=$('s4-conn-badge');
   if(cbg){
     cbg.textContent = (real?'🔴 БОЕВОЙ':(sandbox?'T-Bank песочница':'paper'))
@@ -1164,7 +1173,8 @@ function s4Init(){
   };
   $('s4-btn-apply').onclick=async()=>{
     const body={ sma_period:+$('s4-p-sma').value, sigma_multiplier:+$('s4-p-sig').value,
-      deviation_pct:(+$('s4-p-dev').value)/100, stop_sigma:+$('s4-p-stop').value, quantity_lots:+$('s4-p-lots').value };
+      deviation_pct:(+$('s4-p-dev').value)/100, stop_sigma:+$('s4-p-stop').value, quantity_lots:+$('s4-p-lots').value,
+      interval_min:+$('s4-p-tf').value, chart_interval_min:+$('s4-p-chart-tf').value };
     try{ await s4api('/config','POST',body); s4Poll(); }catch(e){ alert(e.message); }
   };
   $('s4-btn-bt').onclick=async()=>{

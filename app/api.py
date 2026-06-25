@@ -335,6 +335,14 @@ async def st4_set_config(payload: dict, pair: str = "sber"):
         if iv not in (1, 10, 60):
             raise HTTPException(400, "interval_min: 1 | 10 | 60 (ISS не отдаёт 5m)")
         s.candle_interval_minutes = iv
+    if "chart_interval_min" in payload:
+        ci = int(payload["chart_interval_min"])
+        if ci not in (0, 1, 5, 10):
+            raise HTTPException(400, "chart_interval_min: 0 (=торговый) | 1 | 5 | 10")
+        # график детальнее торговли: только меньший ТФ и только через T-Bank (1m/5m real-time)
+        if ci and ci >= s.candle_interval_minutes:
+            raise HTTPException(400, "chart_interval_min должен быть < торгового ТФ")
+        s.chart_interval_minutes = ci
     r.max_daily_loss_rub = _num("max_daily_loss_rub", 0, 1e9, r.max_daily_loss_rub)
     e.quantity_lots = int(_num("quantity_lots", 1, 1000, e.quantity_lots))
     if "auto_approve" in payload:

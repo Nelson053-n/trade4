@@ -876,6 +876,38 @@ def test_adopt_position_entry_ts_fallback_to_last_bar():
     assert s.engine.position.entry_ts == 1699999000000   # = last_live_ts, не «сейчас»
 
 
+def test_chart_split_detects_separate_timeframe():
+    """Разнесённые ТФ: график детальнее торговли только при 0 < chart_interval < торгового."""
+    from app.st4.service import St4Session
+    s = St4Session("sber")
+    s.cfg.strategy.candle_interval_minutes = 10
+    s.cfg.strategy.chart_interval_minutes = 0     # выкл (= торговый) → один поток
+    assert not s._chart_split()
+    s.cfg.strategy.chart_interval_minutes = 10    # равно торговому → не разнесено
+    assert not s._chart_split()
+    s.cfg.strategy.chart_interval_minutes = 1     # 1m график при 10m торговле → разнесено
+    assert s._chart_split()
+    s.cfg.strategy.candle_interval_minutes = 1    # торговля тоже 1m → график не может быть детальнее
+    assert not s._chart_split()
+
+
+def test_push_history_chart_uses_engine_bands():
+    """push_history_chart пишет CHART-спред (1m), а полосы/SMA/σ берёт из engine.last_band."""
+    from app.st4.service import St4Session
+    from app.st4.models import BandReading
+    s = St4Session("sber")
+    # фейковый последний торговый бар: полосы 10m-уровня
+    s.engine.last_band = BandReading(ts=600000, spread=50.0, sma=10.0, upper=110.0,
+                                     lower=-90.0, sigma=50.0, is_ready=True)
+    s.history = []
+    s.push_history_chart(660000, 37.5)   # 1m-бар со своим спредом, ts внутри 10m-бара
+    assert len(s.history) == 1
+    pt = s.history[0]
+    assert pt["ts"] == 660000
+    assert pt["spread"] == 37.5          # спред — детальный (1m), НЕ из last_band
+    assert pt["sma"] == 10.0 and pt["upper"] == 110.0 and pt["lower"] == -90.0  # полосы — торговые
+
+
 def test_close_position_exit_ts_not_before_entry():
     """Инвариант: exit_ts >= entry_ts даже если позицию закрывает бар старше входа."""
     from app.st4.models import LegPosition, Position, BotState, SpreadBar, Role

@@ -29,7 +29,12 @@ class InstrumentsConfig(BaseModel):
 
 class StrategyConfig(BaseModel):
     """Сигнальная логика: Bollinger Bands на спреде SBPR−SBRF (§8, §9)."""
-    candle_interval_minutes: int = 10     # MOEX ISS: 5m нет, дефолт 10m нативные
+    candle_interval_minutes: int = 10     # ТОРГОВЫЙ ТФ (сигналы/сделки). MOEX ISS: 5m нет; 1/10/60
+    # ТФ ГРАФИКА (только отрисовка спреда). Если < candle_interval_minutes — график детальнее
+    # торговли: отдельный поток тянет chart-бары с T-Bank и пишет их в history, а полосы BB/SMA
+    # берёт из последнего торгового бара (ступеньками). 0/равно торговому → график = торговый ТФ
+    # (старое поведение, один поток). Источник 1m — T-Bank (real-time); ISS 1m с лагом не годится.
+    chart_interval_minutes: int = 0
     sma_period: int = 200
     sigma_multiplier: float = 2.0
     std_mode: Literal["Population", "Sample"] = "Population"   # /N или /(N−1)
