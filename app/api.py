@@ -365,6 +365,91 @@ def st5_resume():
     return {"ok": True}
 
 
+@app.post("/st5/control/start")
+def st5_start():
+    """Запустить ST5 live (портфель). Режим из connector.mode; sandbox/real активны в live."""
+    if ST5.state["live"]:
+        return {"ok": True, "already": True}
+    import time as _t
+    ST5.state["live"] = True
+    ST5.state["paused_by_user"] = False
+    ST5.state["session_started"] = _t.time()
+    ST5.state["data_source"] = "live"
+    # активируем брокерский исполнитель только для sandbox/real (на paper — вирт. движок)
+    want_broker = ST5.cfg.connector.mode in ("tbank_sandbox", "tbank_real")
+    ST5.state["sandbox_active"] = bool(want_broker and ST5.cfg.connector.account_id)
+
+    async def _boot():
+        if ST5.state["live"]:
+            await ST5.run_live()
+
+    try:
+        asyncio.create_task(_boot())
+    except RuntimeError:
+        ST5.state["live"] = False   # нет event loop (тест/CLI) — не стартуем фоном
+    return {"ok": True, "mode": ST5.cfg.connector.mode, "sandbox_active": ST5.state["sandbox_active"]}
+
+
+@app.post("/st5/control/stop")
+def st5_stop():
+    _st5_guard_no_position("пауза")
+    ST5.state["live"] = False
+    ST5.state["paused_by_user"] = True
+    ST5.save_session()
+    return {"ok": True}
+
+
+@app.post("/st5/control/flat-all")
+def st5_flat_all(payload: dict):
+    """Паник-закрытие ВСЕХ позиций портфеля по рынку (требует confirm). НЕ блокируется."""
+    if not payload or not payload.get("confirm"):
+        raise HTTPException(400, "нужно подтверждение: {\"confirm\": true}")
+    closed = []
+    for pid, eng in ST5.engines.items():
+        if eng.position is not None:
+            p = eng.position
+            ord_px = p.ord_entry      # грубо: по цене входа (нет свежего бара под рукой)
+            pref_px = p.pref_entry
+            tr = eng._close(int(__import__("time").time() * 1000), eng.last_z or 0.0,
+                            eng.last_spread, ord_px, pref_px, "flat_all")
+            ST5._on_engine_trade(pid, eng, tr, ord_px, pref_px)
+            closed.append(pid)
+    ST5.save_session()
+    return {"ok": True, "closed": closed}
+
+
+@app.post("/st5/control/arm-real")
+def st5_arm_real(payload: dict):
+    """Взвод реальной торговли (двойной включатель, требует confirm). Сбрасывается при рестарте."""
+    if not payload or not payload.get("confirm"):
+        raise HTTPException(400, "нужно подтверждение: {\"confirm\": true}")
+    armed = bool(payload.get("armed"))
+    if armed and ST5.cfg.connector.mode != "tbank_real":
+        raise HTTPException(400, "взвод доступен только в режиме tbank_real")
+    ST5.arm_real(armed)
+    return {"ok": True, "real_trading_armed": ST5.state["real_trading_armed"]}
+
+
+@app.post("/st5/connector")
+def st5_connector(payload: dict):
+    """Режим исполнителя st5: paper | tbank_sandbox | tbank_real (+account_id для real)."""
+    _st5_guard_no_position("смена коннектора")
+    mode = payload.get("mode")
+    if mode not in ("paper", "tbank_sandbox", "tbank_real"):
+        raise HTTPException(400, "mode: paper | tbank_sandbox | tbank_real")
+    from .st4 import tbank_sandbox as _sb
+    if payload.get("token"):
+        _sb.save_token(str(payload["token"]).strip())
+    ST5.cfg.connector.mode = mode
+    if "account_id" in payload:
+        ST5.cfg.connector.account_id = str(payload["account_id"]).strip()
+    if mode == "tbank_real" and not ST5.cfg.connector.account_id:
+        raise HTTPException(400, "для tbank_real обязателен account_id")
+    ST5.state["real_trading_armed"] = False   # смена режима снимает взвод
+    ST5.save_session()
+    return {"ok": True, "connector_mode": mode, "token_set": _sb.has_token()}
+
+
 # ============================================================================
 # st4 — арбитраж спреда фьючерсов обычка/преф (FORTS, MOEX ISS). FSM-движок,
 # paper/sandbox-исполнение с атомарностью пар. Сессия на пару (St4Session).

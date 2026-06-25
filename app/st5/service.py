@@ -215,6 +215,52 @@ class St5Session:
         except Exception:  # noqa: BLE001
             pass
 
+    # ---------- боевой контур: взвод реальной торговли ----------
+    def arm_real(self, armed: bool) -> None:
+        """Взвод реальной торговли (двойной включатель). Сбрасывается при рестарте."""
+        self.state["real_trading_armed"] = bool(armed)
+        self.log_event("warn" if armed else "info",
+                       "🔴 реальная торговля ВЗВЕДЕНА" if armed else "взвод снят")
+
+    def _real_armed(self) -> bool:
+        """armed_cb для исполнителя: реальная торговля + cooldown после старта (защита от
+        автоордеров на всплеске сразу после live)."""
+        if not self.state.get("real_trading_armed"):
+            return False
+        started = self.state.get("session_started") or 0
+        return (time.time() - started) >= 600   # 600с cooldown
+
+    def _audit(self, entry: dict) -> None:
+        """Аудит-лог каждого реального/sandbox ордера (неизменяемый журнал для разбора)."""
+        self.events.append({"ts": entry["ts"], "kind": "order",
+                            "message": f"{entry['op']} {entry['direction']} {entry['lots']}лот "
+                                       f"{entry['uid'][:8]} → {entry.get('status')}",
+                            "audit": entry})
+        if len(self.events) > EVENTS_LEN * 4:   # аудит держим дольше обычных событий
+            del self.events[0]
+
+    # ---------- обновление реального капитала (для %-лимитов) ----------
+    def refresh_capital(self) -> None:
+        """Источник истины капитала для %-лимитов — РЕАЛЬНЫЙ портфель (не paper-баланс)."""
+        if not self.state.get("sandbox_active"):
+            return
+        try:
+            from ..st4 import tbank_live as _live
+            from ..st4 import tbank_sandbox as _sb
+            acc = self.cfg.connector.account_id
+            if not acc:
+                return
+            src = _live if self.cfg.connector.mode == "tbank_real" else _sb
+            pf = src.portfolio(acc)
+            total = pf.get("totalAmountPortfolio") or pf.get("totalAmountShares")
+            if isinstance(total, dict):
+                from ..st4.tbank_sandbox import _q_to_float
+                total = _q_to_float(total)
+            if total and float(total) > 0:
+                self.portfolio.capital_rub = float(total)
+        except Exception:  # noqa: BLE001
+            pass
+
     def load_session(self) -> bool:
         if not self._session_file.exists():
             return False
@@ -231,3 +277,118 @@ class St5Session:
         # БЕЗОПАСНОСТЬ: рестарт ВСЕГДА снимает взвод реальной торговли (safe-by-default)
         self.state["real_trading_armed"] = False
         return True
+
+    # ---------- исполнители пар (sandbox/real) ----------
+    def _make_executor(self, pid: str):
+        """St5PairExecutor для пары, если активен брокерский режим. None → paper (вирт. движок)."""
+        if not self.state.get("sandbox_active"):
+            return None
+        from .executor import St5PairExecutor
+        from .service import ST5_PAIRS as _P
+        ao, ap = _P[pid][0], _P[pid][1]
+        real = self.cfg.connector.mode == "tbank_real"
+        return St5PairExecutor(self.cfg.connector.account_id, ao, ap, real=real,
+                               armed_cb=self._real_armed, audit_cb=self._audit)
+
+    # ---------- главный live-цикл портфеля ----------
+    async def run_live(self) -> None:
+        """Live-цикл: тянет свечи по всем парам, прогоняет движки, гейтит входы портфельным
+        риском, исполняет (paper/sandbox/real). Один проход на poll_seconds."""
+        self.log_event("info", f"ST5 live запущен ({self.cfg.connector.mode}, "
+                               f"{len(self.engines)} пар, до {self.cfg.risk.max_open_positions} позиций)")
+        warmup_limit = max(self.cfg.strategy.adf_window, self.cfg.strategy.hurst_window) + 60
+        replayed = False
+        while self.state["live"]:
+            try:
+                if self.state.get("sandbox_active"):
+                    self.refresh_capital()
+                async with self._lock:
+                    for pid, eng in self.engines.items():
+                        if not self.state["live"]:
+                            return
+                        await self._step_pair(pid, eng, warmup_limit, replayed)
+                replayed = True
+                self.save_session()
+            except Exception as e:  # noqa: BLE001
+                self.log_event("warn", f"ST5 live ошибка: {e}")
+            await asyncio.sleep(self.cfg.poll_seconds)
+
+    async def _step_pair(self, pid: str, eng, warmup_limit: int, replayed: bool) -> None:
+        """Один проход по паре: тянем свежие бары, прогоняем движок, исполняем сделки."""
+        from .service import ST5_PAIRS as _P
+        ao, ap = _P[pid][0], _P[pid][1]
+        # резолвим серии (роллровер) через st4 data_feed
+        from ..st4.config import St4Config as _C4
+        c4 = _C4()
+        c4.instruments.asset_ordinary = ao
+        c4.instruments.asset_preferred = ap
+        c4.strategy.candle_interval_minutes = self.cfg.strategy.candle_interval_minutes
+        try:
+            so, sp = await asyncio.to_thread(feed.resolve_legs, c4)
+            df = await asyncio.to_thread(feed.read_ohlcv_moex, c4, warmup_limit, so.code, sp.code)
+            df = df.iloc[:-1]   # без формирующегося бара
+        except Exception as e:  # noqa: BLE001
+            self.log_event("warn", f"{pid}: данные недоступны: {e}")
+            return
+        last_ts = self.last_live_ts.get(pid, 0)
+        for ts, row in df.iterrows():
+            ts = int(ts)
+            if ts <= last_ts:
+                # прогрев движка прошлыми барами (без сделок) до last_ts
+                if eng.kalman.ready is False or len(eng.spread_buf) < 50:
+                    eng.step(ts, float(row["price_a"]), float(row["price_b"]))
+                continue
+            tr = eng.step(ts, float(row["price_a"]), float(row["price_b"]))
+            self.last_live_ts[pid] = ts
+            self.push_history(pid, ts)
+            # вход в новую позицию был решён движком (eng.position появилась) → проверить портфель/исполнить
+            if eng.position is not None and eng.position.bars_held == 0 and not replayed:
+                self._on_engine_opened(pid, eng, float(row["price_a"]), float(row["price_b"]))
+            if tr is not None:
+                self._on_engine_trade(pid, eng, tr, float(row["price_a"]), float(row["price_b"]))
+
+    def _on_engine_opened(self, pid: str, eng, ord_px: float, pref_px: float) -> None:
+        """Движок открыл позицию (paper). Проверить портфельный гейт; в брокере — реальный ордер.
+        Если гейт не пропустил — откатить позицию движка (вход не состоялся)."""
+        from .service import ST5_PAIRS as _P
+        issuer = _P[pid][2]
+        p = eng.position
+        notional = abs(p.pref_entry) * p.lots
+        ok, reason = self.portfolio.can_open(pid, issuer, notional, self.engines, _P)
+        if not ok:
+            eng.position = None   # вход запрещён портфелем → откат
+            self.log_event("info", f"{pid}: вход отклонён ({reason})")
+            return
+        ex = self._make_executor(pid)
+        if ex is not None:
+            try:
+                long_spread = (p.state == St5State.LONG_SPREAD)
+                ex.open_pair(long_spread, p.lots, ord_px, pref_px)
+                self.portfolio.on_success()
+            except Exception as e:  # noqa: BLE001
+                eng.position = None
+                self.portfolio.on_error()
+                self.portfolio.halt_pair(pid, f"вход не исполнен: {e}")
+                self.log_event("warn", f"{pid}: вход в брокере не удался: {e}")
+                return
+        self.log_event("position", f"{pid}: вход {p.state.value} z={p.entry_z:+.2f} lots={p.lots}")
+
+    def _on_engine_trade(self, pid: str, eng, tr, ord_px: float, pref_px: float) -> None:
+        """Движок закрыл (полностью/частично). В брокере — реальный закрывающий ордер."""
+        ex = self._make_executor(pid)
+        if ex is not None:
+            try:
+                long_spread = (tr.state == St5State.LONG_SPREAD)
+                op = "take50" if tr.reason == "take_partial" else "flat"
+                ex.close_pair(long_spread, tr.lots, ord_px, pref_px, op=op)
+                self.portfolio.on_success()
+            except Exception as e:  # noqa: BLE001
+                self.portfolio.on_error()
+                self.portfolio.halt_pair(pid, f"выход не исполнен: {e}")
+                self.log_event("warn", f"{pid}: выход в брокере не удался: {e}")
+        self.portfolio.on_trade(tr.net_pnl_rub)
+        rec = {"pair": pid, "state": tr.state.value, "entry_ts": tr.entry_ts, "exit_ts": tr.exit_ts,
+               "entry_z": tr.entry_z, "exit_z": tr.exit_z, "lots": tr.lots,
+               "net_pnl_rub": tr.net_pnl_rub, "reason": tr.reason, "bars_held": tr.bars_held}
+        self.trades.append(rec)
+        self.log_event("exit", f"{pid}: {tr.reason} net {tr.net_pnl_rub:+.0f}₽ ({tr.lots}лот)")

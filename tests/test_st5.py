@@ -159,6 +159,49 @@ def test_portfolio_limits_gate():
     assert not ok4
 
 
+def test_real_trading_armed_cooldown():
+    """armed_cb: реальная торговля требует взвод + 600с cooldown после старта."""
+    import time
+    from app.st5.service import St5Session
+    s = St5Session()
+    # не взведено → False
+    assert not s._real_armed()
+    # взведено, но только что стартовали → cooldown не прошёл
+    s.arm_real(True)
+    s.state["session_started"] = time.time()
+    assert not s._real_armed()
+    # взведено и cooldown прошёл → True
+    s.state["session_started"] = time.time() - 700
+    assert s._real_armed()
+    # рестарт (load_session) снимает взвод
+    s.state["real_trading_armed"] = False
+    assert not s._real_armed()
+
+
+def test_order_id_discriminator_no_collision():
+    """Идемпотентный order_id: разные операции/seq → разные id (защита частичной фиксации)."""
+    from app.st5.executor import _disc_order_id
+    ids = {
+        _disc_order_id("a", "u", 10, "BUY", "entry", 1),
+        _disc_order_id("a", "u", 10, "BUY", "take50", 1),
+        _disc_order_id("a", "u", 10, "BUY", "take_rest", 1),
+        _disc_order_id("a", "u", 10, "BUY", "entry", 2),
+    }
+    assert len(ids) == 4   # все уникальны
+
+
+def test_executor_blocks_real_without_arm():
+    """Боевой исполнитель не шлёт ордер, если armed_cb вернул False."""
+    from app.st5.executor import St5ExecError, St5PairExecutor
+    ex = St5PairExecutor("acc", "SBRF", "SBPR", real=True, armed_cb=lambda: False)
+    ex._uid_ord, ex._uid_pref = "uid_o", "uid_p"   # обойти сетевой резолв
+    try:
+        ex._post("uid_p", 10, "BUY", "entry", 100.0)
+        assert False, "должен был отказать"
+    except St5ExecError as e:
+        assert "не взведена" in str(e)
+
+
 def test_size_multiplier_tiers():
     """Сайзинг по |z|: тиры 1x/1.5x/2x, запрет при |z|>4."""
     from app.st5.config import St5StrategyConfig
