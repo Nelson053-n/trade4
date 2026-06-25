@@ -102,4 +102,4 @@ class St5Config(BaseModel):
     paper: Paper = Paper()
     connector: ConnectorConfig = ConnectorConfig()
     auto_approve: bool = True                # statarb — авто-исполнение (ручной approve не нужен)
-    poll_seconds: float = 5.0
+    poll_seconds: float = 15.0               # бар раз в 10 мин → частый опрос не нужен (+rate-limit)

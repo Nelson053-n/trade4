@@ -136,6 +136,8 @@ class St5Session:
         self.last_live_ts: dict[str, int] = {pid: 0 for pid in ST5_PAIRS}
         self._lock = asyncio.Lock()
         self._live_task = None
+        self._uid_cache: dict[str, tuple] = {}   # pid -> (uid_ord, uid_pref): кэш против 429 T-Bank
+        self._legs_cache: dict[str, tuple] = {}  # pid -> (spec_ord, spec_pref) от resolve_legs
 
     # ---------- журнал событий ----------
     def log_event(self, kind: str, message: str) -> None:
@@ -313,6 +315,7 @@ class St5Session:
                         if not self.state["live"]:
                             return
                         await self._step_pair(pid, eng, warmup_limit, replayed)
+                        await asyncio.sleep(1.0)   # throttle между парами — против 429 T-Bank
                 replayed = True
                 self.save_session()
             except Exception as e:  # noqa: BLE001
@@ -332,16 +335,20 @@ class St5Session:
         c4.instruments.asset_preferred = ap
         c4.strategy.candle_interval_minutes = self.cfg.strategy.candle_interval_minutes
         sandbox = self.state.get("sandbox_active", False)
-        # после прогрева тянем только хвост (60 баров), не весь warmup — снижает нагрузку/обрывы
+        # после прогрева тянем только хвост (80 баров), не весь warmup — снижает нагрузку/обрывы
         warm = len(eng.spread_buf) < 50
         limit = warmup_limit if warm else 80
         try:
-            so, sp = await asyncio.to_thread(feed.resolve_legs, c4)
+            # резолв серий и uid кэшируем (find_future/resolve_legs дороги и бьют по rate-limit)
+            if pid not in self._legs_cache:
+                self._legs_cache[pid] = await asyncio.to_thread(feed.resolve_legs, c4)
+            so, sp = self._legs_cache[pid]
             if sandbox:
-                # T-Bank real-time по uid ног (как st4 в sandbox)
-                from ..st4 import tbank_sandbox as _sb
-                uid_o = _sb.find_future(so.code)["uid"]
-                uid_p = _sb.find_future(sp.code)["uid"]
+                if pid not in self._uid_cache:
+                    from ..st4 import tbank_sandbox as _sb
+                    self._uid_cache[pid] = (_sb.find_future(so.code)["uid"],
+                                            _sb.find_future(sp.code)["uid"])
+                uid_o, uid_p = self._uid_cache[pid]
                 df = await asyncio.to_thread(feed.read_ohlcv_tbank, c4, limit, uid_o, uid_p)
             else:
                 df = await asyncio.to_thread(feed.read_ohlcv_moex, c4, limit, so.code, sp.code)
