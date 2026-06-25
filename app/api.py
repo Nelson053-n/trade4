@@ -269,6 +269,16 @@ def dashboard():
     return FileResponse(DASHBOARD, headers={"Cache-Control": "no-cache, must-revalidate"})
 
 
+@app.get("/strategy.md")
+def strategy_md():
+    """Описание стратегии для анализа нейросетью (STRATEGY.md). Отдаётся как markdown."""
+    f = _BASE / "STRATEGY.md"
+    if not f.exists():
+        raise HTTPException(404, "STRATEGY.md не найден")
+    return FileResponse(f, media_type="text/markdown; charset=utf-8",
+                        headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/health")
 def health():
     return {"ok": True, "pairs": [{"id": p, "live": s.state["live"], "player": s.state["player"]}
