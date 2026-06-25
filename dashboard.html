@@ -547,6 +547,16 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
         </div>
       </div>
       <div class="card">
+        <h2>Спред / z-score <span id="s5-chart-pair" style="font-family:var(--mono);color:var(--ink)">—</span>
+          <span class="tf-switch" id="s5-chart-switch" style="float:right;font-size:11px;font-weight:400"></span></h2>
+        <div class="chartwrap"><canvas id="s5chart" style="width:100%;height:300px;display:block"></canvas></div>
+        <div class="legend" style="margin-top:6px">
+          <span><i style="border-color:var(--chart-line)"></i>z-score</span>
+          <span><i style="border-color:var(--chart-band);border-top-style:dashed"></i>±2.25 вход / ±4.25 стоп</span>
+          <span><i style="border-color:var(--chart-mid);border-top-style:dashed"></i>z=0 (равновесие)</span>
+        </div>
+      </div>
+      <div class="card">
         <h2>Пары и фильтры <span class="em">коинтеграция · Hurst · режим</span></h2>
         <table id="s5-pairs"><thead><tr><th>пара</th><th>z</th><th>β</th><th>ADF p</th><th>Hurst</th><th>RV</th><th>статус</th></tr></thead><tbody></tbody></table>
       </div>
@@ -1445,7 +1455,50 @@ function s5Render(s){
   const hasPos=s.open_positions>0;
   ['s5-conn-mode','s5-conn-token','s5-btn-conn','s5-btn-stop','s5-bt-pair'].forEach(id=>{ const e=$(id); if(e){e.disabled=hasPos; e.title=hasPos?'Активные позиции — действие невозможно':''}});
 }
-async function s5Poll(){ if(_s5strat!=='st5') return; try{ s5Render(await s5api('/state')); }catch(e){} }
+let _s5chartPair='sber', _s5hist={};
+function s5DrawChart(){
+  const cv=$('s5chart'); if(!cv) return;
+  const r=cv.getBoundingClientRect();
+  if(r.width<5||r.height<5){ requestAnimationFrame(s5DrawChart); return; }
+  const dpr=devicePixelRatio||1; cv.width=r.width*dpr; cv.height=r.height*dpr;
+  const ctx=cv.getContext('2d'); ctx.setTransform(1,0,0,1,0,0); ctx.scale(dpr,dpr);
+  const W=r.width,H=r.height; ctx.clearRect(0,0,W,H);
+  const hist=(_s5hist[_s5chartPair]||[]).filter(p=>p.z!=null);
+  $('s5-chart-pair').textContent=_s5chartPair.toUpperCase();
+  if(hist.length<2){ ctx.fillStyle=getCSS('--ink-dim'); ctx.font='12px IBM Plex Mono,monospace'; ctx.fillText('прогрев индикаторов…',12,24); return; }
+  const cs=getComputedStyle(document.documentElement);
+  const C={line:cs.getPropertyValue('--chart-line').trim(),band:cs.getPropertyValue('--chart-band').trim(),
+           mid:cs.getPropertyValue('--chart-mid').trim(),ax:cs.getPropertyValue('--ink-faint').trim(),grid:cs.getPropertyValue('--line').trim()};
+  const ML=34,MB=18,MT=8,MR=8, px0=ML,px1=W-MR,py0=MT,py1=H-MB;
+  const zs=hist.map(p=>p.z);
+  let lo=Math.min(-4.5,...zs), hi=Math.max(4.5,...zs); const pad=(hi-lo)*0.05; lo-=pad; hi+=pad;
+  const x=i=>px0+i/(hist.length-1)*(px1-px0), y=v=>py1-(v-lo)/(hi-lo)*(py1-py0);
+  // горизонтальные уровни z: 0, ±2.25, ±4.25
+  const levels=[[0,C.mid,'0'],[2.25,C.band,'+2.25'],[-2.25,C.band,'−2.25'],[4.25,C.grid,'+4.25'],[-4.25,C.grid,'−4.25']];
+  ctx.font='9px IBM Plex Mono,monospace'; ctx.textAlign='right'; ctx.textBaseline='middle';
+  levels.forEach(([v,col,lbl])=>{
+    if(v<lo||v>hi) return; const yy=y(v);
+    ctx.strokeStyle=col; ctx.lineWidth=1; ctx.globalAlpha=v===0?.6:.35; ctx.setLineDash(v===0?[]:[4,4]);
+    ctx.beginPath(); ctx.moveTo(px0,yy); ctx.lineTo(px1,yy); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha=1;
+    ctx.fillStyle=C.ax; ctx.fillText(lbl,px0-4,yy);
+  });
+  // линия z
+  ctx.beginPath(); hist.forEach((p,i)=>{const X=x(i),Y=y(p.z); i?ctx.lineTo(X,Y):ctx.moveTo(X,Y);});
+  ctx.strokeStyle=C.line; ctx.lineWidth=1.6; ctx.stroke();
+  // последняя точка
+  const lp=hist[hist.length-1], lx=x(hist.length-1), ly=y(lp.z);
+  ctx.beginPath(); ctx.arc(lx,ly,3.5,0,7); ctx.fillStyle=C.line; ctx.shadowColor=C.line; ctx.shadowBlur=8; ctx.fill(); ctx.shadowBlur=0;
+}
+function s5BuildChartSwitch(pairs){
+  const el=$('s5-chart-switch'); if(!el||el.childElementCount) return;
+  (pairs||[]).forEach(p=>{
+    const b=document.createElement('button'); b.className='tf-btn'; b.textContent=p.label;
+    b.onclick=()=>{ _s5chartPair=p.pair; s5DrawChart(); document.querySelectorAll('#s5-chart-switch .tf-btn').forEach(x=>x.classList.toggle('on',x===b)); };
+    if(p.pair===_s5chartPair) b.classList.add('on');
+    el.appendChild(b);
+  });
+}
+async function s5Poll(){ if(_s5strat!=='st5') return; try{ const s=await s5api('/state'); _s5hist=s.history||{}; s5BuildChartSwitch(s.pairs); s5Render(s); s5DrawChart(); }catch(e){} }
 function s5Init(){
   document.querySelectorAll('.strat-tab').forEach(b=> b.onclick=()=>s5Switch(b.dataset.strat));
   $('s5-btn-start').onclick=async()=>{ try{ await s5api('/control/start','POST'); s5Poll(); }catch(e){alert(e.message);} };

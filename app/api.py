@@ -366,8 +366,11 @@ def st5_resume():
 
 
 @app.post("/st5/control/start")
-def st5_start():
-    """Запустить ST5 live (портфель). Режим из connector.mode; sandbox/real активны в live."""
+async def st5_start():
+    """Запустить ST5 live (портфель). Режим из connector.mode; sandbox/real активны в live.
+
+    async — чтобы asyncio.create_task видел running loop (sync-эндпоинт FastAPI крутится в
+    threadpool без loop → create_task падал RuntimeError и сбрасывал live)."""
     if ST5.state["live"]:
         return {"ok": True, "already": True}
     import time as _t
