@@ -895,6 +895,12 @@ def test_guard_blocks_actions_with_open_position():
     assert c.post("/st4/config?pair=sber", json={"sma_period": 100}).status_code == 409
     assert c.post("/st4/control/stop?pair=sber").status_code == 409
     assert c.post("/st4/reset?pair=sber").status_code == 409
+    assert c.post("/st4/connector?pair=sber", json={"mode": "paper"}).status_code == 409
+    assert c.post("/st4/connector/forget-token").status_code == 409
+    assert c.post("/st4/reload-params?pair=sber", json={}).status_code == 409
+    assert c.post("/st4/player/start?pair=sber").status_code == 409
+    # flat-all НЕ блокируется — это выход из позиции
+    assert c.post("/st4/control/flat-all?pair=sber", json={"confirm": True}).status_code == 200
     s.engine.position = None   # очистка для других тестов
 
 

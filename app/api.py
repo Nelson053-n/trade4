@@ -418,6 +418,7 @@ def st4_stop(pair: str = "sber"):
 async def st4_player_start(limit: int = 1500, pair: str = "sber"):
     """Запустить/возобновить синтетический плеер (офлайн-демо FSM)."""
     ST4 = _st4(pair)
+    _guard_no_position(ST4, "запуск плеера")
     if ST4.state["player"]:
         return {"ok": True, "already": True}
     ST4.state["live"] = False
@@ -514,6 +515,7 @@ async def st4_reload_params(payload: dict | None = None, pair: str = "sber"):
     """Горячо переприменить параметры стратегии ОДНОЙ пары — без рестарта сервиса и без
     потери открытой позиции. Другие пары не затрагиваются. История/BB прогреются заново."""
     ST4 = _st4(pair)
+    _guard_no_position(ST4, "переприменение параметров")
     res = await asyncio.to_thread(ST4.apply_pair_params, payload or None)
     return {"ok": True, "pair": pair, **res}
 
@@ -523,6 +525,7 @@ def st4_restore_position(payload: dict, pair: str = "sber"):
     """Восстановить открытую позицию в ЖИВОМ движке (без файловой гонки)."""
     from .st4.models import BotState, LegPosition, Position, Role
     ST4 = _st4(pair)
+    _guard_no_position(ST4, "восстановление позиции")   # уже есть позиция — не перезатираем
     try:
         state = BotState(payload["state"])
         if state not in (BotState.LONG_SPREAD, BotState.SHORT_SPREAD):
@@ -562,6 +565,7 @@ def st4_connector(payload: dict, pair: str = "sber"):
     from .st4 import tbank_sandbox as _sb
 
     ST4 = _st4(pair)
+    _guard_no_position(ST4, "смена коннектора")
     mode = payload.get("mode")
     if mode not in ("paper", "tbank_sandbox", "tbank_real"):
         raise HTTPException(400, "mode: paper | tbank_sandbox | tbank_real")
@@ -653,6 +657,11 @@ async def st4_broker_balance(pair: str = "sber"):
 @app.post("/st4/connector/forget-token")
 def st4_forget_token():
     """Удалить сохранённый токен (из файла и env). Откатить в paper ВСЕ пары (токен общий)."""
+    # токен общий → reset_engine для всех пар. Блокируем, если открыта позиция У ЛЮБОЙ пары.
+    busy = [pid for pid, s4 in ST4S.items() if s4.engine.position is not None]
+    if busy:
+        raise HTTPException(409, f"активная позиция ({', '.join(busy)}) — забыть токен невозможно. "
+                                 "Сначала закройте позиции (flat-all).")
     from .st4 import tbank_sandbox as _sb
     _sb.save_token("")
     for s4 in ST4S.values():

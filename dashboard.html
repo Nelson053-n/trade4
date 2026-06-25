@@ -1012,11 +1012,13 @@ function s4Render(s){
   if(ctok && document.activeElement!==ctok)
     ctok.placeholder = s.token_set ? 'токен установлен (ввести заново для замены)' : 't.xxx (для sandbox)';
   $('s4-btn-pause').textContent = (s.live||s.player)?'❚❚ пауза':'▶ продолжить';
-  // блокировка опасных действий при ОТКРЫТОЙ позиции: смена параметров/ТФ, пауза, сброс
-  // (пересоздают движок/рвут сессию → рассинхрон с реальной позицией). flat-all НЕ блокируем.
+  // блокировка опасных действий при ОТКРЫТОЙ позиции: смена параметров/ТФ, пауза, сброс,
+  // коннектор, токен (пересоздают движок/исполнитель/рвут сессию → рассинхрон с реальной
+  // позицией на счёте). flat-all НЕ блокируем — это выход из позиции.
   const hasPos = !!s.position;
   const lockMsg = 'Активная позиция — действие невозможно. Сначала закройте позицию.';
-  [['s4-btn-apply'],['s4-btn-pause'],['s4-btn-reset'],['s4-p-tf'],['s4-p-chart-tf']].forEach(([id])=>{
+  [['s4-btn-apply'],['s4-btn-pause'],['s4-btn-reset'],['s4-p-tf'],['s4-p-chart-tf'],
+   ['s4-btn-conn'],['s4-btn-forget'],['s4-conn-mode'],['s4-conn-token']].forEach(([id])=>{
     const el=$(id); if(!el) return;
     el.disabled = hasPos;
     el.classList.toggle('locked', hasPos);
@@ -1177,6 +1179,7 @@ function s4Init(){
     $('s4-conn-acc-fld').style.display = $('s4-conn-mode').value==='tbank_real' ? 'block' : 'none';
   };
   $('s4-btn-conn').onclick=async()=>{
+    if(_posLock()) return;
     const mode=$('s4-conn-mode').value, token=$('s4-conn-token').value.trim();
     if(mode==='tbank_real' && !confirm('БОЕВОЙ режим (РЕАЛЬНЫЕ ДЕНЬГИ). Ордера всё равно не пойдут без отдельного взвода. Продолжить?')) return;
     $('s4-conn-msg').textContent='применяю…';
@@ -1201,6 +1204,7 @@ function s4Init(){
     }catch(e){ $('s4-real-msg').textContent='ошибка: '+e.message; $('s4-real-arm').checked=!armed; }
   };
   $('s4-btn-forget').onclick=async()=>{
+    if(_posLock()) return;
     if(!confirm('Удалить сохранённый токен T-Bank с диска?')) return;
     try{ await s4api('/connector/forget-token','POST'); $('s4-conn-msg').textContent='токен удалён, режим paper'; s4Poll(); }
     catch(e){ $('s4-conn-msg').textContent='ошибка: '+e.message; }
