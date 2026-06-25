@@ -295,8 +295,12 @@ class St5Session:
         from .service import ST5_PAIRS as _P
         ao, ap = _P[pid][0], _P[pid][1]
         real = self.cfg.connector.mode == "tbank_real"
+        # ГОТОВЫЕ uid из кэша (резолвлены по коду СЕРИИ через find_future в _step_pair).
+        # Передать asset-коды (TATN) как тикеры нельзя — find_future их не находит → ордер падает.
+        uo, up = self._uid_cache.get(pid, (None, None))
         return St5PairExecutor(self.cfg.connector.account_id, ao, ap, real=real,
-                               armed_cb=self._real_armed, audit_cb=self._audit)
+                               armed_cb=self._real_armed, audit_cb=self._audit,
+                               uid_ord=uo, uid_pref=up)
 
     # ---------- главный live-цикл портфеля ----------
     async def run_live(self) -> None:

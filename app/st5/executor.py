@@ -44,7 +44,7 @@ class St5PairExecutor:
 
     def __init__(self, account_id: str, ord_ticker: str, pref_ticker: str,
                  real: bool = False, armed_cb=None, max_price_dev_pct: float = 0.05,
-                 audit_cb=None):
+                 audit_cb=None, uid_ord: str | None = None, uid_pref: str | None = None):
         self.account_id = account_id
         self.ord_ticker = ord_ticker
         self.pref_ticker = pref_ticker
@@ -52,8 +52,10 @@ class St5PairExecutor:
         self.armed_cb = armed_cb                    # () -> bool, взвод реальной торговли
         self.max_price_dev_pct = max_price_dev_pct  # pre-trade: |market−ref|/ref > X% → отказ
         self.audit_cb = audit_cb                    # callback(dict) для аудит-лога каждого ордера
-        self._uid_ord: str | None = None
-        self._uid_pref: str | None = None
+        # uid инструментов: предпочтительно передать ГОТОВЫЕ (резолвленные по коду СЕРИИ, не asset),
+        # иначе _uids() резолвит по ticker через find_future (asset-код типа TATN там не находится!)
+        self._uid_ord: str | None = uid_ord
+        self._uid_pref: str | None = uid_pref
         self._seq = 0
 
     # ---------- ленивый резолв UID инструментов ----------
