@@ -28,6 +28,7 @@ class St5StrategyConfig(BaseModel):
     ols_window: int = 250                    # окно Rolling OLS (если beta_method=rolling_ols)
     kalman_delta: float = 1e-4               # process noise: Q = δ/(1−δ)·I (меньше → β инертнее)
     kalman_obs_noise: float = 1e-3           # R — observation noise (шум спреда)
+    kalman_warmup: int = 50                  # баров на сходимость β; их спред НЕ кормим фильтрам
 
     # --- z-score сигнал ---
     z_ema_span: int = 150                    # EMA(150) для μ спреда

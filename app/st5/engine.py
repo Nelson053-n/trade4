@@ -87,6 +87,12 @@ class ST5Engine:
         self._bars += 1
         beta, spread, spread_std = self.kalman.step(ord_px, pref_px)
         self.last_beta = beta
+        # Kalman warmup: первые kalman_warmup баров β ещё не сошёлся (мусорный спред, особенно
+        # на парах с разным масштабом цен типа TATN/TATP 10×). НЕ кормим ими фильтры/z/буфер —
+        # иначе один выброс отравляет std/ADF/Hurst надолго (z=36 артефакт).
+        if self._bars <= s.kalman_warmup:
+            self.last_spread = spread
+            return None
         self.last_spread = spread
         self.spread_buf.append(spread)
         if len(self.spread_buf) > max(s.adf_window, s.hurst_window) + 50:
