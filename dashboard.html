@@ -158,6 +158,10 @@ a{color:var(--accent-2);text-decoration:none}
 /* график */
 .chartwrap{position:relative}
 #s4chart{width:100%;height:380px;display:block;cursor:crosshair}
+.tf-switch .tf-btn{background:var(--panel);color:var(--ink-dim);border:1px solid var(--line);
+  border-radius:5px;padding:2px 9px;margin-left:4px;cursor:pointer;font:inherit;font-size:11px}
+.tf-switch .tf-btn:hover{color:var(--ink)}
+.tf-switch .tf-btn.on{background:var(--chart-line);color:#fff;border-color:var(--chart-line)}
 .an-tip{position:absolute;display:none;pointer-events:none;z-index:20;color:var(--ink);
   background:var(--tip-bg);border:1px solid var(--line);border-radius:8px;
   padding:8px 11px;font-family:var(--mono);font-size:11px;line-height:1.55;
@@ -279,7 +283,10 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
 
     <div class="card">
       <h2 id="s4-title-h">Спред <span id="s4-chart-pair" style="font-family:var(--mono);text-transform:none;letter-spacing:0;color:var(--ink)">—</span>
-        <span class="em" id="s4-chart-sub">—</span></h2>
+        <span class="em" id="s4-chart-sub">—</span>
+        <span class="tf-switch" id="s4-tf-switch" style="float:right;font-size:11px;font-weight:400" title="ТФ графика: 1м детальный (T-Bank) или совпадает с торговым">
+          <button class="tf-btn" data-tf="1">1м</button><button class="tf-btn" data-tf="0" id="s4-tf-trade">торг.</button>
+        </span></h2>
       <div class="chartwrap">
         <canvas id="s4chart"></canvas>
         <div class="an-tip" id="s4tip"></div>
@@ -980,6 +987,11 @@ function s4Render(s){
   // ТФ торговли/графика — синхронизируем из снапшота, но не перетираем пока пользователь меняет селект
   const tf=$('s4-p-tf'); if(tf && s.interval_min && document.activeElement!==tf) tf.value=String(s.interval_min);
   const ctf=$('s4-p-chart-tf'); if(ctf && s.chart_interval_min!=null && document.activeElement!==ctf) ctf.value=String(s.chart_interval_min);
+  // подсветка активной кнопки переключателя ТФ над графиком (1м=детальный, иначе 10м=торговый)
+  document.querySelectorAll('#s4-tf-switch .tf-btn').forEach(b=>{
+    b.classList.toggle('on', +b.dataset.tf === (s.chart_interval_min||0));
+  });
+  const tfTrade=$('s4-tf-trade'); if(tfTrade && s.interval_min) tfTrade.textContent=s.interval_min+'м';
   const cbg=$('s4-conn-badge');
   if(cbg){
     cbg.textContent = (real?'🔴 БОЕВОЙ':(sandbox?'T-Bank песочница':'paper'))
@@ -1177,6 +1189,13 @@ function s4Init(){
       interval_min:+$('s4-p-tf').value, chart_interval_min:+$('s4-p-chart-tf').value };
     try{ await s4api('/config','POST',body); s4Poll(); }catch(e){ alert(e.message); }
   };
+  // переключатель ТФ графика над графиком (1м / 10м). chart_interval_min: 1 → детальный, 0 → = торговый
+  document.querySelectorAll('#s4-tf-switch .tf-btn').forEach(b=>{
+    b.onclick=async()=>{
+      try{ await s4api('/config','POST',{chart_interval_min:+b.dataset.tf}); s4Poll(); }
+      catch(e){ alert(e.message); }
+    };
+  });
   $('s4-btn-bt').onclick=async()=>{
     const days=+$('s4-bt-days').value, stop=+$('s4-bt-stop').value;
     $('s4-bt-msg').textContent='загрузка истории ISS…'; $('s4-btn-bt').disabled=true;
