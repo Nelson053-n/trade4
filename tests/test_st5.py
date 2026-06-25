@@ -135,6 +135,30 @@ def test_engine_trades_on_cointegrated_pair():
     assert set(m.reasons) <= {"exit", "take_partial", "z_stop", "time_stop", "adf_break", "flat_all"}
 
 
+def test_portfolio_limits_gate():
+    """Портфельный гейт: лимит на сделку, число позиций, ≤1 на эмитента."""
+    from app.st5.service import ST5_PAIRS, St5Session
+    from app.st5.models import St5Position, St5State
+    s = St5Session()
+    s.portfolio.capital_rub = 1_000_000.0
+    # лимит на сделку 0.5% = 5000: нотионал 4000 проходит, 6000 — нет
+    ok, _ = s.portfolio.can_open("sber", "SBER", 4000.0, s.engines, ST5_PAIRS)
+    assert ok
+    ok2, reason = s.portfolio.can_open("sber", "SBER", 6000.0, s.engines, ST5_PAIRS)
+    assert not ok2 and "сделк" in reason
+    # открыта позиция по эмитенту SBER → вход в sber запрещён (≤1 на эмитента)
+    s.engines["sber"].position = St5Position(
+        pair="sber", state=St5State.LONG_SPREAD, entry_ts=0, entry_z=-2.5, entry_spread=0.0,
+        entry_beta=1.0, lots=10, entry_lots=10, ord_entry=100.0, pref_entry=100.0, half_life=10)
+    ok3, reason3 = s.portfolio.can_open("sber", "SBER", 1000.0, s.engines, ST5_PAIRS)
+    assert not ok3 and "эмитент" in reason3
+    s.engines["sber"].position = None
+    # HALT блокирует всё
+    s.portfolio.halt("тест")
+    ok4, _ = s.portfolio.can_open("sber", "SBER", 1000.0, s.engines, ST5_PAIRS)
+    assert not ok4
+
+
 def test_size_multiplier_tiers():
     """Сайзинг по |z|: тиры 1x/1.5x/2x, запрет при |z|>4."""
     from app.st5.config import St5StrategyConfig

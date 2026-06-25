@@ -26,6 +26,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from .st4 import data_feed as feed
 from .st4.backtest import band_frame_for_chart, run_backtest
 from .st4.service import ST4_PAIRS, St4Session, _clean
+from .st5.service import St5Session
 
 _BASE = Path(__file__).resolve().parent.parent          # корень проекта trade4
 DASHBOARD = _BASE / "dashboard.html"
@@ -83,6 +84,9 @@ def _verify(token: str) -> bool:
 
 # независимая форвард-тест сессия на каждую пару обычка/преф (?pair=, см. ST4_PAIRS)
 ST4S: dict[str, St4Session] = {p: St4Session(p) for p in ST4_PAIRS}
+
+# ST5 — ОДНА портфельная сессия на весь портфель (до 3 позиций на разные пары)
+ST5 = St5Session()
 
 _server_started = 0.0
 
@@ -191,6 +195,7 @@ async def lifespan(app: FastAPI):
         s4.load_session()
         if s4.state.pop("resume_live", False):
             asyncio.create_task(_st4_autoresume(s4))   # автостарт: live шёл до рестарта
+    ST5.load_session()                                  # портфельная сессия st5
     _auto_bt_task = asyncio.create_task(_auto_backtest_loop())
     yield
     _auto_bt_task.cancel()
@@ -198,6 +203,8 @@ async def lifespan(app: FastAPI):
         s4.save_session()
         s4.state["live"] = False
         s4.state["player"] = False
+    ST5.state["live"] = False
+    ST5.save_session()
 
 
 app = FastAPI(title="trade4 — st4 spread arbitrage", version="1.0", lifespan=lifespan)
@@ -283,6 +290,79 @@ def strategy_md():
 def health():
     return {"ok": True, "pairs": [{"id": p, "live": s.state["live"], "player": s.state["player"]}
                                   for p, s in ST4S.items()]}
+
+
+# ============================================================================
+# st5 — institutional statarb (коинтеграция + Kalman β + z-score). ОДНА портфельная
+# сессия (до 3 позиций на разные пары). Боевой контур реальными деньгами под защитами.
+# ============================================================================
+def _st5_guard_no_position(action: str) -> None:
+    """Запрет опасных действий при ЛЮБОЙ открытой позиции портфеля st5."""
+    busy = [pid for pid, e in ST5.engines.items() if e.position is not None]
+    if busy:
+        raise HTTPException(409, f"активные позиции ({', '.join(busy)}) — {action} невозможно. "
+                                 "Сначала закройте позиции (flat-all).")
+
+
+@app.get("/st5/state")
+def st5_state():
+    return _clean(ST5.snapshot())
+
+
+@app.get("/st5/pairs")
+def st5_pairs():
+    from .st5.service import ST5_PAIRS
+    return {"pairs": [{"id": pid, "ord": s[0], "pref": s[1], "issuer": s[2], "label": s[3]}
+                      for pid, s in ST5_PAIRS.items()]}
+
+
+@app.post("/st5/config")
+def st5_set_config(payload: dict):
+    """Обновить параметры стратегии/риска st5 (блокируется при открытых позициях)."""
+    _st5_guard_no_position("смена параметров")
+    s = ST5.cfg.strategy
+    r = ST5.cfg.risk
+
+    def _num(key, lo, hi, cur):
+        if key not in payload or payload[key] is None:
+            return cur
+        try:
+            v = float(payload[key])
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"{key}: не число")
+        if not (lo <= v <= hi):
+            raise HTTPException(400, f"{key}: вне [{lo}, {hi}]")
+        return v
+
+    s.z_entry = _num("z_entry", 0.5, 5.0, s.z_entry)
+    s.z_stop = _num("z_stop", 1.0, 10.0, s.z_stop)
+    s.z_take_partial = _num("z_take_partial", 0.0, 3.0, s.z_take_partial)
+    s.z_exit_full = _num("z_exit_full", 0.0, 2.0, s.z_exit_full)
+    s.hurst_max = _num("hurst_max", 0.3, 0.8, s.hurst_max)
+    s.adf_p_enter = _num("adf_p_enter", 0.001, 0.5, s.adf_p_enter)
+    s.rv_ratio_max = _num("rv_ratio_max", 0.5, 5.0, s.rv_ratio_max)
+    r.max_open_positions = int(_num("max_open_positions", 1, 3, r.max_open_positions))
+    if "require_dz_confirm" in payload:
+        s.require_dz_confirm = bool(payload["require_dz_confirm"])
+    if "trading_enabled" in payload:
+        r.trading_enabled = bool(payload["trading_enabled"])
+    ST5.save_session()
+    return {"ok": True, "config": ST5.cfg.model_dump()}
+
+
+@app.post("/st5/control/trading")
+def st5_trading(on: bool = True):
+    ST5.cfg.risk.trading_enabled = on
+    ST5.log_event("info", f"торговля {'включена' if on else 'выключена'}")
+    return {"ok": True, "trading_enabled": on}
+
+
+@app.post("/st5/control/resume")
+def st5_resume():
+    ST5.portfolio.resume()
+    ST5.portfolio.pair_halted.clear()
+    ST5.log_event("info", "HALT снят (портфель и пары)")
+    return {"ok": True}
 
 
 # ============================================================================
