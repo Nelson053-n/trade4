@@ -598,14 +598,18 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
         </div>
       </div>
       <div class="card">
-        <h2>Бэктест / калибровка</h2>
+        <h2>Бэктест / калибровка <a href="/strategy5.md" target="_blank" rel="noopener" style="float:right;font-size:11px;font-weight:400;color:var(--ink-dim);text-decoration:none;border:1px solid var(--line);border-radius:6px;padding:3px 8px">📄 стратегия ST5</a></h2>
         <div class="fld"><label>пара</label><select id="s5-bt-pair"><option value="sber">Сбербанк</option><option value="sngr">Сургут</option><option value="tatn">Татнефть</option></select></div>
-        <div style="display:flex;gap:8px">
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
           <button class="btn" id="s5-btn-bt">бэктест 180д</button>
+          <button class="btn" id="s5-btn-grid">грид параметров</button>
           <button class="btn" id="s5-btn-calib">walk-forward</button>
         </div>
         <div id="s5-bt-res" style="font-size:12px;margin-top:8px"></div>
         <div id="s5-calib-res" style="font-size:12px;margin-top:8px"></div>
+        <div id="s5-grid-wrap" style="display:none;margin-top:8px">
+          <table id="s5-grid"><thead><tr><th>z_in</th><th>z_stop</th><th>H_max</th><th>сделок</th><th>win%</th><th>net ₽</th><th>Sharpe</th><th>PF</th><th>maxDD</th></tr></thead><tbody></tbody></table>
+        </div>
       </div>
     </div>
   </div>
@@ -1585,6 +1589,20 @@ function s5Init(){
     try{ const d=await s5api('/backtest?pair='+pair+'&days=180');
       if(d.error){ $('s5-bt-res').textContent=d.error; return; }
       $('s5-bt-res').innerHTML=`<b>${d.legs}</b> ${d.bars}бар · сделок <b>${d.trades}</b> win <b style="color:var(--signal)">${d.win_rate_pct}%</b> net <b style="color:${d.net_pnl_rub>=0?'var(--signal)':'var(--loss)'}">${s5money(d.net_pnl_rub)}</b><br>PF ${d.profit_factor} · Sharpe ${d.sharpe} · maxDD ${d.max_drawdown_pct}%`;
+    }catch(e){ $('s5-bt-res').textContent='ошибка: '+e.message; }
+  };
+  $('s5-btn-grid').onclick=async()=>{
+    const pair=$('s5-bt-pair').value; $('s5-bt-res').textContent='грид-тест (27 комбинаций, ~минута)…';
+    $('s5-grid-wrap').style.display='none';
+    try{ const d=await s5api('/grid?pair='+pair+'&days=180');
+      if(d.error){ $('s5-bt-res').textContent=d.error; return; }
+      $('s5-bt-res').innerHTML=`<b>${d.legs}</b> ${d.bars}бар · выигрышная: z_in ${d.best?d.best.z_entry:'—'} z_stop ${d.best?d.best.z_stop:'—'} H ${d.best?d.best.hurst_max:'—'} → Sharpe <b style="color:var(--signal)">${d.best?d.best.sharpe:'—'}</b>`;
+      const tb=$('s5-grid').querySelector('tbody'); tb.innerHTML='';
+      d.rows.forEach(r=>{
+        const win=d.best && r.z_entry===d.best.z_entry && r.z_stop===d.best.z_stop && r.hurst_max===d.best.hurst_max;
+        tb.insertAdjacentHTML('beforeend', `<tr style="${win?'background:rgba(46,230,166,.12);font-weight:600':''}"><td>${r.z_entry}</td><td>${r.z_stop}</td><td>${r.hurst_max}</td><td>${r.trades}</td><td>${r.win_rate_pct}%</td><td style="color:${r.net_pnl_rub>=0?'var(--signal)':'var(--loss)'}">${s5money(r.net_pnl_rub)}</td><td>${r.sharpe}</td><td>${r.profit_factor}</td><td>${r.max_drawdown_pct}%</td></tr>`);
+      });
+      $('s5-grid-wrap').style.display='';
     }catch(e){ $('s5-bt-res').textContent='ошибка: '+e.message; }
   };
   $('s5-btn-calib').onclick=async()=>{

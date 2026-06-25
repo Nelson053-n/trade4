@@ -286,6 +286,16 @@ def strategy_md():
                         headers={"Cache-Control": "no-cache"})
 
 
+@app.get("/strategy5.md")
+def strategy5_md():
+    """Описание стратегии ST5 для анализа (STRATEGY5.md)."""
+    f = _BASE / "STRATEGY5.md"
+    if not f.exists():
+        raise HTTPException(404, "STRATEGY5.md не найден")
+    return FileResponse(f, media_type="text/markdown; charset=utf-8",
+                        headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/health")
 def health():
     return {"ok": True, "pairs": [{"id": p, "live": s.state["live"], "player": s.state["player"]}
@@ -465,6 +475,51 @@ async def st5_backtest(pair: str = "sber", days: int = 180):
                 "profit_factor": round(m.profit_factor, 2) if m.profit_factor != float("inf") else 999,
                 "sharpe": round(m.sharpe, 2), "max_drawdown_pct": round(m.max_drawdown_pct, 1),
                 "reasons": m.reasons}
+
+    return _clean(await asyncio.to_thread(_run))
+
+
+@app.get("/st5/grid")
+async def st5_grid(pair: str = "sber", days: int = 180):
+    """Грид-тест влияющих параметров (z_entry × z_stop × hurst_max) — показать выигрышную комбу."""
+    from .st5.service import ST5_PAIRS
+    if pair not in ST5_PAIRS:
+        raise HTTPException(400, "pair: " + " | ".join(ST5_PAIRS))
+    ao, ap = ST5_PAIRS[pair][0], ST5_PAIRS[pair][1]
+
+    def _run():
+        from .st4.config import St4Config as _C4
+        from .st4 import data_feed as _feed
+        from .st5.backtest import run_backtest
+        from .st5.config import St5Config as _C5
+        c4 = _C4(); c4.instruments.asset_ordinary = ao; c4.instruments.asset_preferred = ap
+        try:
+            so, sp = _feed.resolve_legs(c4)
+            since = _dt.now(_tz.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+            since = _dt.fromtimestamp(since.timestamp() - days * 86400, tz=_tz.utc)
+            df = _feed.read_ohlcv_moex_range(c4, since, so.code, sp.code)
+        except Exception as e:  # noqa: BLE001
+            return {"error": f"данные недоступны: {e}"}
+        if len(df) < 600:
+            return {"error": f"мало баров: {len(df)}"}
+        rows = []
+        for z_entry in (2.0, 2.25, 2.5):
+            for z_stop in (4.0, 4.25, 5.0):
+                for hmax in (0.55, 0.60):
+                    c = _C5(**ST5.cfg.model_dump())
+                    c.strategy.z_entry = z_entry; c.strategy.z_stop = z_stop; c.strategy.hurst_max = hmax
+                    m = run_backtest(df, c, pair=pair, base_lots=10, fee_per_lot=2.0, half_spread_pts=0.5)
+                    rows.append({"z_entry": z_entry, "z_stop": z_stop, "hurst_max": hmax,
+                                 "trades": m.trades, "win_rate_pct": round(m.win_rate_pct, 0),
+                                 "net_pnl_rub": round(m.net_pnl_rub, 0),
+                                 "sharpe": round(m.sharpe, 2),
+                                 "profit_factor": round(m.profit_factor, 2) if m.profit_factor != float("inf") else 999,
+                                 "max_drawdown_pct": round(m.max_drawdown_pct, 1)})
+        # выигрышная комбинация — по Sharpe среди тех, где ≥3 сделок
+        valid = [r for r in rows if r["trades"] >= 3]
+        best = max(valid, key=lambda r: r["sharpe"]) if valid else None
+        rows.sort(key=lambda r: r["sharpe"], reverse=True)
+        return {"pair": pair, "legs": f"{so.code}/{sp.code}", "bars": len(df), "rows": rows, "best": best}
 
     return _clean(await asyncio.to_thread(_run))
 
