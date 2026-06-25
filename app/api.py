@@ -498,6 +498,79 @@ async def st5_backtest(pair: str = "sber", days: int = 180):
     return res
 
 
+@app.get("/st5/backtest_tbank")
+async def st5_backtest_tbank(pair: str = "sber"):
+    """Бэктест ST5 на РЕАЛЬНЫХ котировках T-Bank (тот же источник, что sandbox-ордера; ~неделя)."""
+    from .st5.service import ST5_PAIRS
+    if pair not in ST5_PAIRS:
+        raise HTTPException(400, "pair: " + " | ".join(ST5_PAIRS))
+    ao, ap = ST5_PAIRS[pair][0], ST5_PAIRS[pair][1]
+
+    def _run():
+        from .st4.config import St4Config as _C4
+        from .st4 import data_feed as _feed
+        from .st4 import tbank_sandbox as _sb
+        from .st5.backtest import run_backtest
+        c4 = _C4(); c4.instruments.asset_ordinary = ao; c4.instruments.asset_preferred = ap
+        try:
+            so, sp = _feed.resolve_legs(c4)
+            uid_o = _sb.find_future(so.code)["uid"]; uid_p = _sb.find_future(sp.code)["uid"]
+            df = _feed.read_ohlcv_tbank(c4, 1000, uid_o, uid_p)
+        except Exception as e:  # noqa: BLE001
+            return {"error": f"T-Bank данные недоступны: {e}"}
+        if len(df) < 200:
+            return {"error": f"мало баров T-Bank: {len(df)} (нужно прогреть фильтры)"}
+        m = run_backtest(df, ST5.cfg, pair=pair, base_lots=10, fee_per_lot=2.0, half_spread_pts=0.5)
+        return {"pair": pair, "legs": f"{so.code}/{sp.code}", "source": "T-Bank", "bars": m.bars,
+                "trades": m.trades, "win_rate_pct": round(m.win_rate_pct, 0),
+                "net_pnl_rub": round(m.net_pnl_rub, 0),
+                "profit_factor": round(m.profit_factor, 2) if m.profit_factor != float("inf") else 999,
+                "sharpe": round(m.sharpe, 2), "max_drawdown_pct": round(m.max_drawdown_pct, 1),
+                "reasons": m.reasons}
+
+    res = _clean(await asyncio.to_thread(_run))
+    if "error" not in res:
+        _st5_bt_log({"kind": "T-Bank", "pair": pair, "days": None, "trades": res["trades"],
+                     "win_rate_pct": res["win_rate_pct"], "net_pnl_rub": res["net_pnl_rub"],
+                     "sharpe": res["sharpe"], "max_drawdown_pct": res["max_drawdown_pct"]})
+    return res
+
+
+@app.get("/st5/margin")
+async def st5_margin():
+    """Гарантийное обеспечение (ГО) всех пар + САМОПРОВЕРКА: хватает ли капитала на портфель."""
+    from .st5.service import ST5_PAIRS
+
+    def _run():
+        from .st4.config import St4Config as _C4
+        from .st4 import data_feed as _feed
+        rows = []
+        total_go_3pos = 0.0
+        for pid, spec in ST5_PAIRS.items():
+            c4 = _C4(); c4.instruments.asset_ordinary = spec[0]; c4.instruments.asset_preferred = spec[1]
+            try:
+                so, sp = _feed.resolve_legs(c4)
+                m_ord = _feed.leg_margin(so.code)
+                m_pref = _feed.leg_margin(sp.code)
+            except Exception as e:  # noqa: BLE001
+                rows.append({"pair": pid, "label": spec[3], "error": str(e)[:50]})
+                continue
+            go_pair = (m_ord + m_pref) * 10   # ГО на пару при base_lots=10 (обе ноги)
+            total_go_3pos += go_pair
+            rows.append({"pair": pid, "label": spec[3], "legs": f"{so.code}/{sp.code}",
+                         "go_ord": round(m_ord), "go_pref": round(m_pref),
+                         "go_pair_10lots": round(go_pair)})
+        cap = ST5.portfolio.capital_rub
+        # самопроверка: ГО 3 позиций vs капитал + лимит портфеля 5%
+        return {"rows": rows, "capital_rub": round(cap),
+                "go_all_3pairs_10lots": round(total_go_3pos),
+                "go_pct_of_capital": round(total_go_3pos / cap * 100, 1) if cap > 0 else 0,
+                "portfolio_limit_pct": ST5.cfg.risk.risk_per_portfolio_pct * 100,
+                "self_check_ok": total_go_3pos < cap * 0.5}   # ГО 3 поз. должно быть < 50% капитала
+
+    return _clean(await asyncio.to_thread(_run))
+
+
 @app.get("/st5/grid")
 async def st5_grid(pair: str = "sber", days: int = 180):
     """Грид-тест влияющих параметров (z_entry × z_stop × hurst_max) — показать выигрышную комбу."""

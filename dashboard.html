@@ -601,10 +601,13 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
         <h2>Бэктест / калибровка <a href="/strategy5.md" target="_blank" rel="noopener" style="float:right;font-size:11px;font-weight:400;color:var(--ink-dim);text-decoration:none;border:1px solid var(--line);border-radius:6px;padding:3px 8px">📄 стратегия ST5</a></h2>
         <div class="fld"><label>пара</label><select id="s5-bt-pair"><option value="sber">Сбербанк</option><option value="sngr">Сургут</option><option value="tatn">Татнефть</option></select></div>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <button class="btn" id="s5-btn-bt">бэктест 180д</button>
+          <button class="btn" id="s5-btn-bt">бэктест ISS 180д</button>
+          <button class="btn" id="s5-btn-bttb">бэктест T-Bank</button>
           <button class="btn" id="s5-btn-grid">грид параметров</button>
           <button class="btn" id="s5-btn-calib">walk-forward</button>
+          <button class="btn" id="s5-btn-margin">ГО самопроверка</button>
         </div>
+        <div id="s5-margin-res" style="font-size:12px;margin-top:8px"></div>
         <div id="s5-bt-res" style="font-size:12px;margin-top:8px"></div>
         <div id="s5-calib-res" style="font-size:12px;margin-top:8px"></div>
         <div id="s5-grid-wrap" style="display:none;margin-top:8px">
@@ -1603,6 +1606,24 @@ function s5Init(){
       if(d.error){ $('s5-bt-res').textContent=d.error; return; }
       $('s5-bt-res').innerHTML=`<b>${d.legs}</b> ${d.bars}бар · сделок <b>${d.trades}</b> win <b style="color:var(--signal)">${d.win_rate_pct}%</b> net <b style="color:${d.net_pnl_rub>=0?'var(--signal)':'var(--loss)'}">${s5money(d.net_pnl_rub)}</b><br>PF ${d.profit_factor} · Sharpe ${d.sharpe} · maxDD ${d.max_drawdown_pct}%`;
     }catch(e){ $('s5-bt-res').textContent='ошибка: '+e.message; }
+  };
+  $('s5-btn-bttb').onclick=async()=>{
+    const pair=$('s5-bt-pair').value; $('s5-bt-res').textContent='бэктест T-Bank…';
+    try{ const d=await s5api('/backtest_tbank?pair='+pair);
+      if(d.error){ $('s5-bt-res').textContent=d.error; return; }
+      $('s5-bt-res').innerHTML=`<b>${d.legs}</b> ${d.bars}бар (${d.source}) · сделок <b>${d.trades}</b> win <b style="color:var(--signal)">${d.win_rate_pct}%</b> net <b style="color:${d.net_pnl_rub>=0?'var(--signal)':'var(--loss)'}">${s5money(d.net_pnl_rub)}</b><br>PF ${d.profit_factor} · Sharpe ${d.sharpe} · maxDD ${d.max_drawdown_pct}%`;
+      s5RenderBtHistory();
+    }catch(e){ $('s5-bt-res').textContent='ошибка: '+e.message; }
+  };
+  $('s5-btn-margin').onclick=async()=>{
+    $('s5-margin-res').textContent='расчёт ГО…';
+    try{ const d=await s5api('/margin');
+      let html=`<b>капитал:</b> ${(d.capital_rub).toLocaleString('ru')} ₽<br>`;
+      d.rows.forEach(r=>{ html+= r.error?`${r.label}: ${r.error}<br>`:`${r.label} (${r.legs}): ГО пары на 10 лотов <b>${(r.go_pair_10lots).toLocaleString('ru')} ₽</b><br>`; });
+      html+=`<b>ГО всех 3 пар (10 лотов):</b> ${(d.go_all_3pairs_10lots).toLocaleString('ru')} ₽ (${d.go_pct_of_capital}% капитала)<br>`;
+      html+=`самопроверка: <b style="color:${d.self_check_ok?'var(--signal)':'var(--loss)'}">${d.self_check_ok?'✓ капитала хватает на портфель':'⚠ ГО близко к капиталу'}</b>`;
+      $('s5-margin-res').innerHTML=html;
+    }catch(e){ $('s5-margin-res').textContent='ошибка: '+e.message; }
   };
   $('s5-btn-grid').onclick=async()=>{
     const pair=$('s5-bt-pair').value; $('s5-bt-res').textContent='грид-тест (27 комбинаций, ~минута)…';
