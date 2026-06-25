@@ -498,6 +498,65 @@ async def st5_backtest(pair: str = "sber", days: int = 180):
     return res
 
 
+@app.get("/st5/daily")
+async def st5_daily(pair: str = "sber", days: int = 30):
+    """Доходность по дням — ТРИ кривые: идеал без издержек / идеал с издержками / реальный live.
+
+    Разница идеал−с_издержками = стоимость исполнения; идеал−реал = упущенное (бот застал не всё).
+    """
+    from .st5.service import ST5_PAIRS
+    if pair not in ST5_PAIRS:
+        raise HTTPException(400, "pair: " + " | ".join(ST5_PAIRS))
+    ao, ap = ST5_PAIRS[pair][0], ST5_PAIRS[pair][1]
+
+    def _run():
+        import datetime as _dtmod
+        from collections import defaultdict
+        from .st4.config import St4Config as _C4
+        from .st4 import data_feed as _feed
+        from .st5.engine import ST5Engine
+        c4 = _C4(); c4.instruments.asset_ordinary = ao; c4.instruments.asset_preferred = ap
+        try:
+            so, sp = _feed.resolve_legs(c4)
+            since = _dt.now(_tz.utc) - _dtmod.timedelta(days=max(days, 40) + 20)  # +прогрев
+            df = _feed.read_ohlcv_moex_range(c4, since, so.code, sp.code)
+        except Exception as e:  # noqa: BLE001
+            return {"error": f"данные недоступны: {e}"}
+        if len(df) < 600:
+            return {"error": f"мало баров: {len(df)}"}
+
+        def day_pnl(fee, hs):
+            eng = ST5Engine(pair, ST5.cfg, base_lots=10, fee_per_lot=fee, half_spread_pts=hs)
+            for ts, row in df.iterrows():
+                eng.step(int(ts), float(row["price_a"]), float(row["price_b"]))
+            buckets = defaultdict(float)
+            for t in eng.trades:
+                d = _dtmod.datetime.fromtimestamp(t.exit_ts / 1000, _MSK).strftime("%Y-%m-%d")
+                buckets[d] += t.net_pnl_rub
+            return buckets
+
+        ideal = day_pnl(0.0, 0.0)            # без издержек
+        with_costs = day_pnl(2.0, 0.5)       # с комиссиями + half-spread
+        # реальный live: фактические сделки бота по этой паре
+        real = defaultdict(float)
+        for t in ST5.trades:
+            if t.get("pair") == pair and t.get("exit_ts"):
+                d = _dtmod.datetime.fromtimestamp(t["exit_ts"] / 1000, _MSK).strftime("%Y-%m-%d")
+                real[d] += t.get("net_pnl_rub", 0)
+        # последние N дней с любой активностью
+        all_days = sorted(set(ideal) | set(with_costs) | set(real))[-days:]
+        rows = [{"date": d, "ideal": round(ideal.get(d, 0)), "with_costs": round(with_costs.get(d, 0)),
+                 "real": round(real.get(d, 0))} for d in all_days]
+        return {"pair": pair, "legs": f"{so.code}/{sp.code}", "rows": rows,
+                "total_ideal": round(sum(ideal.values())),
+                "total_with_costs": round(sum(with_costs.values())),
+                "total_real": round(sum(real.values())),
+                "cost_of_execution": round(sum(ideal.values()) - sum(with_costs.values())),
+                "missed": round(sum(with_costs.values()) - sum(real.values()))}
+
+    return _clean(await asyncio.to_thread(_run))
+
+
 @app.get("/st5/backtest_tbank")
 async def st5_backtest_tbank(pair: str = "sber"):
     """Бэктест ST5 на РЕАЛЬНЫХ котировках T-Bank (тот же источник, что sandbox-ордера; ~неделя)."""

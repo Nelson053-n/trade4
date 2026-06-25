@@ -568,6 +568,18 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
         <h2>Журнал сделок ST5 <span class="em" id="s5-trades-sub"></span></h2>
         <table id="s5-trades"><thead><tr><th>пара</th><th>напр.</th><th>z вх→вых</th><th>лот</th><th>net ₽</th><th>причина</th></tr></thead><tbody></tbody></table>
       </div>
+      <div class="card">
+        <h2>Доходность по дням <span class="em" id="s5-daily-sub">идеал vs с издержками vs реал</span>
+          <select id="s5-daily-pair" style="float:right;font-size:11px;background:var(--panel-2);border:1px solid var(--line);border-radius:6px;color:var(--ink);padding:2px 6px"><option value="sber">Сбер</option><option value="sngr">Сургут</option><option value="tatn">Татнефть</option></select></h2>
+        <canvas id="s5-daily-chart" style="width:100%;height:170px;display:block;margin:6px 0"></canvas>
+        <div class="legend" style="margin-bottom:6px">
+          <span><i style="border-color:var(--ink-dim);border-top-style:dashed"></i>идеал (без издержек)</span>
+          <span><i style="border-color:var(--chart-line)"></i>с издержками</span>
+          <span><i style="border-color:var(--signal)"></i>реальный live</span>
+        </div>
+        <div id="s5-daily-totals" style="font-size:12px;margin-bottom:6px"></div>
+        <div class="tblwrap" style="max-height:180px"><table id="s5-daily"><thead><tr><th>дата</th><th>идеал ₽</th><th>с издерж. ₽</th><th>реал ₽</th></tr></thead><tbody></tbody></table></div>
+      </div>
     </div>
     <div>
       <div class="card">
@@ -1421,7 +1433,7 @@ function s5Switch(strat){
   });
   $('tab-st4').hidden = strat!=='st4';
   $('tab-st5').hidden = strat!=='st5';
-  if(strat==='st5') s5Poll();
+  if(strat==='st5'){ s5Poll(); if(!_s5dailyLoaded){ _s5dailyLoaded=true; s5LoadDaily(); } }
 }
 function s5Render(s){
   _s5snap=s;
@@ -1570,6 +1582,40 @@ function s5BuildChartSwitch(pairs){
     el.appendChild(b);
   });
 }
+let _s5dailyLoaded=false;
+async function s5LoadDaily(){
+  const pair=$('s5-daily-pair').value;
+  try{ const d=await s5api('/daily?pair='+pair+'&days=30');
+    if(d.error){ $('s5-daily-totals').textContent=d.error; return; }
+    const rows=d.rows||[];
+    $('s5-daily-totals').innerHTML=`идеал <b style="color:var(--ink-dim)">${s5money(d.total_ideal)}</b> · с издержками <b style="color:var(--chart-line)">${s5money(d.total_with_costs)}</b> · реал <b style="color:var(--signal)">${s5money(d.total_real)}</b><br>стоимость исполнения: ${s5money(-d.cost_of_execution)} · упущено (бот застал не всё): ${s5money(-d.missed)}`;
+    const tb=$('s5-daily').querySelector('tbody');
+    tb.innerHTML=rows.length?rows.slice().reverse().map(r=>`<tr><td style="color:var(--ink-dim)">${r.date.slice(5)}</td><td style="color:var(--ink-dim)">${s5money(r.ideal)}</td><td>${s5money(r.with_costs)}</td><td style="color:${r.real>=0?'var(--signal)':'var(--loss)'}">${s5money(r.real)}</td></tr>`).join(''):'<tr><td colspan="4" class="empty">нет данных</td></tr>';
+    s5DrawDaily(rows);
+  }catch(e){ $('s5-daily-totals').textContent='ошибка: '+e.message; }
+}
+function s5DrawDaily(rows){
+  const cv=$('s5-daily-chart'); if(!cv) return;
+  const r=cv.getBoundingClientRect(); if(r.width<5){ return; }
+  const dpr=devicePixelRatio||1; cv.width=r.width*dpr; cv.height=r.height*dpr;
+  const ctx=cv.getContext('2d'); ctx.setTransform(1,0,0,1,0,0); ctx.scale(dpr,dpr);
+  const W=r.width,H=r.height; ctx.clearRect(0,0,W,H);
+  if(!rows.length){ ctx.fillStyle=getCSS('--ink-faint'); ctx.font='11px monospace'; ctx.fillText('нет данных',10,20); return; }
+  // накопленные (cumulative) кривые
+  const cum=k=>{ let s=0; return rows.map(r=>s+=r[k]); };
+  const ci=cum('ideal'),cc=cum('with_costs'),cr=cum('real');
+  const all=[...ci,...cc,...cr,0]; let lo=Math.min(...all),hi=Math.max(...all); const pad=(hi-lo)*0.1||1; lo-=pad;hi+=pad;
+  const ML=44,MB=14,MT=8,MR=8, px0=ML,px1=W-MR,py0=MT,py1=H-MB;
+  const x=i=>px0+(rows.length<2?0:i/(rows.length-1)*(px1-px0)), y=v=>py1-(v-lo)/(hi-lo)*(py1-py0);
+  // ноль
+  if(lo<0&&hi>0){ const y0=y(0); ctx.strokeStyle=getCSS('--line'); ctx.globalAlpha=.5; ctx.beginPath();ctx.moveTo(px0,y0);ctx.lineTo(px1,y0);ctx.stroke();ctx.globalAlpha=1; }
+  ctx.fillStyle=getCSS('--ink-dim'); ctx.font='9px monospace'; ctx.textAlign='right'; ctx.textBaseline='middle';
+  ctx.fillText(Math.round(hi).toLocaleString('ru'),px0-3,y(hi)+4); ctx.fillText(Math.round(lo).toLocaleString('ru'),px0-3,y(lo));
+  const drawLine=(arr,col,dash)=>{ ctx.strokeStyle=col;ctx.lineWidth=1.6;ctx.setLineDash(dash||[]); ctx.beginPath(); arr.forEach((v,i)=>{const X=x(i),Y=y(v);i?ctx.lineTo(X,Y):ctx.moveTo(X,Y);}); ctx.stroke(); ctx.setLineDash([]); };
+  drawLine(ci,getCSS('--ink-dim'),[4,3]);   // идеал — пунктир
+  drawLine(cc,getCSS('--chart-line'));        // с издержками
+  drawLine(cr,getCSS('--signal'));            // реал
+}
 async function s5RenderBtHistory(){
   try{ const d=await s5api('/backtest_history'); const h=d.history||[];
     const tb=$('s5-bth').querySelector('tbody'); $('s5-bth-sub').textContent=h.length?h.length+' прогонов':'';
@@ -1615,6 +1661,7 @@ function s5Init(){
       s5RenderBtHistory();
     }catch(e){ $('s5-bt-res').textContent='ошибка: '+e.message; }
   };
+  $('s5-daily-pair').onchange=s5LoadDaily;
   $('s5-btn-margin').onclick=async()=>{
     $('s5-margin-res').textContent='расчёт ГО…';
     try{ const d=await s5api('/margin');
