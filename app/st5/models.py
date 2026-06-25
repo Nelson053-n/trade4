@@ -86,7 +86,13 @@ class St5Metrics:
     fees_rub: float = 0.0
     max_drawdown_pct: float = 0.0
     sharpe: float = 0.0
+    sortino: float = 0.0          # как Sharpe, но по downside-волатильности
+    calmar: float = 0.0           # net / maxDD (доход на единицу просадки)
     profit_factor: float = 0.0
+    expectancy: float = 0.0       # средний P&L на сделку
+    avg_bars_held: float = 0.0
+    avg_win: float = 0.0
+    avg_loss: float = 0.0
     bars: int = 0
     reasons: dict = field(default_factory=dict)
     equity_curve: list = field(default_factory=list)

@@ -54,11 +54,21 @@ def run_backtest(df: pd.DataFrame, cfg: St5Config, pair: str = "test",
     gains = sum(t.net_pnl_rub for t in trades if t.net_pnl_rub > 0)
     losses = -sum(t.net_pnl_rub for t in trades if t.net_pnl_rub < 0)
     m.profit_factor = (gains / losses) if losses > 1e-9 else (float("inf") if gains > 0 else 0.0)
-    # Sharpe по P&L сделок (annualization опускаем — относительная мера)
+    wins_pnl = [t.net_pnl_rub for t in trades if t.net_pnl_rub > 0]
+    loss_pnl = [t.net_pnl_rub for t in trades if t.net_pnl_rub < 0]
+    m.avg_win = float(np.mean(wins_pnl)) if wins_pnl else 0.0
+    m.avg_loss = float(np.mean(loss_pnl)) if loss_pnl else 0.0
+    m.avg_bars_held = float(np.mean([t.bars_held for t in trades])) if trades else 0.0
+    m.expectancy = (m.net_pnl_rub / len(trades)) if trades else 0.0
+    m.calmar = (m.net_pnl_rub / m.max_drawdown_pct) if m.max_drawdown_pct > 1e-9 else 0.0
     if len(trades) >= 2:
         pnls = np.array([t.net_pnl_rub for t in trades], float)
         sd = pnls.std(ddof=1)
         m.sharpe = float(pnls.mean() / sd * math.sqrt(len(pnls))) if sd > 1e-9 else 0.0
+        # Sortino: нормируем только на downside-отклонение (риск только убытков)
+        downside = pnls[pnls < 0]
+        dd = downside.std(ddof=1) if len(downside) >= 2 else (abs(downside).mean() if len(downside) else 0.0)
+        m.sortino = float(pnls.mean() / dd * math.sqrt(len(pnls))) if dd > 1e-9 else 0.0
     return m
 
 

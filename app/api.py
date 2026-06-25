@@ -630,6 +630,72 @@ async def st5_margin():
     return _clean(await asyncio.to_thread(_run))
 
 
+_ST5_SWEEP_PARAMS = {
+    "z_entry": [1.75, 2.0, 2.25, 2.5, 2.75, 3.0],
+    "z_stop": [3.5, 4.0, 4.25, 4.5, 5.0, 6.0],
+    "z_take_partial": [0.5, 0.75, 1.0, 1.25, 1.5],
+    "z_exit_full": [0.1, 0.25, 0.35, 0.5, 0.75],
+    "hurst_max": [0.45, 0.50, 0.55, 0.60, 0.65, 0.70],
+    "adf_p_enter": [0.01, 0.025, 0.05, 0.10, 0.15],
+    "rv_ratio_max": [1.2, 1.5, 1.7, 2.0, 2.5, 3.0],
+    "kalman_delta": [1e-5, 5e-5, 1e-4, 5e-4, 1e-3],
+    "z_ema_span": [100, 150, 200, 250],
+    "z_std_window": [100, 150, 200, 250],
+}
+
+
+@app.get("/st5/sweep")
+async def st5_sweep(pair: str = "sber", param: str = "z_entry", days: int = 365):
+    """Расширенная аналитика: перебор ОДНОГО параметра по сетке на большом объёме, полные
+    метрики (Sharpe/Sortino/Calmar/PF/maxDD/expectancy/avg hold). param из _ST5_SWEEP_PARAMS."""
+    from .st5.service import ST5_PAIRS
+    if pair not in ST5_PAIRS:
+        raise HTTPException(400, "pair: " + " | ".join(ST5_PAIRS))
+    if param not in _ST5_SWEEP_PARAMS:
+        raise HTTPException(400, "param: " + " | ".join(_ST5_SWEEP_PARAMS))
+    ao, ap = ST5_PAIRS[pair][0], ST5_PAIRS[pair][1]
+
+    def _run():
+        from .st4.config import St4Config as _C4
+        from .st4 import data_feed as _feed
+        from .st5.backtest import run_backtest
+        from .st5.config import St5Config as _C5
+        c4 = _C4(); c4.instruments.asset_ordinary = ao; c4.instruments.asset_preferred = ap
+        try:
+            so, sp = _feed.resolve_legs(c4)
+            since = _dt.now(_tz.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+            since = _dt.fromtimestamp(since.timestamp() - days * 86400, tz=_tz.utc)
+            df = _feed.read_ohlcv_moex_range(c4, since, so.code, sp.code)
+        except Exception as e:  # noqa: BLE001
+            return {"error": f"данные недоступны: {e}"}
+        if len(df) < 600:
+            return {"error": f"мало баров: {len(df)}"}
+        rows = []
+        for val in _ST5_SWEEP_PARAMS[param]:
+            c = _C5(**ST5.cfg.model_dump())
+            setattr(c.strategy, param, val)
+            m = run_backtest(df, c, pair=pair, base_lots=10, fee_per_lot=2.0, half_spread_pts=0.5)
+            rows.append({"value": val, "trades": m.trades, "win_rate_pct": round(m.win_rate_pct, 0),
+                         "net_pnl_rub": round(m.net_pnl_rub, 0),
+                         "sharpe": round(m.sharpe, 2), "sortino": round(m.sortino, 2),
+                         "calmar": round(m.calmar, 1),
+                         "profit_factor": round(m.profit_factor, 2) if m.profit_factor != float("inf") else 999,
+                         "max_drawdown_pct": round(m.max_drawdown_pct, 1),
+                         "expectancy": round(m.expectancy, 0), "avg_bars_held": round(m.avg_bars_held, 1)})
+        valid = [r for r in rows if r["trades"] >= 3]
+        best = max(valid, key=lambda r: r["sharpe"]) if valid else None
+        return {"pair": pair, "param": param, "legs": f"{so.code}/{sp.code}", "bars": len(df),
+                "current": getattr(ST5.cfg.strategy, param), "rows": rows, "best": best}
+
+    res = _clean(await asyncio.to_thread(_run))
+    if "error" not in res and res.get("best"):
+        b = res["best"]
+        _st5_bt_log({"kind": f"sweep:{param}", "pair": pair, "days": days, "trades": b["trades"],
+                     "win_rate_pct": b["win_rate_pct"], "net_pnl_rub": b["net_pnl_rub"],
+                     "sharpe": b["sharpe"], "max_drawdown_pct": b["max_drawdown_pct"]})
+    return res
+
+
 @app.get("/st5/grid")
 async def st5_grid(pair: str = "sber", days: int = 180):
     """Грид-тест влияющих параметров (z_entry × z_stop × hurst_max) — показать выигрышную комбу."""
