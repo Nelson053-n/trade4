@@ -180,6 +180,7 @@ def test_real_trading_armed_cooldown():
 
 def test_order_id_discriminator_no_collision():
     """Идемпотентный order_id: разные операции/seq → разные id (защита частичной фиксации)."""
+    import uuid as _uuid
     from app.st5.executor import _disc_order_id
     ids = {
         _disc_order_id("a", "u", 10, "BUY", "entry", 1),
@@ -188,6 +189,11 @@ def test_order_id_discriminator_no_collision():
         _disc_order_id("a", "u", 10, "BUY", "entry", 2),
     }
     assert len(ids) == 4   # все уникальны
+    # sandbox order_id должен быть ВАЛИДНЫМ UUID (требование SandboxService)
+    for i in ids:
+        _uuid.UUID(i)
+    # боевой — sha256-хеш (не UUID)
+    assert len(_disc_order_id("a", "u", 10, "BUY", "entry", 1, real=True)) == 32
 
 
 def test_executor_blocks_real_without_arm():

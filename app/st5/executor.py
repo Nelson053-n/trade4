@@ -12,23 +12,31 @@ from __future__ import annotations
 
 import hashlib
 import time
-from datetime import datetime, timedelta, timezone
+import uuid
 
 from ..st4 import tbank_sandbox as _sb
+
+_NS = uuid.UUID("5f5e1000-0000-4000-8000-000000000000")   # namespace для детерминированных UUID5
 
 
 class St5ExecError(Exception):
     pass
 
 
-def _disc_order_id(account_id: str, uid: str, lots: int, direction: str, op: str, seq: int) -> str:
+def _disc_order_id(account_id: str, uid: str, lots: int, direction: str, op: str, seq: int,
+                   real: bool = False) -> str:
     """Идемпотентный orderId с дискриминатором операции и порядковым номером.
 
     op ∈ {entry, take50, take_rest, unwind, flat}. seq — счётчик в рамках операции. Решает
-    коллизию st4-make_order_id, где два разных логических ордера в одну секунду совпадали по id.
+    коллизию st4-make_order_id (два логических ордера в одну секунду совпадали по id).
+
+    ВАЖНО: SandboxService требует orderId в формате UUID (боевой OrdersService — любую строку).
+    Поэтому sandbox → детерминированный UUID5 (валиден + идемпотентен), боевой → sha256-хеш.
     """
     raw = f"{account_id}|{uid}|{int(lots)}|{direction}|{op}|{seq}|{int(time.time())}"
-    return hashlib.sha256(raw.encode()).hexdigest()[:32]
+    if real:
+        return hashlib.sha256(raw.encode()).hexdigest()[:32]
+    return str(uuid.uuid5(_NS, raw))   # sandbox: валидный UUID
 
 
 class St5PairExecutor:
@@ -72,7 +80,7 @@ class St5PairExecutor:
         except Exception:  # noqa: BLE001  last_price недоступен — не блокируем (market всё равно исполнится)
             mkt = ref_price
         self._seq += 1
-        oid = _disc_order_id(self.account_id, uid, lots, direction, op, self._seq)
+        oid = _disc_order_id(self.account_id, uid, lots, direction, op, self._seq, real=self.real)
         full_dir = f"ORDER_DIRECTION_{direction}"
         audit = {"ts": int(time.time() * 1000), "account": self.account_id, "uid": uid,
                  "lots": lots, "direction": direction, "op": op, "order_id": oid,
