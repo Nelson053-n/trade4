@@ -23,9 +23,16 @@ EVENTS_LEN = 40
 
 # пары-кандидаты ST5: (ord, pref, эмитент-ключ, ярлык). Один эмитент → ≤1 позиция (max_per_issuer).
 ST5_PAIRS: dict[str, tuple] = {
-    "sber": ("SBRF", "SBPR", "SBER", "Сбербанк"),
-    "sngr": ("SNGR", "SNGP", "SNGR", "Сургутнефтегаз"),
-    "tatn": ("TATN", "TATP", "TATN", "Татнефть"),
+    # (ord, pref, эмитент, ярлык, опц. per-pair оверрайды StrategyConfig).
+    # Оверрайды откалиброваны sweep'ом на 365д (по Sharpe, ≥5 сделок). КАЖДАЯ пара статистически
+    # разная — глобальные параметры ломают часть пар (напр. z_exit=0.1 хорош sber/tatn, но sngr
+    # лучше с 0.35). Поэтому per-pair, как в st4.
+    "sber": ("SBRF", "SBPR", "SBER", "Сбербанк",
+             {"z_entry": 1.75, "z_take_partial": 1.5, "z_exit_full": 0.1}),
+    "sngr": ("SNGR", "SNGP", "SNGR", "Сургутнефтегаз",
+             {"z_entry": 1.75, "z_take_partial": 1.5, "z_exit_full": 0.35}),
+    "tatn": ("TATN", "TATP", "TATN", "Татнефть",
+             {"z_entry": 1.75, "z_take_partial": 1.25, "z_exit_full": 0.1}),
 }
 
 
@@ -122,11 +129,14 @@ class St5Session:
         self.cfg = St5Config()
         self._session_file = _BASE / "session_state_5.json"
         self.portfolio = St5Portfolio(self.cfg)
-        # движок на каждую пару-кандидата
+        # движок на каждую пару-кандидата — со СВОИМ конфигом (per-pair оверрайды из ST5_PAIRS)
         self.engines: dict[str, ST5Engine] = {}
+        self.pair_cfgs: dict[str, St5Config] = {}
         self.specs: dict[str, tuple] = {}        # pid -> (spec_ord, spec_pref)
         for pid, spec in ST5_PAIRS.items():
-            self.engines[pid] = ST5Engine(pid, self.cfg, base_lots=self.cfg.execution.quantity_lots)
+            pcfg = self._pair_cfg(pid)
+            self.pair_cfgs[pid] = pcfg
+            self.engines[pid] = ST5Engine(pid, pcfg, base_lots=pcfg.execution.quantity_lots)
         self.trades: list[dict] = []             # общий журнал портфеля (json-записи)
         self.history: dict[str, list] = {pid: [] for pid in ST5_PAIRS}   # история спреда по парам
         self.events: list[dict] = []
@@ -138,6 +148,16 @@ class St5Session:
         self._live_task = None
         self._uid_cache: dict[str, tuple] = {}   # pid -> (uid_ord, uid_pref): кэш против 429 T-Bank
         self._legs_cache: dict[str, tuple] = {}  # pid -> (spec_ord, spec_pref) от resolve_legs
+
+    def _pair_cfg(self, pid: str) -> St5Config:
+        """Конфиг пары = базовый ST5 + per-pair оверрайды StrategyConfig из ST5_PAIRS[pid][4]."""
+        c = St5Config(**self.cfg.model_dump())
+        spec = ST5_PAIRS[pid]
+        if len(spec) > 4 and isinstance(spec[4], dict):
+            for k, v in spec[4].items():
+                if hasattr(c.strategy, k):
+                    setattr(c.strategy, k, v)
+        return c
 
     # ---------- журнал событий ----------
     def log_event(self, kind: str, message: str) -> None:

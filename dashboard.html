@@ -580,6 +580,34 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
         <div id="s5-daily-totals" style="font-size:12px;margin-bottom:6px"></div>
         <div class="tblwrap" style="max-height:180px"><table id="s5-daily"><thead><tr><th>дата</th><th>идеал ₽</th><th>с издерж. ₽</th><th>реал ₽</th></tr></thead><tbody></tbody></table></div>
       </div>
+      <div class="card">
+        <h2>Расширенная аналитика <span class="em">перебор параметра · большой объём</span></h2>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+          <select id="s5-sw-pair" style="background:var(--panel-2);border:1px solid var(--line);border-radius:6px;color:var(--ink);padding:3px 6px"><option value="sber">Сбер</option><option value="sngr">Сургут</option><option value="tatn">Татнефть</option></select>
+          <select id="s5-sw-param" style="background:var(--panel-2);border:1px solid var(--line);border-radius:6px;color:var(--ink);padding:3px 6px">
+            <option value="z_entry">z_entry (порог входа)</option>
+            <option value="z_stop">z_stop (стоп)</option>
+            <option value="z_take_partial">z_take (частич. фикс)</option>
+            <option value="z_exit_full">z_exit (полный выход)</option>
+            <option value="hurst_max">hurst_max</option>
+            <option value="adf_p_enter">adf_p (коинтеграция)</option>
+            <option value="rv_ratio_max">rv_ratio (режим воли)</option>
+            <option value="kalman_delta">kalman_delta (β дрейф)</option>
+            <option value="z_ema_span">z_ema_span</option>
+            <option value="z_std_window">z_std_window</option>
+          </select>
+          <select id="s5-sw-days" style="background:var(--panel-2);border:1px solid var(--line);border-radius:6px;color:var(--ink);padding:3px 6px"><option value="180">180д</option><option value="365" selected>365д</option><option value="90">90д</option></select>
+          <button class="btn primary" id="s5-btn-sweep">прогнать</button>
+        </div>
+        <div id="s5-sweep-res" style="font-size:12px;margin-bottom:6px"></div>
+        <div class="tblwrap" style="max-height:280px"><table id="s5-sweep"><thead><tr><th id="s5-sw-h">знач</th><th>сделок</th><th>win%</th><th>net ₽</th><th>Sharpe</th><th>Sortino</th><th>Calmar</th><th>PF</th><th>maxDD</th><th>ср.держ</th></tr></thead><tbody><tr><td colspan="10" class="empty">выбери параметр и прогони</td></tr></tbody></table></div>
+      </div>
+      <div class="card">
+        <h2>Журнал прогонов <span class="em" id="s5-bth-sub"></span></h2>
+        <div class="tblwrap" style="max-height:220px">
+          <table id="s5-bth"><thead><tr><th>время</th><th>тип</th><th>пара</th><th>дней</th><th>сделок</th><th>win%</th><th>net ₽</th><th>Sharpe</th><th>maxDD</th></tr></thead><tbody><tr><td colspan="9" class="empty">прогонов пока нет</td></tr></tbody></table>
+        </div>
+      </div>
     </div>
     <div>
       <div class="card">
@@ -624,34 +652,6 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
         <div id="s5-calib-res" style="font-size:12px;margin-top:8px"></div>
         <div id="s5-grid-wrap" style="display:none;margin-top:8px">
           <table id="s5-grid"><thead><tr><th>z_in</th><th>z_stop</th><th>H_max</th><th>сделок</th><th>win%</th><th>net ₽</th><th>Sharpe</th><th>PF</th><th>maxDD</th></tr></thead><tbody></tbody></table>
-        </div>
-      </div>
-      <div class="card">
-        <h2>Расширенная аналитика <span class="em">перебор параметра · большой объём</span></h2>
-        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
-          <select id="s5-sw-pair" style="background:var(--panel-2);border:1px solid var(--line);border-radius:6px;color:var(--ink);padding:3px 6px"><option value="sber">Сбер</option><option value="sngr">Сургут</option><option value="tatn">Татнефть</option></select>
-          <select id="s5-sw-param" style="background:var(--panel-2);border:1px solid var(--line);border-radius:6px;color:var(--ink);padding:3px 6px">
-            <option value="z_entry">z_entry (порог входа)</option>
-            <option value="z_stop">z_stop (стоп)</option>
-            <option value="z_take_partial">z_take (частич. фикс)</option>
-            <option value="z_exit_full">z_exit (полный выход)</option>
-            <option value="hurst_max">hurst_max</option>
-            <option value="adf_p_enter">adf_p (коинтеграция)</option>
-            <option value="rv_ratio_max">rv_ratio (режим воли)</option>
-            <option value="kalman_delta">kalman_delta (β дрейф)</option>
-            <option value="z_ema_span">z_ema_span</option>
-            <option value="z_std_window">z_std_window</option>
-          </select>
-          <select id="s5-sw-days" style="background:var(--panel-2);border:1px solid var(--line);border-radius:6px;color:var(--ink);padding:3px 6px"><option value="180">180д</option><option value="365" selected>365д</option><option value="90">90д</option></select>
-          <button class="btn primary" id="s5-btn-sweep">прогнать</button>
-        </div>
-        <div id="s5-sweep-res" style="font-size:12px;margin-bottom:6px"></div>
-        <div class="tblwrap" style="max-height:280px"><table id="s5-sweep"><thead><tr><th id="s5-sw-h">знач</th><th>сделок</th><th>win%</th><th>net ₽</th><th>Sharpe</th><th>Sortino</th><th>Calmar</th><th>PF</th><th>maxDD</th><th>ср.держ</th></tr></thead><tbody><tr><td colspan="10" class="empty">выбери параметр и прогони</td></tr></tbody></table></div>
-      </div>
-      <div class="card">
-        <h2>Журнал прогонов <span class="em" id="s5-bth-sub"></span></h2>
-        <div class="tblwrap" style="max-height:220px">
-          <table id="s5-bth"><thead><tr><th>время</th><th>тип</th><th>пара</th><th>дней</th><th>сделок</th><th>win%</th><th>net ₽</th><th>Sharpe</th><th>maxDD</th></tr></thead><tbody><tr><td colspan="9" class="empty">прогонов пока нет</td></tr></tbody></table>
         </div>
       </div>
     </div>
