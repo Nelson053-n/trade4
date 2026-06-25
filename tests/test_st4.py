@@ -876,6 +876,28 @@ def test_adopt_position_entry_ts_fallback_to_last_bar():
     assert s.engine.position.entry_ts == 1699999000000   # = last_live_ts, не «сейчас»
 
 
+def test_guard_blocks_actions_with_open_position():
+    """При ОТКРЫТОЙ позиции config/stop/reset → 409 (защита от рассинхрона со счётом)."""
+    from fastapi.testclient import TestClient
+    from app.api import app, _st4
+    from app.st4.models import LegPosition, Position, BotState, Role
+    c = TestClient(app)
+    s = _st4("sber")
+    s.engine.position = None
+    # без позиции config проходит (200)
+    assert c.post("/st4/config?pair=sber", json={"sma_period": 200}).status_code == 200
+    # с позицией — блокируется
+    s.engine.position = Position(
+        state=BotState.LONG_SPREAD,
+        leg_ord=LegPosition("SR", Role.ORDINARY, "sell", 1, 100.0),
+        leg_pref=LegPosition("SP", Role.PREFERRED, "buy", 1, 100.0),
+        entry_ts=1, entry_spread=0.0, entry_beta=1.0, sma_at_entry=0.0, entry_fee_rub=0.0)
+    assert c.post("/st4/config?pair=sber", json={"sma_period": 100}).status_code == 409
+    assert c.post("/st4/control/stop?pair=sber").status_code == 409
+    assert c.post("/st4/reset?pair=sber").status_code == 409
+    s.engine.position = None   # очистка для других тестов
+
+
 def test_chart_split_detects_separate_timeframe():
     """Разнесённые ТФ: график детальнее торговли только при 0 < chart_interval < торгового."""
     from app.st4.service import St4Session

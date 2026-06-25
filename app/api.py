@@ -93,6 +93,15 @@ def _st4(pair: str = "sber") -> St4Session:
     return ST4S[pair]
 
 
+def _guard_no_position(s4: St4Session, action: str) -> None:
+    """Запретить опасное действие при ОТКРЫТОЙ позиции (смена параметров/пауза/сброс
+    пересоздают движок или рвут сессию → рассинхрон с реальной позицией на счёте).
+    409 с понятным текстом — UI показывает уведомление, бэкенд защищён независимо от UI."""
+    if s4.engine.position is not None:
+        raise HTTPException(409, f"активная позиция — {action} невозможно. Сначала закройте "
+                                 "позицию (flat-all) или дождитесь выхода по стратегии.")
+
+
 async def _st4_autoresume(ST4: St4Session):
     """Автостарт live после рестарта сервера: ПРОДОЛЖАЕМ сессию без сброса журнала.
 
@@ -298,6 +307,7 @@ async def st4_set_config(payload: dict, pair: str = "sber"):
     Если до применения был активен live/демо — автоматически перезапускаем его с новыми
     параметрами (чтобы не нажимать «live» вручную после каждого изменения)."""
     ST4 = _st4(pair)
+    _guard_no_position(ST4, "смена параметров")
     s = ST4.cfg.strategy
     r = ST4.cfg.risk
     e = ST4.cfg.execution
@@ -397,6 +407,7 @@ async def st4_start(pair: str = "sber"):
 @app.post("/st4/control/stop")
 def st4_stop(pair: str = "sber"):
     ST4 = _st4(pair)
+    _guard_no_position(ST4, "пауза")
     ST4.state["live"] = False
     ST4.state["paused_by_user"] = True   # намеренная остановка — автостарт не возобновляет
     ST4.save_session()
@@ -493,6 +504,7 @@ def st4_auto(on: bool = True, pair: str = "sber"):
 @app.post("/st4/reset")
 def st4_reset(pair: str = "sber"):
     ST4 = _st4(pair)
+    _guard_no_position(ST4, "сброс")
     ST4.reset_engine(real=(ST4.state["data_source"] == "live"))
     return {"ok": True}
 
