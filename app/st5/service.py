@@ -363,14 +363,18 @@ class St5Session:
         for ts, row in df.iterrows():
             ts = int(ts)
             if ts <= last_ts:
-                if cold:   # прогрев историей до last_ts (без сделок)
+                if cold:   # прогрев историей до last_ts — БЕЗ открытия позиций (откатываем)
                     eng.step(ts, float(row["price_a"]), float(row["price_b"]))
+                    if eng.position is not None and eng.position.bars_held == 0:
+                        eng.position = None   # прогревочный «вход» не исполняется в брокере
                 continue
+            # НОВЫЙ (живой) бар: ts > last_ts. Здесь исполняем реально (это не прогрев).
+            pos_before = eng.position is not None
             tr = eng.step(ts, float(row["price_a"]), float(row["price_b"]))
             self.last_live_ts[pid] = ts
             self.push_history(pid, ts)
-            # вход в новую позицию был решён движком (eng.position появилась) → проверить портфель/исполнить
-            if eng.position is not None and eng.position.bars_held == 0 and not replayed:
+            # движок ОТКРЫЛ позицию на этом живом баре → портфельный гейт + реальный ордер
+            if (not pos_before) and eng.position is not None and eng.position.bars_held == 0:
                 self._on_engine_opened(pid, eng, float(row["price_a"]), float(row["price_b"]))
             if tr is not None:
                 self._on_engine_trade(pid, eng, tr, float(row["price_a"]), float(row["price_b"]))
