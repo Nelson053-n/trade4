@@ -610,6 +610,23 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
           <table id="s5-bth"><thead><tr><th>время</th><th>тип</th><th>пара</th><th>дней</th><th>сделок</th><th>win%</th><th>net ₽</th><th>Sharpe</th><th>maxDD</th></tr></thead><tbody><tr><td colspan="9" class="empty">прогонов пока нет</td></tr></tbody></table>
         </div>
       </div>
+      <div class="card">
+        <h2>Бэктест / калибровка <a href="/strategy5.md" target="_blank" rel="noopener" style="float:right;font-size:11px;font-weight:400;color:var(--ink-dim);text-decoration:none;border:1px solid var(--line);border-radius:6px;padding:3px 8px">📄 стратегия ST5</a></h2>
+        <div class="params" style="grid-template-columns:1fr;margin-bottom:11px"><div class="fld"><label>пара</label><select id="s5-bt-pair"><option value="sber">Сбербанк</option><option value="sngr">Сургут</option><option value="tatn">Татнефть</option></select></div></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn" id="s5-btn-bt">бэктест ISS 180д</button>
+          <button class="btn" id="s5-btn-bttb">бэктест T-Bank</button>
+          <button class="btn" id="s5-btn-grid">грид параметров</button>
+          <button class="btn" id="s5-btn-calib">walk-forward</button>
+          <button class="btn" id="s5-btn-margin">ГО самопроверка</button>
+        </div>
+        <div id="s5-margin-res" style="font-size:12px;margin-top:8px"></div>
+        <div id="s5-bt-res" style="font-size:12px;margin-top:8px"></div>
+        <div id="s5-calib-res" style="font-size:12px;margin-top:8px"></div>
+        <div id="s5-grid-wrap" style="display:none;margin-top:8px">
+          <table id="s5-grid"><thead><tr><th>z_in</th><th>z_stop</th><th>H_max</th><th>сделок</th><th>win%</th><th>net ₽</th><th>Sharpe</th><th>PF</th><th>maxDD</th></tr></thead><tbody></tbody></table>
+        </div>
+      </div>
     </div>
     <div>
       <div class="card">
@@ -646,23 +663,6 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
         </div>
         <button class="btn primary" id="s5-btn-conn">применить</button>
         <div id="s5-conn-msg" style="font-size:12px;margin-top:6px;color:var(--ink-dim)"></div>
-      </div>
-      <div class="card">
-        <h2>Бэктест / калибровка <a href="/strategy5.md" target="_blank" rel="noopener" style="float:right;font-size:11px;font-weight:400;color:var(--ink-dim);text-decoration:none;border:1px solid var(--line);border-radius:6px;padding:3px 8px">📄 стратегия ST5</a></h2>
-        <div class="params" style="grid-template-columns:1fr;margin-bottom:11px"><div class="fld"><label>пара</label><select id="s5-bt-pair"><option value="sber">Сбербанк</option><option value="sngr">Сургут</option><option value="tatn">Татнефть</option></select></div></div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <button class="btn" id="s5-btn-bt">бэктест ISS 180д</button>
-          <button class="btn" id="s5-btn-bttb">бэктест T-Bank</button>
-          <button class="btn" id="s5-btn-grid">грид параметров</button>
-          <button class="btn" id="s5-btn-calib">walk-forward</button>
-          <button class="btn" id="s5-btn-margin">ГО самопроверка</button>
-        </div>
-        <div id="s5-margin-res" style="font-size:12px;margin-top:8px"></div>
-        <div id="s5-bt-res" style="font-size:12px;margin-top:8px"></div>
-        <div id="s5-calib-res" style="font-size:12px;margin-top:8px"></div>
-        <div id="s5-grid-wrap" style="display:none;margin-top:8px">
-          <table id="s5-grid"><thead><tr><th>z_in</th><th>z_stop</th><th>H_max</th><th>сделок</th><th>win%</th><th>net ₽</th><th>Sharpe</th><th>PF</th><th>maxDD</th></tr></thead><tbody></tbody></table>
-        </div>
       </div>
       <div class="card">
         <h2>Доходность по инструментам <span class="em" id="s5-wk-sub">зафиксированная прибыль по дням (журнал live-сделок)</span></h2>
@@ -1512,7 +1512,7 @@ function s5Render(s){
   if(!trs.length) trb.innerHTML='<tr><td colspan="7" class="empty">сделок пока нет</td></tr>';
   trs.forEach(t=>{
     const dir=t.state==='long_spread'?'лонг':'шорт';
-    const reason={take_partial:'фикс 50%',exit:'выход z<0.35',z_stop:'стоп z',time_stop:'тайм-стоп',adf_break:'разрыв коинт.',flat_all:'flat-all'}[t.reason]||t.reason;
+    const reason={take_partial:'фикс 50%',exit:'выход z<0.35',z_stop:'стоп z',time_stop:'тайм-стоп',adf_break:'разрыв коинт.',flat_all:'flat-all',flat_interrupt:'закрыто по прерыванию'}[t.reason]||t.reason;
     const fee = t.fees_rub!=null ? '−'+Math.round(t.fees_rub)+' ₽' : '—';
     trb.insertAdjacentHTML('beforeend', `<tr><td>${t.pair}</td><td>${dir}</td><td>${t.entry_z>=0?'+':''}${t.entry_z.toFixed(1)}→${t.exit_z>=0?'+':''}${t.exit_z.toFixed(1)}</td><td>${t.lots}</td><td style="color:var(--ink-dim)">${fee}</td><td style="color:${t.net_pnl_rub>=0?'var(--signal)':'var(--loss)'}">${s5money(t.net_pnl_rub)}</td><td style="color:var(--ink-dim)">${reason}</td></tr>`);
   });
