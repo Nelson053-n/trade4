@@ -482,6 +482,7 @@ class St5Session:
         self.portfolio.on_trade(tr.net_pnl_rub)
         rec = {"pair": pid, "state": tr.state.value, "entry_ts": tr.entry_ts, "exit_ts": tr.exit_ts,
                "entry_z": tr.entry_z, "exit_z": tr.exit_z, "lots": tr.lots,
+               "gross_pnl_rub": tr.gross_pnl_rub, "fees_rub": tr.fees_rub,
                "net_pnl_rub": tr.net_pnl_rub, "reason": tr.reason, "bars_held": tr.bars_held}
         self.trades.append(rec)
         self.log_event("exit", f"{pid}: {tr.reason} net {tr.net_pnl_rub:+.0f}₽ ({tr.lots}лот)")

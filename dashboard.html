@@ -566,7 +566,7 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
       </div>
       <div class="card">
         <h2>Журнал сделок ST5 <span class="em" id="s5-trades-sub"></span></h2>
-        <table id="s5-trades"><thead><tr><th>пара</th><th>напр.</th><th>z вх→вых</th><th>лот</th><th>net ₽</th><th>причина</th></tr></thead><tbody></tbody></table>
+        <table id="s5-trades"><thead><tr><th>пара</th><th>напр.</th><th>z вх→вых</th><th>лот</th><th>комиссия</th><th>net ₽</th><th>причина</th></tr></thead><tbody></tbody></table>
       </div>
       <div class="card">
         <h2>Доходность по дням <span class="em" id="s5-daily-sub">идеал vs с издержками vs реал</span>
@@ -1507,11 +1507,12 @@ function s5Render(s){
   const trb=$('s5-trades').querySelector('tbody'); trb.innerHTML='';
   const trs=(s.trades||[]).slice().reverse();
   $('s5-trades-sub').textContent = s.trades.length?s.trades.length+' сделок':'';
-  if(!trs.length) trb.innerHTML='<tr><td colspan="6" class="empty">сделок пока нет</td></tr>';
+  if(!trs.length) trb.innerHTML='<tr><td colspan="7" class="empty">сделок пока нет</td></tr>';
   trs.forEach(t=>{
     const dir=t.state==='long_spread'?'лонг':'шорт';
     const reason={take_partial:'фикс 50%',exit:'выход z<0.35',z_stop:'стоп z',time_stop:'тайм-стоп',adf_break:'разрыв коинт.',flat_all:'flat-all'}[t.reason]||t.reason;
-    trb.insertAdjacentHTML('beforeend', `<tr><td>${t.pair}</td><td>${dir}</td><td>${t.entry_z>=0?'+':''}${t.entry_z.toFixed(1)}→${t.exit_z>=0?'+':''}${t.exit_z.toFixed(1)}</td><td>${t.lots}</td><td style="color:${t.net_pnl_rub>=0?'var(--signal)':'var(--loss)'}">${s5money(t.net_pnl_rub)}</td><td style="color:var(--ink-dim)">${reason}</td></tr>`);
+    const fee = t.fees_rub!=null ? '−'+Math.round(t.fees_rub)+' ₽' : '—';
+    trb.insertAdjacentHTML('beforeend', `<tr><td>${t.pair}</td><td>${dir}</td><td>${t.entry_z>=0?'+':''}${t.entry_z.toFixed(1)}→${t.exit_z>=0?'+':''}${t.exit_z.toFixed(1)}</td><td>${t.lots}</td><td style="color:var(--ink-dim)">${fee}</td><td style="color:${t.net_pnl_rub>=0?'var(--signal)':'var(--loss)'}">${s5money(t.net_pnl_rub)}</td><td style="color:var(--ink-dim)">${reason}</td></tr>`);
   });
   // управление
   if(document.activeElement!==$('s5-trading')) $('s5-trading').checked=s.trading_enabled;
