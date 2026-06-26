@@ -372,6 +372,13 @@ def st5_set_config(payload: dict):
     s.adf_p_enter = _num("adf_p_enter", 0.001, 0.5, s.adf_p_enter)
     s.rv_ratio_max = _num("rv_ratio_max", 0.5, 5.0, s.rv_ratio_max)
     r.max_open_positions = int(_num("max_open_positions", 1, 3, r.max_open_positions))
+    if "quantity_lots" in payload:
+        lots = int(_num("quantity_lots", 1, 1000, ST5.cfg.execution.quantity_lots))
+        ST5.cfg.execution.quantity_lots = lots
+        # применяем объём ко ВСЕМ движкам (их base_lots) и их per-pair конфигам
+        for pid, eng in ST5.engines.items():
+            eng.base_lots = lots
+            ST5.pair_cfgs[pid].execution.quantity_lots = lots
     if "require_dz_confirm" in payload:
         s.require_dz_confirm = bool(payload["require_dz_confirm"])
     if "trading_enabled" in payload:

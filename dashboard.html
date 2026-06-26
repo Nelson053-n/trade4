@@ -612,34 +612,42 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
     <div>
       <div class="card">
         <h2>Управление ST5</h2>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:11px">
           <button class="btn primary" id="s5-btn-start">▶ старт</button>
           <button class="btn" id="s5-btn-stop">❚❚ стоп</button>
           <button class="btn warn" id="s5-btn-flat">✕ закрыть всё</button>
           <button class="btn danger" id="s5-btn-resume">снять HALT</button>
         </div>
-        <label style="display:flex;align-items:center;gap:8px;font-size:13px"><input type="checkbox" id="s5-trading"> торговля разрешена</label>
+        <div class="params" style="grid-template-columns:1fr 1fr;margin-bottom:11px">
+          <div class="fld"><label>объём контрактов (лотов)</label><input id="s5-p-lots" type="number" value="10" min="1" max="1000"></div>
+          <div class="fld"><label>макс. позиций</label><input id="s5-p-maxpos" type="number" value="3" min="1" max="3"></div>
+        </div>
+        <button class="btn primary" id="s5-btn-params" style="margin-bottom:11px">применить параметры</button>
+        <div class="toggle-row" style="display:flex;flex-direction:column;gap:8px">
+          <label style="display:flex;align-items:center;gap:8px;font-size:13px"><input type="checkbox" id="s5-trading"> торговля разрешена</label>
+          <label id="s5-real-arm-row" style="display:none;align-items:center;gap:8px;font-size:13px;color:var(--loss)"><input type="checkbox" id="s5-real-arm"> 🔴 ВЗВЕСТИ реальную торговлю (боевые ордера)</label>
+        </div>
+        <div id="s5-real-msg" style="font-size:11px;margin-top:4px;color:var(--ink-dim)"></div>
         <div id="s5-halt-msg" style="color:var(--loss);font-size:12px;margin-top:6px"></div>
+        <div id="s5-go-info" style="font-size:11px;margin-top:8px;padding:8px;background:var(--bg2);border-radius:8px;color:var(--ink-dim)">залог рассчитывается…</div>
       </div>
       <div class="card">
         <h2>Коннектор / боевой контур</h2>
-        <div class="fld"><label>режим</label><select id="s5-conn-mode">
-          <option value="paper">paper (виртуально)</option>
-          <option value="tbank_sandbox">T-Bank песочница</option>
-          <option value="tbank_real">🔴 БОЕВОЙ (реальные деньги)</option>
-        </select></div>
-        <div class="fld" id="s5-acc-fld" style="display:none"><label>account_id</label><input id="s5-conn-account" placeholder="реальный счёт T-Bank"></div>
-        <div class="fld"><label>токен T-Bank</label><input id="s5-conn-token" type="password" placeholder="t.xxx"></div>
+        <div class="params" style="grid-template-columns:1fr;margin-bottom:11px">
+          <div class="fld"><label>режим</label><select id="s5-conn-mode">
+            <option value="paper">paper (виртуально)</option>
+            <option value="tbank_sandbox">T-Bank песочница</option>
+            <option value="tbank_real">🔴 БОЕВОЙ (реальные деньги)</option>
+          </select></div>
+          <div class="fld" id="s5-acc-fld" style="display:none"><label>account_id</label><input id="s5-conn-account" placeholder="реальный счёт T-Bank"></div>
+          <div class="fld"><label>токен T-Bank</label><input id="s5-conn-token" type="password" placeholder="t.xxx"></div>
+        </div>
         <button class="btn primary" id="s5-btn-conn">применить</button>
         <div id="s5-conn-msg" style="font-size:12px;margin-top:6px;color:var(--ink-dim)"></div>
-        <div id="s5-real-box" style="display:none;margin-top:10px;padding:10px;border:1px solid var(--loss);border-radius:8px">
-          <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--loss)"><input type="checkbox" id="s5-real-arm"> 🔴 ВЗВЕСТИ реальную торговлю</label>
-          <div id="s5-real-msg" style="font-size:11px;margin-top:4px;color:var(--ink-dim)">боевые ордера идут только при взводе + cooldown 10 мин</div>
-        </div>
       </div>
       <div class="card">
         <h2>Бэктест / калибровка <a href="/strategy5.md" target="_blank" rel="noopener" style="float:right;font-size:11px;font-weight:400;color:var(--ink-dim);text-decoration:none;border:1px solid var(--line);border-radius:6px;padding:3px 8px">📄 стратегия ST5</a></h2>
-        <div class="fld"><label>пара</label><select id="s5-bt-pair"><option value="sber">Сбербанк</option><option value="sngr">Сургут</option><option value="tatn">Татнефть</option></select></div>
+        <div class="params" style="grid-template-columns:1fr;margin-bottom:11px"><div class="fld"><label>пара</label><select id="s5-bt-pair"><option value="sber">Сбербанк</option><option value="sngr">Сургут</option><option value="tatn">Татнефть</option></select></div></div>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           <button class="btn" id="s5-btn-bt">бэктест ISS 180д</button>
           <button class="btn" id="s5-btn-bttb">бэктест T-Bank</button>
@@ -1455,7 +1463,7 @@ function s5Switch(strat){
   });
   $('tab-st4').hidden = strat!=='st4';
   $('tab-st5').hidden = strat!=='st5';
-  if(strat==='st5'){ s5Poll(); if(!_s5dailyLoaded){ _s5dailyLoaded=true; s5LoadDaily(); } }
+  if(strat==='st5'){ s5Poll(); if(!_s5dailyLoaded){ _s5dailyLoaded=true; s5LoadDaily(); s5LoadGoInfo(); } }
 }
 function s5Render(s){
   _s5snap=s;
@@ -1496,11 +1504,15 @@ function s5Render(s){
   if(document.activeElement!==$('s5-trading')) $('s5-trading').checked=s.trading_enabled;
   $('s5-halt-msg').textContent = s.halted?('⚠ '+s.halt_reason):'';
   const cm=$('s5-conn-mode'); if(document.activeElement!==cm) cm.value=s.connector_mode;
-  $('s5-real-box').style.display = s.connector_mode==='tbank_real'?'block':'none';
+  // боевой взвод — строка в карточке управления, видна только в режиме tbank_real
+  $('s5-real-arm-row').style.display = s.connector_mode==='tbank_real'?'flex':'none';
   if(document.activeElement!==$('s5-real-arm')) $('s5-real-arm').checked=s.real_trading_armed;
-  // блокировка опасных кнопок при открытых позициях
+  // параметры: объём контрактов + макс. позиций (не перетираем пока пользователь вводит)
+  if(document.activeElement!==$('s5-p-lots') && s.quantity_lots!=null) $('s5-p-lots').value=s.quantity_lots;
+  if(document.activeElement!==$('s5-p-maxpos') && s.max_open_positions!=null) $('s5-p-maxpos').value=s.max_open_positions;
+  // блокировка опасных кнопок/полей при открытых позициях
   const hasPos=s.open_positions>0;
-  ['s5-conn-mode','s5-conn-token','s5-btn-conn','s5-btn-stop','s5-bt-pair'].forEach(id=>{ const e=$(id); if(e){e.disabled=hasPos; e.title=hasPos?'Активные позиции — действие невозможно':''}});
+  ['s5-conn-mode','s5-conn-token','s5-btn-conn','s5-btn-stop','s5-bt-pair','s5-p-lots','s5-p-maxpos','s5-btn-params'].forEach(id=>{ const e=$(id); if(e){e.disabled=hasPos; e.title=hasPos?'Активные позиции — действие невозможно':''}});
 }
 let _s5chartPair='sber', _s5hist={};
 let _s5trades=[], _s5geom=null, _s5pulse=0;
@@ -1604,6 +1616,12 @@ function s5BuildChartSwitch(pairs){
     el.appendChild(b);
   });
 }
+async function s5LoadGoInfo(){
+  try{ const d=await s5api('/margin');
+    const lots=(_s5snap&&_s5snap.quantity_lots)||10;
+    $('s5-go-info').innerHTML=`<b>залог (ГО) на счёте:</b><br>ГО всех 3 пар (×${lots} лот): <b style="color:var(--ink)">${(d.go_all_3pairs_10lots).toLocaleString('ru')} ₽</b> (${d.go_pct_of_capital}% капитала)<br>капитал: ${(d.capital_rub).toLocaleString('ru')} ₽ · <span style="color:${d.self_check_ok?'var(--signal)':'var(--loss)'}">${d.self_check_ok?'✓ хватает':'⚠ мало'}</span>`;
+  }catch(e){ $('s5-go-info').textContent='ГО недоступно: '+e.message; }
+}
 let _s5dailyLoaded=false;
 async function s5LoadDaily(){
   const pair=$('s5-daily-pair').value;
@@ -1684,6 +1702,10 @@ function s5Init(){
     }catch(e){ $('s5-bt-res').textContent='ошибка: '+e.message; }
   };
   $('s5-daily-pair').onchange=s5LoadDaily;
+  $('s5-btn-params').onclick=async()=>{
+    const body={ quantity_lots:+$('s5-p-lots').value, max_open_positions:+$('s5-p-maxpos').value };
+    try{ await s5api('/config','POST',body); s5LoadGoInfo(); s5Poll(); }catch(e){ alert(e.message); }
+  };
   $('s5-btn-sweep').onclick=async()=>{
     const pair=$('s5-sw-pair').value, param=$('s5-sw-param').value, days=$('s5-sw-days').value;
     $('s5-sweep-res').textContent='перебор '+param+' на '+days+' (может занять минуту)…';

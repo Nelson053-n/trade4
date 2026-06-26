@@ -214,6 +214,7 @@ class St5Session:
             "net_pnl_rub": round(net, 0),
             "halted": self.portfolio.halted, "halt_reason": self.portfolio.halt_reason,
             "trading_enabled": self.cfg.risk.trading_enabled,
+            "quantity_lots": self.cfg.execution.quantity_lots,
             "open_positions": len(positions),
             "max_open_positions": self.cfg.risk.max_open_positions,
             "positions": positions, "pairs": pairs_info,
