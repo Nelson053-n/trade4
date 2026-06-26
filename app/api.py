@@ -387,6 +387,21 @@ def st5_set_config(payload: dict):
     return {"ok": True, "config": ST5.cfg.model_dump()}
 
 
+@app.post("/st5/pair-enabled")
+def st5_pair_enabled(pair: str, on: bool = True):
+    """Включить/выключить торговлю пары (чекбокс). Выключенную пару live-цикл пропускает.
+    Блокируется, если по паре открыта позиция (сначала закрыть)."""
+    from .st5.service import ST5_PAIRS
+    if pair not in ST5_PAIRS:
+        raise HTTPException(400, "pair: " + " | ".join(ST5_PAIRS))
+    if not on and ST5.engines[pair].position is not None:
+        raise HTTPException(409, f"по паре {pair} открыта позиция — закройте её перед отключением")
+    ST5.enabled_pairs[pair] = on
+    ST5.log_event("info", f"{pair}: торговля {'включена' if on else 'выключена'}")
+    ST5.save_session()
+    return {"ok": True, "pair": pair, "enabled": on}
+
+
 @app.post("/st5/control/trading")
 def st5_trading(on: bool = True):
     ST5.cfg.risk.trading_enabled = on

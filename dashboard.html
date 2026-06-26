@@ -558,7 +558,7 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
       </div>
       <div class="card">
         <h2>Пары и фильтры <span class="em">коинтеграция · Hurst · режим</span></h2>
-        <table id="s5-pairs"><thead><tr><th>пара</th><th>z</th><th>β</th><th>ADF p</th><th>Hurst</th><th>RV</th><th>статус</th></tr></thead><tbody></tbody></table>
+        <table id="s5-pairs"><thead><tr><th>торг.</th><th>пара</th><th>z</th><th>β</th><th>ADF p</th><th>Hurst</th><th>RV</th><th>статус</th></tr></thead><tbody></tbody></table>
       </div>
       <div class="card">
         <h2>Открытые позиции <span class="em" id="s5-pos-sub"></span></h2>
@@ -1481,7 +1481,14 @@ function s5Render(s){
     const ok=p.entry_allowed, col=ok?'var(--signal)':'var(--ink-dim)';
     const flags=[p.cointegrated?'coint':'', p.mean_reverting?'MR':'', p.calm?'calm':''].filter(Boolean).join(' ');
     const st = p.has_position?'<span style="color:var(--warn)">в позиции</span>':(p.halted?'<span style="color:var(--loss)">HALT</span>':`<span style="color:${col}">${ok?'готов':flags||'ждёт'}</span>`);
-    tb.insertAdjacentHTML('beforeend', `<tr><td>${p.label}</td><td style="color:${Math.abs(p.z||0)>=2.25?'var(--warn)':'var(--ink)'}">${p.z!=null?(p.z>=0?'+':'')+p.z.toFixed(2):'—'}</td><td>${p.beta!=null?p.beta.toFixed(3):'—'}</td><td>${p.adf_p!=null?p.adf_p.toFixed(3):'—'}</td><td>${p.hurst!=null?p.hurst.toFixed(2):'—'}</td><td>${p.rv_ratio!=null?p.rv_ratio.toFixed(2):'—'}</td><td>${st}</td></tr>`);
+    const tr=document.createElement('tr');
+    if(p.enabled===false) tr.style.opacity='.45';
+    const cb=document.createElement('input'); cb.type='checkbox'; cb.checked=p.enabled!==false;
+    cb.title='торговать пару'; cb.disabled=p.has_position;   // нельзя выключить пару с открытой позицией
+    cb.onchange=async()=>{ try{ await s5api('/pair-enabled?pair='+p.pair+'&on='+cb.checked,'POST'); s5Poll(); }catch(e){ alert(e.message); cb.checked=!cb.checked; } };
+    const td0=document.createElement('td'); td0.style.textAlign='center'; td0.appendChild(cb); tr.appendChild(td0);
+    tr.insertAdjacentHTML('beforeend', `<td>${p.label}</td><td style="color:${Math.abs(p.z||0)>=2.25?'var(--warn)':'var(--ink)'}">${p.z!=null?(p.z>=0?'+':'')+p.z.toFixed(2):'—'}</td><td>${p.beta!=null?p.beta.toFixed(3):'—'}</td><td>${p.adf_p!=null?p.adf_p.toFixed(3):'—'}</td><td>${p.hurst!=null?p.hurst.toFixed(2):'—'}</td><td>${p.rv_ratio!=null?p.rv_ratio.toFixed(2):'—'}</td><td>${st}</td>`);
+    tb.appendChild(tr);
   });
   // позиции
   const pb=$('s5-positions').querySelector('tbody'); pb.innerHTML='';

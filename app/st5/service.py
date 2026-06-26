@@ -144,6 +144,8 @@ class St5Session:
                       "data_source": "synthetic", "sandbox_active": False,
                       "real_trading_armed": False}
         self.last_live_ts: dict[str, int] = {pid: 0 for pid in ST5_PAIRS}
+        # какие пары торгуем (чекбоксы в UI). По умолчанию все включены.
+        self.enabled_pairs: dict[str, bool] = {pid: True for pid in ST5_PAIRS}
         self._lock = asyncio.Lock()
         self._live_task = None
         self._uid_cache: dict[str, tuple] = {}   # pid -> (uid_ord, uid_pref): кэш против 429 T-Bank
@@ -200,6 +202,7 @@ class St5Session:
                 "cointegrated": eng.filt.cointegrated, "mean_reverting": eng.filt.mean_reverting,
                 "calm": eng.filt.calm_regime, "entry_allowed": eng.filt.entry_allowed(),
                 "has_position": eng.position is not None,
+                "enabled": self.enabled_pairs.get(pid, True),
                 "halted": pid in self.portfolio.pair_halted})
         net = sum(t.get("net_pnl_rub", 0) for t in self.trades)
         return {
@@ -239,6 +242,7 @@ class St5Session:
                 "paused_by_user": self.state["paused_by_user"],
                 "data_source": self.state["data_source"],
                 "last_live_ts": self.last_live_ts,
+                "enabled_pairs": self.enabled_pairs,
             }
             self._session_file.write_text(json.dumps(data, ensure_ascii=False, indent=2))
         except Exception:  # noqa: BLE001
@@ -303,6 +307,8 @@ class St5Session:
         self.portfolio.capital_rub = data.get("capital_rub", self.cfg.paper.start_balance_rub)
         self.state["data_source"] = data.get("data_source", "synthetic")
         self.last_live_ts = data.get("last_live_ts", {pid: 0 for pid in ST5_PAIRS})
+        en = data.get("enabled_pairs") or {}
+        self.enabled_pairs = {pid: bool(en.get(pid, True)) for pid in ST5_PAIRS}
         # БЕЗОПАСНОСТЬ: рестарт ВСЕГДА снимает взвод реальной торговли (safe-by-default)
         self.state["real_trading_armed"] = False
         return True
@@ -339,6 +345,8 @@ class St5Session:
                     for pid, eng in self.engines.items():
                         if not self.state["live"]:
                             return
+                        if not self.enabled_pairs.get(pid, True):
+                            continue   # пара выключена чекбоксом — не торгуем
                         await self._step_pair(pid, eng, warmup_limit, replayed)
                         await asyncio.sleep(1.0)   # throttle между парами — против 429 T-Bank
                 replayed = True
