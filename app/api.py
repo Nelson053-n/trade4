@@ -634,11 +634,21 @@ async def st5_margin():
                          "go_ord": round(m_ord), "go_pref": round(m_pref),
                          "go_pair_10lots": round(go_pair)})   # ключ оставлен для совместимости UI
         cap = ST5.portfolio.capital_rub
+        # РЕАЛЬНОЕ заблокированное ГО с биржевой хедж-скидкой — только при открытых позициях
+        real_blocked = None
+        if ST5.state.get("sandbox_active") and ST5.cfg.connector.account_id:
+            try:
+                from .st4 import tbank_sandbox as _sb
+                rb = _sb.blocked_margin(ST5.cfg.connector.account_id)
+                real_blocked = round(rb) if rb > 0 else None
+            except Exception:  # noqa: BLE001
+                real_blocked = None
         # самопроверка: ГО 3 позиций vs капитал + лимит портфеля 5%
         return {"rows": rows, "capital_rub": round(cap), "lots": ST5.cfg.execution.quantity_lots,
                 "go_all_3pairs_10lots": round(total_go_3pos),
                 "go_per_1lot": round(total_go_3pos / max(1, ST5.cfg.execution.quantity_lots)),
                 "go_pct_of_capital": round(total_go_3pos / cap * 100, 1) if cap > 0 else 0,
+                "real_blocked_rub": real_blocked,   # фактически заблокировано на счёте (None если flat)
                 "portfolio_limit_pct": ST5.cfg.risk.risk_per_portfolio_pct * 100,
                 "self_check_ok": total_go_3pos < cap * 0.5}   # ГО 3 поз. должно быть < 50% капитала
 

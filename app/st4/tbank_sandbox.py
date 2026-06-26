@@ -285,6 +285,32 @@ def positions(account_id: str) -> dict:
     return _call(_SANDBOX, "GetSandboxPositions", {"accountId": account_id})
 
 
+def blocked_margin(account_id: str) -> float:
+    """РЕАЛЬНО заблокированное ГО под открытые фьючерсные позиции (₽, с хедж-скидкой биржи).
+
+    T-Bank не отдаёт ГО отдельным полем. На FORTS ГО списывается с денежной позиции при
+    открытии фьючерса: заблокировано = (сумма денег без позиций) − (свободные деньги сейчас).
+    Считаем как: totalAmountPortfolio − свободный рублёвый баланс (money-позиция).
+    Возвращает 0, если фьючерсных позиций нет. Точно только при ОТКРЫТЫХ позициях.
+    """
+    try:
+        pf = _call(_SANDBOX, "GetSandboxPortfolio", {"accountId": account_id})
+        pos = _call(_SANDBOX, "GetSandboxPositions", {"accountId": account_id})
+    except Exception:  # noqa: BLE001
+        return 0.0
+    has_fut = any(int(float(f.get("balance", 0))) != 0 for f in pos.get("futures", []))
+    if not has_fut:
+        return 0.0
+    total = _q_to_float(pf.get("totalAmountPortfolio"))
+    # свободные деньги = рублёвая money-позиция (не заблокированная под ГО)
+    free = 0.0
+    for m in pos.get("money", []):
+        if m.get("currency") == "rub":
+            free = _q_to_float(m)
+    blocked = total - free
+    return max(0.0, blocked)
+
+
 def close_account(account_id: str) -> None:
     _call(_SANDBOX, "CloseSandboxAccount", {"accountId": account_id})
 

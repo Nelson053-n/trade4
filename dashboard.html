@@ -1618,7 +1618,11 @@ function s5BuildChartSwitch(pairs){
 }
 async function s5LoadGoInfo(){
   try{ const d=await s5api('/margin');
-    $('s5-go-info').innerHTML=`<b>залог (ГО) на счёте при ${d.lots} лот:</b><br>ГО всех 3 пар: <b style="color:var(--ink)">${(d.go_all_3pairs_10lots).toLocaleString('ru')} ₽</b> (${d.go_pct_of_capital}% капитала)<br>на 1 лот: ${(d.go_per_1lot).toLocaleString('ru')} ₽ · капитал ${(d.capital_rub).toLocaleString('ru')} ₽ · <span style="color:${d.self_check_ok?'var(--signal)':'var(--loss)'}">${d.self_check_ok?'✓ хватает':'⚠ мало'}</span><br><span style="color:var(--ink-faint)">полное ГО обеих ног (верхняя оценка; с хедж-скидкой брокера реально меньше)</span>`;
+    let real='';
+    if(d.real_blocked_rub!=null){
+      real=`<b style="color:var(--signal)">реально заблокировано сейчас: ${(d.real_blocked_rub).toLocaleString('ru')} ₽</b> (с хедж-скидкой биржи)<br>`;
+    }
+    $('s5-go-info').innerHTML=`<b>залог (ГО) на счёте при ${d.lots} лот:</b><br>${real}расчётная оценка 3 пар при открытии: <b style="color:var(--ink)">${(d.go_all_3pairs_10lots).toLocaleString('ru')} ₽</b> (${d.go_pct_of_capital}% капитала)<br>на 1 лот: ${(d.go_per_1lot).toLocaleString('ru')} ₽ · капитал ${(d.capital_rub).toLocaleString('ru')} ₽ · <span style="color:${d.self_check_ok?'var(--signal)':'var(--loss)'}">${d.self_check_ok?'✓ хватает':'⚠ мало'}</span><br><span style="color:var(--ink-faint)">оценка = полное ГО обеих ног (верхняя граница); реально биржа даёт скидку на спред-пару обычка/преф</span>`;
   }catch(e){ $('s5-go-info').textContent='ГО недоступно: '+e.message; }
 }
 let _s5dailyLoaded=false;
