@@ -247,3 +247,92 @@ def test_rv_ratio_spikes_on_volatility_burst():
     for v in [100, 130, 80, 140, 70, 150, 60, 160, 90, 130, 75, 145]:
         out = rv.step(float(v))
     assert out is not None and out > 1.0, f"rv_ratio={out}"
+
+
+# ---------- усыновление позиции со счёта + persist (перенос из st4) ----------
+
+def _session_with_fake_executor(uid_ord="uid_o", uid_pref="uid_p",
+                                ord_entry=28000.0, pref_entry=28100.0,
+                                entry_ts=1700000000000):
+    """St5Session с подменённым исполнителем по паре sber — для теста усыновления оффлайн."""
+    from app.st5.service import St5Session
+    s = St5Session()
+    s.state["sandbox_active"] = True
+    s._uid_cache["sber"] = (uid_ord, uid_pref)
+
+    class _FakeEx:
+        def entry_prices(self):
+            return (ord_entry, pref_entry)   # (ord_entry, pref_entry)
+        def broker_entry_ts(self):
+            return entry_ts
+
+    s._fake_ex = _FakeEx()
+    return s
+
+
+def test_st5_adopt_long_spread_from_account():
+    """Канон st5 (_open): LONG_SPREAD = buy pref + sell ord.
+    На счёте обычка −10 (sell) / преф +10 (buy) → LONG_SPREAD. Регресс на инверсию метки."""
+    from app.st5.models import St5State
+    s = _session_with_fake_executor()
+    ex = s._fake_ex
+    assert s._adopt_position_from_account("sber", bal_ord=-10, bal_pref=10, executor=ex)
+    p = s.engines["sber"].position
+    assert p is not None
+    assert p.state == St5State.LONG_SPREAD
+    assert p.lots == 10 and p.entry_lots == 10
+    assert p.ord_entry == 28000.0 and p.pref_entry == 28100.0
+    assert p.entry_ts == 1700000000000
+
+
+def test_st5_adopt_short_spread_sign_matches_direction():
+    """Зеркально: обычка +10 (buy) / преф −10 (sell) → SHORT_SPREAD (sell pref + buy ord)."""
+    from app.st5.models import St5State
+    s = _session_with_fake_executor()
+    ex = s._fake_ex
+    assert s._adopt_position_from_account("sber", bal_ord=10, bal_pref=-10, executor=ex)
+    assert s.engines["sber"].position.state == St5State.SHORT_SPREAD
+
+
+def test_st5_adopt_rejects_non_paired():
+    """Непарная позиция (одна нога / одинаковый знак) → False, не усыновляем."""
+    s = _session_with_fake_executor()
+    ex = s._fake_ex
+    assert not s._adopt_position_from_account("sber", bal_ord=-10, bal_pref=0, executor=ex)
+    assert not s._adopt_position_from_account("sber", bal_ord=10, bal_pref=10, executor=ex)
+    assert s.engines["sber"].position is None
+
+
+def test_st5_adopt_entry_ts_fallback_to_last_bar():
+    """Брокер не отдал время (sandbox) → entry_ts = last_live_ts[pid], не time.time()."""
+    s = _session_with_fake_executor(entry_ts=None)
+    s.last_live_ts["sber"] = 1699999000000
+    ex = s._fake_ex
+    assert s._adopt_position_from_account("sber", bal_ord=-10, bal_pref=10, executor=ex)
+    assert s.engines["sber"].position.entry_ts == 1699999000000
+
+
+def test_st5_position_persist_round_trip(tmp_path):
+    """save_session пишет открытые позиции, load_session их восстанавливает (paper round-trip)."""
+    from app.st5.service import St5Session
+    from app.st5.models import St5Position, St5State
+    s = St5Session()
+    s._session_file = tmp_path / "session_state_5.json"
+    s.engines["sngr"].position = St5Position(
+        pair="sngr", state=St5State.SHORT_SPREAD, entry_ts=1700000000000,
+        entry_z=2.4, entry_spread=120.0, entry_beta=0.98, lots=2, entry_lots=2,
+        ord_entry=24000.0, pref_entry=24120.0, half_life=30.0,
+        bars_held=5, partial_done=False, fees_rub=8.0, realized_rub=0.0)
+    s.save_session()
+
+    s2 = St5Session()
+    s2._session_file = s._session_file
+    assert s2.load_session()
+    p = s2.engines["sngr"].position
+    assert p is not None
+    assert p.state == St5State.SHORT_SPREAD
+    assert p.lots == 2 and p.entry_z == 2.4 and p.entry_beta == 0.98
+    assert p.ord_entry == 24000.0 and p.pref_entry == 24120.0
+    assert p.bars_held == 5 and p.fees_rub == 8.0
+    # пары без позиции остаются flat
+    assert s2.engines["sber"].position is None

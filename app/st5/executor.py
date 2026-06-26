@@ -152,3 +152,39 @@ class St5PairExecutor:
             bal = int(float(fut.get("balance", 0)))
             lots[uid] = bal
         return lots.get(uid_ord, 0), lots.get(uid_pref, 0)
+
+    def entry_prices(self) -> tuple[float, float]:
+        """(ord_entry, pref_entry) — средние цены входа ног (averagePositionPrice из портфеля).
+        Для усыновления позиции со счёта при рестарте. 0.0 если ноги нет в портфеле."""
+        from ..st4 import tbank_live as _live
+        from ..st4.tbank_sandbox import _q_to_float
+        uid_ord, uid_pref = self._uids()
+        src = _live if self.real else _sb
+        try:
+            pf = src.portfolio(self.account_id)
+        except Exception:  # noqa: BLE001
+            return 0.0, 0.0
+        prices = {}
+        for p in pf.get("positions", []):
+            uid = p.get("instrumentUid") or p.get("figi")
+            prices[uid] = _q_to_float(p.get("averagePositionPrice"))
+        return prices.get(uid_ord, 0.0), prices.get(uid_pref, 0.0)
+
+    def broker_entry_ts(self) -> int | None:
+        """Реальное время (unix ms) последней сделки по любой ноге — для усыновления с
+        корректным entry_ts (а не моментом рестарта). None если недоступно (caller сделает
+        fallback на last_live_ts)."""
+        from ..st4 import tbank_live as _live
+        src = _live if self.real else _sb
+        if not hasattr(src, "last_entry_ts_for"):
+            return None
+        uid_ord, uid_pref = self._uids()
+        best = None
+        for uid in (uid_ord, uid_pref):
+            try:
+                ts = src.last_entry_ts_for(self.account_id, uid)
+            except Exception:  # noqa: BLE001
+                ts = None
+            if ts and (best is None or ts > best):
+                best = ts
+        return best

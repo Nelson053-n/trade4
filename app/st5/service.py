@@ -9,13 +9,14 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 from ..st4 import data_feed as feed
 from ..st4.models import Role
 from .config import St5Config
 from .engine import ST5Engine
-from .models import St5State
+from .models import St5Position, St5State
 
 _BASE = Path(__file__).resolve().parent.parent.parent
 HISTORY_LEN = 300
@@ -178,6 +179,7 @@ class St5Session:
         self._live_task = None
         self._uid_cache: dict[str, tuple] = {}   # pid -> (uid_ord, uid_pref): кэш против 429 T-Bank
         self._legs_cache: dict[str, tuple] = {}  # pid -> (spec_ord, spec_pref) от resolve_legs
+        self._reconciled: set[str] = set()       # пары, по которым сверка со счётом уже сделана
 
     def _pair_cfg(self, pid: str) -> St5Config:
         """Конфиг пары = базовый ST5 + per-pair оверрайды StrategyConfig из ST5_PAIRS[pid][4]."""
@@ -274,6 +276,10 @@ class St5Session:
                 "account_id": self.cfg.connector.account_id,
                 "last_live_ts": self.last_live_ts,
                 "enabled_pairs": self.enabled_pairs,
+                # открытые позиции по парам переживают рестарт (St5State — str-enum,
+                # json.dumps сериализует .state как строку). None → пара flat.
+                "positions": {pid: (asdict(eng.position) if eng.position else None)
+                              for pid, eng in self.engines.items()},
             }
             self._session_file.write_text(json.dumps(data, ensure_ascii=False, indent=2))
         except Exception:  # noqa: BLE001
@@ -349,7 +355,23 @@ class St5Session:
         self.state["live"] = False                # live поднимется заново через autoresume
         # БЕЗОПАСНОСТЬ: рестарт ВСЕГДА снимает взвод реальной торговли (safe-by-default)
         self.state["real_trading_armed"] = False
+        # открытые позиции по парам — восстанавливаем в движки (paper round-trip). Для
+        # sandbox/real это лишь стартовая гипотеза: при live она сверяется с реальным
+        # счётом в _reconcile_pair (совпало → ведём; нет → усыновляем/логируем).
+        for pid, pdict in (data.get("positions") or {}).items():
+            if pdict and pid in self.engines:
+                try:
+                    self.engines[pid].position = self._position_from_json(pdict)
+                except Exception:  # noqa: BLE001  битая запись не должна ронять старт
+                    pass
         return True
+
+    @staticmethod
+    def _position_from_json(d: dict) -> St5Position:
+        """Десериализация St5Position из session-файла (state → St5State, остальное as-is)."""
+        d = dict(d)
+        d["state"] = St5State(d["state"])
+        return St5Position(**d)
 
     # ---------- исполнители пар (sandbox/real) ----------
     def _make_executor(self, pid: str):
@@ -366,6 +388,87 @@ class St5Session:
         return St5PairExecutor(self.cfg.connector.account_id, ao, ap, real=real,
                                armed_cb=self._real_armed, audit_cb=self._audit,
                                uid_ord=uo, uid_pref=up)
+
+    def _adopt_position_from_account(self, pid: str, bal_ord: int, bal_pref: int,
+                                     executor) -> bool:
+        """Восстановить позицию ДВИЖКА пары pid из реальных лотов счёта (рестарт → движок flat,
+        на счёте легитимная парная позиция → НЕ закрываем, продолжаем вести).
+
+        Канон направления st5 (engine._open): LONG_SPREAD = buy pref + sell ord (z<0);
+        SHORT_SPREAD = sell pref + buy ord (z>0). Значит по знаку лотов:
+          преф buy(+) / обычка sell(−) → LONG_SPREAD;  преф sell(−) / обычка buy(+) → SHORT_SPREAD.
+        Цены входа — из executor.entry_prices(); время входа — broker_entry_ts() с каскадом
+        fallback на last_live_ts[pid] (НЕ time.time(), иначе точка входа = момент рестарта).
+        True — позиция восстановлена."""
+        if bal_ord == 0 or bal_pref == 0 or (bal_ord > 0) == (bal_pref > 0):
+            return False   # не парная позиция (одна нога / одинаковый знак) — не восстановить
+        eng = self.engines.get(pid)
+        if eng is None:
+            return False
+        state = St5State.LONG_SPREAD if bal_pref > 0 else St5State.SHORT_SPREAD
+        try:
+            ord_entry, pref_entry = executor.entry_prices()
+        except Exception:  # noqa: BLE001
+            ord_entry, pref_entry = 0.0, 0.0
+        # entry_ts: брокер (точно) → last_live_ts (время бара) → текущее (последний резерв)
+        entry_ts = None
+        try:
+            entry_ts = executor.broker_entry_ts()
+        except Exception:  # noqa: BLE001
+            entry_ts = None
+        if not entry_ts:
+            entry_ts = self.last_live_ts.get(pid) or int(time.time() * 1000)
+        beta = eng.last_beta or 1.0
+        lots = abs(bal_pref)
+        eng.position = St5Position(
+            pair=pid, state=state, entry_ts=entry_ts,
+            entry_z=eng.last_z if eng.last_z is not None else 0.0,
+            entry_spread=pref_entry - beta * ord_entry, entry_beta=beta,
+            lots=lots, entry_lots=lots, ord_entry=ord_entry, pref_entry=pref_entry,
+            half_life=eng.filt.half_life)
+        return True
+
+    def _position_matches_lots(self, eng, bal_ord: int, bal_pref: int) -> bool:
+        """Совпадает ли позиция движка с фактическими лотами счёта (направление + модуль).
+        Канон: LONG = buy pref(+)/sell ord(−); SHORT = sell pref(−)/buy ord(+)."""
+        p = eng.position
+        if p is None:
+            return False
+        want_pref = p.lots if p.state == St5State.LONG_SPREAD else -p.lots
+        want_ord = -p.lots if p.state == St5State.LONG_SPREAD else p.lots
+        return bal_pref == want_pref and bal_ord == want_ord
+
+    def _reconcile_pair(self, pid: str, eng) -> None:
+        """Сверка позиции движка пары с РЕАЛЬНЫМ счётом при старте live (после прогрева).
+
+        Совпало → ведём дальше (ничего не делаем). Движок flat, но на счёте легитимная парная
+        позиция → усыновляем (`_adopt_position_from_account`). Непарные/несовпавшие ноги →
+        логируем для ручного разбора (вслепую закрывать боевой счёт не закрываем).
+        Сверка не должна ронять live — все ошибки глотаем в лог."""
+        try:
+            ex = self._make_executor(pid)
+            if ex is None:
+                return
+            bal_ord, bal_pref = ex.broker_lots()
+            if bal_ord == 0 and bal_pref == 0:
+                # счёт flat: если движок что-то восстановил из файла — это фантом, снимаем
+                if eng.position is not None:
+                    self.log_event("warn", f"reconciliation {pid}: счёт FLAT, а движок держал "
+                                   f"позицию из сессии — снимаю (фантом)")
+                    eng.position = None
+                return
+            lots_str = f"ord={bal_ord} pref={bal_pref}"
+            if self._position_matches_lots(eng, bal_ord, bal_pref):
+                self.log_event("info", f"reconciliation {pid}: позиция на счёте {lots_str} "
+                               f"совпала с движком — продолжаем вести")
+            elif self._adopt_position_from_account(pid, bal_ord, bal_pref, ex):
+                self.log_event("info", f"reconciliation {pid}: позиция на счёте {lots_str} "
+                               f"усыновлена в движок ({eng.position.state.value}) — ведём")
+            else:
+                self.log_event("warn", f"reconciliation {pid}: на счёте непарные/несовпавшие "
+                               f"ноги {lots_str} — требуется ручной разбор (счёт НЕ трогаю)")
+        except Exception as e:  # noqa: BLE001
+            self.log_event("warn", f"reconciliation {pid} пропущена: {e}")
 
     # ---------- главный live-цикл портфеля ----------
     async def run_live(self) -> None:
@@ -442,6 +545,12 @@ class St5Session:
                         eng.position = None   # прогревочный «вход» не исполняется в брокере
                 continue
             # НОВЫЙ (живой) бар: ts > last_ts. Здесь исполняем реально (это не прогрев).
+            # Сверка со счётом — ОДИН раз на пару, прямо перед первым живым баром: прогрев уже
+            # набрал spread_buf/last_beta/filt, а откат прогревочных «входов» позади (не снесёт
+            # усыновлённую позицию). Совпало → ведём; парная на счёте → усыновляем; иначе flat.
+            if sandbox and pid not in self._reconciled:
+                self._reconcile_pair(pid, eng)
+                self._reconciled.add(pid)
             pos_before = eng.position is not None
             tr = eng.step(ts, float(row["price_a"]), float(row["price_b"]))
             self.last_live_ts[pid] = ts
