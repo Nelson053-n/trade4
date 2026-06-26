@@ -355,11 +355,10 @@ class St5Session:
                 self.portfolio.capital_rub = float(total)
             # калибровка go_factor по РЕАЛЬНО заблокированному ГО (с хедж-скидкой биржи):
             # ISS INITIALMARGIN сильно занижает реальное ГО → риск-гейт считал бы заниженно.
-            # blocked_margin есть только в sandbox-слое; для tbank_real он отдаёт sandbox-портфель
-            # (вернёт 0) → calibrate делает no-op, gate откатывается на ISS-оценку (factor=1).
-            # Калибровка работает при flat-счёте как no-op (factor сохраняется).
+            # src = _live (tbank_real) либо _sb (sandbox) — у обоих есть blocked_margin.
+            # При flat-счёте calibrate делает no-op (factor сохраняется).
             try:
-                rb = _sb.blocked_margin(acc)
+                rb = src.blocked_margin(acc)
                 self.portfolio.calibrate_go_factor(rb, self.engines, ST5_PAIRS)
             except Exception:  # noqa: BLE001
                 pass

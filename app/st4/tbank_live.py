@@ -59,6 +59,29 @@ def positions(account_id: str) -> dict:
     return _call(_OPERATIONS, "GetPositions", {"accountId": account_id})
 
 
+def blocked_margin(account_id: str) -> float:
+    """РЕАЛЬНО заблокированное ГО под открытые фьючерсные позиции (₽, с хедж-скидкой биржи).
+
+    Боевой аналог tbank_sandbox.blocked_margin: T-Bank не отдаёт ГО отдельным полем, на FORTS
+    оно списывается с денежной позиции. Заблокировано = totalAmountPortfolio − свободный рублёвый
+    баланс. 0, если фьючерсных позиций нет. Точно только при ОТКРЫТЫХ позициях.
+    """
+    try:
+        pf = portfolio(account_id)
+        pos = positions(account_id)
+    except Exception:  # noqa: BLE001
+        return 0.0
+    has_fut = any(int(float(f.get("balance", 0))) != 0 for f in pos.get("futures", []))
+    if not has_fut:
+        return 0.0
+    total = _q_to_float(pf.get("totalAmountPortfolio"))
+    free = 0.0
+    for m in pos.get("money", []):
+        if m.get("currency") == "rub":
+            free = _q_to_float(m)
+    return max(0.0, total - free)
+
+
 # ---------------------------------------------------------------- ордера (БОЕВЫЕ!)
 def make_order_id(account_id: str, instrument_uid: str, lots: int,
                   direction: str, ts: float) -> str:
