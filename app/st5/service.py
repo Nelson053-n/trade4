@@ -53,6 +53,25 @@ class St5Portfolio:
         self.halted: bool = False
         self.halt_reason: str = ""
         self.pair_halted: dict[str, str] = {}    # per-pair HALT (изоляция отказа одной пары)
+        # ГО-оценка из ISS INITIALMARGIN сильно ЗАНИЖАЕТ реально заблокированное биржей (на tatn
+        # наблюдалось ~4.5×). go_factor калибруется по факту (real_blocked / ISS-оценка открытых),
+        # real_blocked_rub — фактически заблокированное со счёта. Гейт считает риск от РЕАЛЬНОГО.
+        self.go_factor: float = 1.0
+        self.real_blocked_rub: float = 0.0
+
+    def calibrate_go_factor(self, real_blocked_rub: float,
+                            engines: dict[str, ST5Engine], pairs: dict) -> None:
+        """Откалибровать go_factor по реально заблокированному ГО со счёта.
+        factor = real_blocked / (сумма ISS-оценок ОТКРЫТЫХ позиций). Без открытых позиций или
+        при real_blocked<=0 — НЕ трогаем (нет данных для калибровки, прежний factor сохраняется)."""
+        if real_blocked_rub <= 0:
+            return
+        iss_open = sum(self.pair_go_per_lot(pid) * e.position.lots
+                       for pid, e in engines.items() if e.position is not None)
+        if iss_open <= 0:
+            return
+        self.real_blocked_rub = real_blocked_rub
+        self.go_factor = real_blocked_rub / iss_open
 
     def open_count(self, engines: dict[str, ST5Engine], exclude: str | None = None) -> int:
         return sum(1 for pid, e in engines.items()
@@ -84,13 +103,19 @@ class St5Portfolio:
             return False, f"лимит позиций ({r.max_open_positions})"
         if issuer in self.open_issuers(engines, pairs, exclude=pair):
             return False, f"уже есть позиция по эмитенту {issuer}"
+        # ГО кандидата = ISS-оценка × go_factor (поправка на занижение ISS относительно реального)
+        risk_real = risk_rub * self.go_factor
         # лимит ГО на сделку (% капитала)
-        if risk_rub > r.risk_per_trade_pct * self.capital_rub:
-            return False, f"ГО сделки {risk_rub:.0f}₽ > лимит {r.risk_per_trade_pct*100:.1f}% ({r.risk_per_trade_pct*self.capital_rub:.0f}₽)"
-        # лимит ГО на портфель: сумма ГО УЖЕ открытых (кроме кандидата) + новая
-        cur = sum(self._pos_risk(pid, e) for pid, e in engines.items()
-                  if e.position is not None and pid != pair)
-        if cur + risk_rub > r.risk_per_portfolio_pct * self.capital_rub:
+        if risk_real > r.risk_per_trade_pct * self.capital_rub:
+            return False, f"ГО сделки {risk_real:.0f}₽ > лимит {r.risk_per_trade_pct*100:.1f}% ({r.risk_per_trade_pct*self.capital_rub:.0f}₽)"
+        # лимит ГО на портфель: УЖЕ занятое + новая. Занятое — РЕАЛЬНО заблокированное со счёта
+        # (факт, с хедж-скидкой биржи), если есть; иначе оценка открытых × go_factor.
+        if self.real_blocked_rub > 0:
+            cur = self.real_blocked_rub
+        else:
+            cur = sum(self._pos_risk(pid, e) * self.go_factor for pid, e in engines.items()
+                      if e.position is not None and pid != pair)
+        if cur + risk_real > r.risk_per_portfolio_pct * self.capital_rub:
             return False, "превышен портфельный лимит ГО"
         # дневной лимит убытка
         if self.day_pnl_rub <= -r.max_daily_loss_rub:
@@ -328,6 +353,16 @@ class St5Session:
                 total = _q_to_float(total)
             if total and float(total) > 0:
                 self.portfolio.capital_rub = float(total)
+            # калибровка go_factor по РЕАЛЬНО заблокированному ГО (с хедж-скидкой биржи):
+            # ISS INITIALMARGIN сильно занижает реальное ГО → риск-гейт считал бы заниженно.
+            # blocked_margin есть только в sandbox-слое; для tbank_real он отдаёт sandbox-портфель
+            # (вернёт 0) → calibrate делает no-op, gate откатывается на ISS-оценку (factor=1).
+            # Калибровка работает при flat-счёте как no-op (factor сохраняется).
+            try:
+                rb = _sb.blocked_margin(acc)
+                self.portfolio.calibrate_go_factor(rb, self.engines, ST5_PAIRS)
+            except Exception:  # noqa: BLE001
+                pass
         except Exception:  # noqa: BLE001
             pass
 

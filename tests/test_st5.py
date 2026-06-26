@@ -336,3 +336,80 @@ def test_st5_position_persist_round_trip(tmp_path):
     assert p.bars_held == 5 and p.fees_rub == 8.0
     # пары без позиции остаются flat
     assert s2.engines["sber"].position is None
+
+
+# ---------- риск-гейт на РЕАЛЬНОЕ заблокированное ГО (go_factor) ----------
+
+def test_go_factor_default_is_one():
+    """Без калибровки go_factor=1.0 — поведение как раньше (оценка ISS)."""
+    from app.st5.service import St5Portfolio, St5Session
+    s = St5Session()
+    assert s.portfolio.go_factor == 1.0
+    assert s.portfolio.real_blocked_rub == 0.0
+
+
+def test_calibrate_go_factor_from_real_blocked():
+    """go_factor = real_blocked / сумма ISS-оценок открытых позиций.
+    Реально заблокировано 45238 при ISS-оценке открытой tatn 9967 → factor ≈ 4.54."""
+    from app.st5.service import ST5_PAIRS, St5Portfolio, St5Session
+    from app.st5.models import St5Position, St5State
+    s = St5Session()
+    St5Portfolio._go_cache = {"tatn": 9967.0, "sber": 11312.0, "sngr": 12096.0}
+    s.engines["tatn"].position = St5Position(
+        pair="tatn", state=St5State.SHORT_SPREAD, entry_ts=0, entry_z=2.7, entry_spread=0.0,
+        entry_beta=1.0, lots=1, entry_lots=1, ord_entry=600.0, pref_entry=560.0, half_life=10)
+    s.portfolio.calibrate_go_factor(45238.0, s.engines, ST5_PAIRS)
+    assert abs(s.portfolio.go_factor - 45238.0/9967.0) < 0.01
+    assert s.portfolio.real_blocked_rub == 45238.0
+
+
+def test_calibrate_noop_when_flat_or_no_data():
+    """Нет открытых позиций или real_blocked=0 → go_factor не трогаем (остаётся прежним)."""
+    from app.st5.service import ST5_PAIRS, St5Portfolio, St5Session
+    s = St5Session()
+    St5Portfolio._go_cache = {pid: 1000.0 for pid in ST5_PAIRS}
+    s.portfolio.go_factor = 3.0   # ранее откалибровано
+    s.portfolio.calibrate_go_factor(0.0, s.engines, ST5_PAIRS)   # счёт flat
+    assert s.portfolio.go_factor == 3.0   # не сбросили в 1.0 на пустых данных
+
+
+def test_trade_limit_uses_go_factor():
+    """Лимит ГО на сделку считается от ОЦЕНКИ×go_factor. Лимит 0.5% от 1М = 5000.
+    risk_rub=2000, factor=4.5 → эффективно 9000 > 5000 → отказ."""
+    from app.st5.service import ST5_PAIRS, St5Portfolio, St5Session
+    s = St5Session()
+    s.portfolio.capital_rub = 1_000_000.0
+    St5Portfolio._go_cache = {pid: 1000.0 for pid in ST5_PAIRS}
+    # factor=1: risk 2000 проходит (< 5000)
+    s.portfolio.go_factor = 1.0
+    ok, _ = s.portfolio.can_open("sber", "SBER", 2000.0, s.engines, ST5_PAIRS)
+    assert ok
+    # factor=4.5: тот же risk_rub=2000 → эффективно 9000 > 5000 → отказ
+    s.portfolio.go_factor = 4.5
+    ok2, reason = s.portfolio.can_open("sber", "SBER", 2000.0, s.engines, ST5_PAIRS)
+    assert not ok2 and "сделк" in reason
+
+
+def test_portfolio_limit_uses_real_blocked():
+    """Портфельный лимит считается от РЕАЛЬНО заблокированного (факт), а не суммы ISS-оценок.
+    Лимит 5% от 1М = 50000. real_blocked=45000, кандидат (оценка 2000×factor1=2000) →
+    45000+2000=47000 < 50000 ок; кандидат побольше → превышение."""
+    from app.st5.service import ST5_PAIRS, St5Portfolio, St5Session
+    from app.st5.models import St5Position, St5State
+    s = St5Session()
+    s.portfolio.capital_rub = 1_000_000.0
+    St5Portfolio._go_cache = {pid: 1000.0 for pid in ST5_PAIRS}
+    s.portfolio.go_factor = 1.0
+    s.portfolio.real_blocked_rub = 45000.0   # факт по уже открытой tatn
+    s.engines["tatn"].position = St5Position(
+        pair="tatn", state=St5State.SHORT_SPREAD, entry_ts=0, entry_z=2.7, entry_spread=0.0,
+        entry_beta=1.0, lots=1, entry_lots=1, ord_entry=600.0, pref_entry=560.0, half_life=10)
+    # кандидат sber, оценка 2000: 45000+2000=47000 < 50000 → ок
+    ok, _ = s.portfolio.can_open("sber", "SBER", 2000.0, s.engines, ST5_PAIRS)
+    assert ok
+    # кандидат с оценкой 6000: 45000+6000=51000 > 50000 → отказ (но сначала пройдёт ли лимит сделки? 6000>5000 — да, отсечётся на сделке)
+    # берём 4000 (< 5000 лимит сделки), но 45000+4000=49000 < 50000 → ок; 5500 не проходит лимит сделки.
+    # чтобы проверить именно портфельный: уменьшим лимит сделки не будем — поднимем real_blocked
+    s.portfolio.real_blocked_rub = 48000.0
+    ok2, reason = s.portfolio.can_open("sber", "SBER", 4000.0, s.engines, ST5_PAIRS)
+    assert not ok2 and "портфельн" in reason   # 48000+4000=52000 > 50000
