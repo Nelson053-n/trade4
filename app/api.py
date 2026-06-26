@@ -373,7 +373,7 @@ def st5_set_config(payload: dict):
     s.rv_ratio_max = _num("rv_ratio_max", 0.5, 5.0, s.rv_ratio_max)
     r.max_open_positions = int(_num("max_open_positions", 1, 3, r.max_open_positions))
     if "quantity_lots" in payload:
-        lots = int(_num("quantity_lots", 1, 1000, ST5.cfg.execution.quantity_lots))
+        lots = int(_num("quantity_lots", 1, 100, ST5.cfg.execution.quantity_lots))
         ST5.cfg.execution.quantity_lots = lots
         # применяем объём ко ВСЕМ движкам (их base_lots) и их per-pair конфигам
         for pid, eng in ST5.engines.items():
@@ -627,15 +627,17 @@ async def st5_margin():
             except Exception as e:  # noqa: BLE001
                 rows.append({"pair": pid, "label": spec[3], "error": str(e)[:50]})
                 continue
-            go_pair = (m_ord + m_pref) * 10   # ГО на пару при base_lots=10 (обе ноги)
+            lots = ST5.cfg.execution.quantity_lots
+            go_pair = (m_ord + m_pref) * lots   # ГО на пару при текущем объёме (обе ноги)
             total_go_3pos += go_pair
             rows.append({"pair": pid, "label": spec[3], "legs": f"{so.code}/{sp.code}",
                          "go_ord": round(m_ord), "go_pref": round(m_pref),
-                         "go_pair_10lots": round(go_pair)})
+                         "go_pair_10lots": round(go_pair)})   # ключ оставлен для совместимости UI
         cap = ST5.portfolio.capital_rub
         # самопроверка: ГО 3 позиций vs капитал + лимит портфеля 5%
-        return {"rows": rows, "capital_rub": round(cap),
+        return {"rows": rows, "capital_rub": round(cap), "lots": ST5.cfg.execution.quantity_lots,
                 "go_all_3pairs_10lots": round(total_go_3pos),
+                "go_per_1lot": round(total_go_3pos / max(1, ST5.cfg.execution.quantity_lots)),
                 "go_pct_of_capital": round(total_go_3pos / cap * 100, 1) if cap > 0 else 0,
                 "portfolio_limit_pct": ST5.cfg.risk.risk_per_portfolio_pct * 100,
                 "self_check_ok": total_go_3pos < cap * 0.5}   # ГО 3 поз. должно быть < 50% капитала

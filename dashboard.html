@@ -619,7 +619,7 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
           <button class="btn danger" id="s5-btn-resume">снять HALT</button>
         </div>
         <div class="params" style="grid-template-columns:1fr 1fr;margin-bottom:11px">
-          <div class="fld"><label>объём контрактов (лотов)</label><input id="s5-p-lots" type="number" value="10" min="1" max="1000"></div>
+          <div class="fld"><label>объём контрактов (1–100 лот)</label><input id="s5-p-lots" type="number" value="10" min="1" max="100" step="1"></div>
           <div class="fld"><label>макс. позиций</label><input id="s5-p-maxpos" type="number" value="3" min="1" max="3"></div>
         </div>
         <button class="btn primary" id="s5-btn-params" style="margin-bottom:11px">применить параметры</button>
@@ -1618,8 +1618,7 @@ function s5BuildChartSwitch(pairs){
 }
 async function s5LoadGoInfo(){
   try{ const d=await s5api('/margin');
-    const lots=(_s5snap&&_s5snap.quantity_lots)||10;
-    $('s5-go-info').innerHTML=`<b>залог (ГО) на счёте:</b><br>ГО всех 3 пар (×${lots} лот): <b style="color:var(--ink)">${(d.go_all_3pairs_10lots).toLocaleString('ru')} ₽</b> (${d.go_pct_of_capital}% капитала)<br>капитал: ${(d.capital_rub).toLocaleString('ru')} ₽ · <span style="color:${d.self_check_ok?'var(--signal)':'var(--loss)'}">${d.self_check_ok?'✓ хватает':'⚠ мало'}</span>`;
+    $('s5-go-info').innerHTML=`<b>залог (ГО) на счёте при ${d.lots} лот:</b><br>ГО всех 3 пар: <b style="color:var(--ink)">${(d.go_all_3pairs_10lots).toLocaleString('ru')} ₽</b> (${d.go_pct_of_capital}% капитала)<br>на 1 лот: ${(d.go_per_1lot).toLocaleString('ru')} ₽ · капитал ${(d.capital_rub).toLocaleString('ru')} ₽ · <span style="color:${d.self_check_ok?'var(--signal)':'var(--loss)'}">${d.self_check_ok?'✓ хватает':'⚠ мало'}</span><br><span style="color:var(--ink-faint)">полное ГО обеих ног (верхняя оценка; с хедж-скидкой брокера реально меньше)</span>`;
   }catch(e){ $('s5-go-info').textContent='ГО недоступно: '+e.message; }
 }
 let _s5dailyLoaded=false;
