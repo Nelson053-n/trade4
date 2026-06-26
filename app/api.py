@@ -314,6 +314,12 @@ def _st5_guard_no_position(action: str) -> None:
                                  "Сначала закройте позиции (flat-all).")
 
 
+def _st5_pair_cfg(pair: str):
+    """Конфиг пары с per-pair оверрайдами (как у её live-движка) — для бэктестов/sweep,
+    чтобы результаты совпадали с реальной торговлей этой пары, а не с общим ST5.cfg."""
+    return ST5.pair_cfgs.get(pair) or ST5._pair_cfg(pair)
+
+
 _ST5_BT_HISTORY: list[dict] = []   # журнал прошлых бэктест-прогонов (последние 40)
 
 
@@ -483,7 +489,7 @@ async def st5_backtest(pair: str = "sber", days: int = 180):
             return {"error": f"данные недоступны: {e}"}
         if len(df) < 600:
             return {"error": f"мало баров: {len(df)}"}
-        m = run_backtest(df, ST5.cfg, pair=pair, base_lots=10, fee_per_lot=2.0, half_spread_pts=0.5)
+        m = run_backtest(df, _st5_pair_cfg(pair), pair=pair, base_lots=10, fee_per_lot=2.0, half_spread_pts=0.5)
         return {"pair": pair, "legs": f"{so.code}/{sp.code}", "bars": m.bars, "trades": m.trades,
                 "win_rate_pct": round(m.win_rate_pct, 0), "net_pnl_rub": round(m.net_pnl_rub, 0),
                 "profit_factor": round(m.profit_factor, 2) if m.profit_factor != float("inf") else 999,
@@ -526,7 +532,7 @@ async def st5_daily(pair: str = "sber", days: int = 30):
             return {"error": f"мало баров: {len(df)}"}
 
         def day_pnl(fee, hs):
-            eng = ST5Engine(pair, ST5.cfg, base_lots=10, fee_per_lot=fee, half_spread_pts=hs)
+            eng = ST5Engine(pair, _st5_pair_cfg(pair), base_lots=10, fee_per_lot=fee, half_spread_pts=hs)
             for ts, row in df.iterrows():
                 eng.step(int(ts), float(row["price_a"]), float(row["price_b"]))
             buckets = defaultdict(float)
@@ -579,7 +585,7 @@ async def st5_backtest_tbank(pair: str = "sber"):
             return {"error": f"T-Bank данные недоступны: {e}"}
         if len(df) < 200:
             return {"error": f"мало баров T-Bank: {len(df)} (нужно прогреть фильтры)"}
-        m = run_backtest(df, ST5.cfg, pair=pair, base_lots=10, fee_per_lot=2.0, half_spread_pts=0.5)
+        m = run_backtest(df, _st5_pair_cfg(pair), pair=pair, base_lots=10, fee_per_lot=2.0, half_spread_pts=0.5)
         return {"pair": pair, "legs": f"{so.code}/{sp.code}", "source": "T-Bank", "bars": m.bars,
                 "trades": m.trades, "win_rate_pct": round(m.win_rate_pct, 0),
                 "net_pnl_rub": round(m.net_pnl_rub, 0),
@@ -671,8 +677,9 @@ async def st5_sweep(pair: str = "sber", param: str = "z_entry", days: int = 365)
         if len(df) < 600:
             return {"error": f"мало баров: {len(df)}"}
         rows = []
+        base = _st5_pair_cfg(pair)   # стартуем с per-pair настроек пары, перебираем один параметр
         for val in _ST5_SWEEP_PARAMS[param]:
-            c = _C5(**ST5.cfg.model_dump())
+            c = _C5(**base.model_dump())
             setattr(c.strategy, param, val)
             m = run_backtest(df, c, pair=pair, base_lots=10, fee_per_lot=2.0, half_spread_pts=0.5)
             rows.append({"value": val, "trades": m.trades, "win_rate_pct": round(m.win_rate_pct, 0),
@@ -685,7 +692,7 @@ async def st5_sweep(pair: str = "sber", param: str = "z_entry", days: int = 365)
         valid = [r for r in rows if r["trades"] >= 3]
         best = max(valid, key=lambda r: r["sharpe"]) if valid else None
         return {"pair": pair, "param": param, "legs": f"{so.code}/{sp.code}", "bars": len(df),
-                "current": getattr(ST5.cfg.strategy, param), "rows": rows, "best": best}
+                "current": getattr(base.strategy, param), "rows": rows, "best": best}
 
     res = _clean(await asyncio.to_thread(_run))
     if "error" not in res and res.get("best"):
@@ -720,10 +727,11 @@ async def st5_grid(pair: str = "sber", days: int = 180):
         if len(df) < 600:
             return {"error": f"мало баров: {len(df)}"}
         rows = []
+        base = _st5_pair_cfg(pair)   # per-pair база, поверх неё перебираем z_entry×z_stop×hurst_max
         for z_entry in (2.0, 2.25, 2.5):
             for z_stop in (4.0, 4.25, 5.0):
                 for hmax in (0.55, 0.60):
-                    c = _C5(**ST5.cfg.model_dump())
+                    c = _C5(**base.model_dump())
                     c.strategy.z_entry = z_entry; c.strategy.z_stop = z_stop; c.strategy.hurst_max = hmax
                     m = run_backtest(df, c, pair=pair, base_lots=10, fee_per_lot=2.0, half_spread_pts=0.5)
                     rows.append({"z_entry": z_entry, "z_stop": z_stop, "hurst_max": hmax,
