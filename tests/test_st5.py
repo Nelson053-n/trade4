@@ -137,11 +137,13 @@ def test_engine_trades_on_cointegrated_pair():
 
 def test_portfolio_limits_gate():
     """Портфельный гейт: лимит на сделку, число позиций, ≤1 на эмитента."""
-    from app.st5.service import ST5_PAIRS, St5Session
+    from app.st5.service import ST5_PAIRS, St5Portfolio, St5Session
     from app.st5.models import St5Position, St5State
     s = St5Session()
     s.portfolio.capital_rub = 1_000_000.0
-    # лимит на сделку 0.5% = 5000: нотионал 4000 проходит, 6000 — нет
+    # мок ГО-кэша (иначе pair_go_per_lot лезет в сеть): 1000₽/лот на пару
+    St5Portfolio._go_cache = {pid: 1000.0 for pid in ST5_PAIRS}
+    # риск (ГО) на сделку 0.5% = 5000: риск 4000 проходит, 6000 — нет
     ok, _ = s.portfolio.can_open("sber", "SBER", 4000.0, s.engines, ST5_PAIRS)
     assert ok
     ok2, reason = s.portfolio.can_open("sber", "SBER", 6000.0, s.engines, ST5_PAIRS)

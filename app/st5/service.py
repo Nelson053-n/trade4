@@ -65,9 +65,10 @@ class St5Portfolio:
                 out.add(pairs[pid][2])
         return out
 
-    def can_open(self, pair: str, issuer: str, notional_rub: float,
+    def can_open(self, pair: str, issuer: str, risk_rub: float,
                  engines: dict[str, ST5Engine], pairs: dict) -> tuple[bool, str]:
-        """Разрешён ли вход в новую позицию по pair. (ok, причина).
+        """Разрешён ли вход в новую позицию по pair. (ok, причина). risk_rub = ГО позиции
+        (заблокированное обеспечение), НЕ нотионал — корректная мера риска для фьючерсов.
 
         ВАЖНО: движок к этому моменту уже выставил eng.position кандидата → исключаем pair
         из подсчёта открытых (иначе сам себя блокирует как «уже есть позиция по эмитенту»)."""
@@ -82,26 +83,48 @@ class St5Portfolio:
             return False, f"лимит позиций ({r.max_open_positions})"
         if issuer in self.open_issuers(engines, pairs, exclude=pair):
             return False, f"уже есть позиция по эмитенту {issuer}"
-        # лимит на сделку
-        if notional_rub > r.risk_per_trade_pct * self.capital_rub:
-            return False, "превышен лимит на сделку (0.5%)"
-        # лимит на портфель: сумма нотионалов УЖЕ открытых (кроме кандидата) + новая
-        cur = sum(self._pos_notional(e) for pid, e in engines.items()
+        # лимит ГО на сделку (% капитала)
+        if risk_rub > r.risk_per_trade_pct * self.capital_rub:
+            return False, f"ГО сделки {risk_rub:.0f}₽ > лимит {r.risk_per_trade_pct*100:.1f}% ({r.risk_per_trade_pct*self.capital_rub:.0f}₽)"
+        # лимит ГО на портфель: сумма ГО УЖЕ открытых (кроме кандидата) + новая
+        cur = sum(self._pos_risk(pid, e) for pid, e in engines.items()
                   if e.position is not None and pid != pair)
-        if cur + notional_rub > r.risk_per_portfolio_pct * self.capital_rub:
-            return False, "превышен портфельный лимит (5%)"
+        if cur + risk_rub > r.risk_per_portfolio_pct * self.capital_rub:
+            return False, "превышен портфельный лимит ГО"
         # дневной лимит убытка
         if self.day_pnl_rub <= -r.max_daily_loss_rub:
             return False, "дневной лимит убытка"
         return True, ""
 
-    @staticmethod
-    def _pos_notional(eng: ST5Engine) -> float:
+    # кэш ГО пары (leg_margin обеих ног, ₽ за 1 лот) — меняется редко, биржа раз в день
+    _go_cache: dict = {}
+
+    @classmethod
+    def pair_go_per_lot(cls, pid: str) -> float:
+        """ГО пары на 1 лот (обе ноги) из ISS leg_margin. Это РИСК на сделку для фьючерсов
+        (заблокированное обеспечение), а НЕ нотионал. Кэшируется."""
+        if pid in cls._go_cache:
+            return cls._go_cache[pid]
+        try:
+            from ..st4 import data_feed as _feed
+            from ..st4.config import St4Config as _C4
+            from .service import ST5_PAIRS as _P
+            c = _C4(); c.instruments.asset_ordinary = _P[pid][0]; c.instruments.asset_preferred = _P[pid][1]
+            so, sp = _feed.resolve_legs(c)
+            go = _feed.leg_margin(so.code) + _feed.leg_margin(sp.code)
+        except Exception:  # noqa: BLE001
+            go = 0.0
+        if go > 0:
+            cls._go_cache[pid] = go
+        return go
+
+    @classmethod
+    def _pos_risk(cls, pid: str, eng: ST5Engine) -> float:
+        """РИСК открытой позиции = ГО (обе ноги) × текущие лоты."""
         p = eng.position
         if p is None:
             return 0.0
-        # грубо: нотионал в рублях ≈ |pref|·lots (пункты ≈ рубли на контракт по STEPPRICE=1 у этих пар)
-        return abs(p.pref_entry) * p.lots
+        return cls.pair_go_per_lot(pid) * p.lots
 
     def on_trade(self, net_pnl_rub: float) -> None:
         self.day_pnl_rub += net_pnl_rub
@@ -423,8 +446,8 @@ class St5Session:
         from .service import ST5_PAIRS as _P
         issuer = _P[pid][2]
         p = eng.position
-        notional = abs(p.pref_entry) * p.lots
-        ok, reason = self.portfolio.can_open(pid, issuer, notional, self.engines, _P)
+        risk = self.portfolio.pair_go_per_lot(pid) * p.lots   # риск = ГО позиции (не нотионал)
+        ok, reason = self.portfolio.can_open(pid, issuer, risk, self.engines, _P)
         if not ok:
             eng.position = None   # вход запрещён портфелем → откат
             self.log_event("info", f"{pid}: вход отклонён ({reason})")
