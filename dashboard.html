@@ -1456,6 +1456,7 @@ async function s5api(path, method='GET', body=null){
 function s5money(v){ if(v==null||Number.isNaN(v)) return '—'; const n=Math.round(v); return (n>=0?'+':'')+n.toLocaleString('ru')+' ₽'; }
 function s5Switch(strat){
   _s5strat=strat;
+  try{ localStorage.setItem('strat', strat); }catch(e){}
   document.querySelectorAll('.strat-tab').forEach(b=>{
     const on=b.dataset.strat===strat;
     b.classList.toggle('on',on);
@@ -1763,6 +1764,9 @@ function s5Init(){
       $('s5-calib-res').innerHTML=`лучшие: z_entry ${d.best_params.z_entry} z_stop ${d.best_params.z_stop} hurst ${d.best_params.hurst_max}<br>OOS net ${s5money(d.oos_total_net)} Sharpe ${d.oos_sharpe} · ${d.segments} сегм · стабильность ${(d.stability*100).toFixed(0)}% <button class="btn" onclick="s5ApplyCalib('${pair}')">применить</button>`;
     }catch(e){ $('s5-calib-res').textContent='ошибка: '+e.message; }
   };
+  // восстановить активную вкладку стратегии после обновления страницы
+  let _strat='st4'; try{ _strat=localStorage.getItem('strat')||'st4'; }catch(e){}
+  if(_strat==='st5') s5Switch('st5');
 }
 async function s5ApplyCalib(pair){ if(!confirm('Применить откалиброванные параметры к ST5?'))return; try{ await s5api('/calibrate/apply?pair='+pair+'&confirm=true','POST'); alert('применено'); s5Poll(); }catch(e){alert(e.message);} }
 s5Init();
