@@ -1480,10 +1480,13 @@ function s5Render(s){
   $('s5-sb-state').textContent = s.halted?('HALTED: '+s.halt_reason) : (s.live?'ST5 live':'ST5 остановлен');
   $('s5-sb-count').textContent = `${s.open_positions}/${s.max_open_positions} позиций · ${s.connector_mode}`+(s.real_trading_armed?' · 🔴ВЗВЕДЕН':'');
   $('s5-sb-pnl').innerHTML = `net <b style="color:${s.net_pnl_rub>=0?'var(--signal)':'var(--loss)'}">${s5money(s.net_pnl_rub)}</b>`;
-  // индикатор устаревания данных: бар старше 20 мин = жёлтый, >40 мин = красный (цикл мог встать)
+  // индикатор устаревания данных: бар старше 20 мин = жёлтый, >40 мин = красный (цикл мог встать).
+  // АЛАРМИМ ТОЛЬКО В ТОРГОВЫЕ ЧАСЫ FORTS: когда биржа закрыта (ночь/выходной/клиринг), свечи и
+  // не должны приходить — устаревание там НОРМА, не зависший цикл (иначе ложная тревога 100+ мин).
   const stEl=$('s5-sb-stale'); let lastBar=0;
   Object.values(s.history||{}).forEach(arr=>{ if(arr&&arr.length){ const t=arr[arr.length-1].ts; if(t>lastBar) lastBar=t; } });
-  if(s.live && lastBar){
+  const _now=s4msk(Date.now()); const _sess=s4fortsSession(_now.min,parseInt(_now.ss,10),_now.dow);
+  if(s.live && lastBar && _sess.kind==='live'){
     const ageMin=(Date.now()-lastBar)/60000;
     if(ageMin>20){ stEl.style.display=''; const red=ageMin>40;
       stEl.style.color=red?'var(--loss)':'var(--warn)';
