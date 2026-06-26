@@ -164,6 +164,8 @@ a{color:var(--accent-2);text-decoration:none}
 .tf-switch .tf-btn.on{background:var(--chart-line);color:#fff;border-color:var(--chart-line)}
 .btn:disabled,.btn.locked,select:disabled{opacity:.45;cursor:not-allowed}
 .tf-switch .tf-btn:disabled{opacity:.45;cursor:not-allowed}
+/* крупнее кнопки выбора инструмента на графике ST5 */
+#s5-chart-switch .tf-btn{font-size:13px;padding:5px 14px;margin-left:6px;border-radius:6px;font-weight:500}
 .an-tip{position:absolute;display:none;pointer-events:none;z-index:20;color:var(--ink);
   background:var(--tip-bg);border:1px solid var(--line);border-radius:8px;
   padding:8px 11px;font-family:var(--mono);font-size:11px;line-height:1.55;
@@ -548,7 +550,7 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
       </div>
       <div class="card">
         <h2>Спред / z-score <span id="s5-chart-pair" style="font-family:var(--mono);color:var(--ink)">—</span>
-          <span class="tf-switch" id="s5-chart-switch" style="float:right;font-size:11px;font-weight:400"></span></h2>
+          <span class="tf-switch" id="s5-chart-switch" style="float:right;font-weight:400"></span></h2>
         <div class="chartwrap"><canvas id="s5chart" style="width:100%;height:400px;display:block"></canvas></div>
         <div class="legend" style="margin-top:6px">
           <span><i style="border-color:var(--chart-line)"></i>z-score</span>
@@ -1446,6 +1448,7 @@ function s4Init(){
 
 addEventListener('resize',()=>{ s4Redraw(); if(_s4snap) s4RenderDaily(_s4snap.trades||[]); });
 setInterval(s4Poll, 1500);
+setInterval(s5Poll, 3000);   // автообновление вкладки ST5 (s5Poll сам выходит если вкладка не ST5)
 s4Init();
 
 /* ============================ ST5 ============================ */
@@ -1716,8 +1719,8 @@ async function s5LoadWeekly(){
       }).join('') : '<div class="empty" style="font-size:12px">нет зафиксированных сделок</div>';
       const tc=p.total_net>=0?'var(--signal)':'var(--loss)';
       return `<div style="margin-bottom:18px;border:1px solid var(--line);border-radius:8px;padding:12px 14px">
-        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px">
-          <b style="font-size:14px">${p.label}</b>
+        <div style="margin-bottom:10px">
+          <div style="font-size:14px;font-weight:600;margin-bottom:3px">${p.label}</div>
           <span style="font-size:12px">прибыль <b style="color:${tc}">${s5money(p.total_net)}</b> · комиссия <b style="color:var(--ink-dim)">−${p.total_fee}₽</b> · ${p.total_trades} сделок</span>
         </div>
         <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">${bars}</div>

@@ -269,6 +269,9 @@ class St5Session:
                 "live": self.state["live"],
                 "paused_by_user": self.state["paused_by_user"],
                 "data_source": self.state["data_source"],
+                "sandbox_active": self.state.get("sandbox_active", False),
+                "connector_mode": self.cfg.connector.mode,
+                "account_id": self.cfg.connector.account_id,
                 "last_live_ts": self.last_live_ts,
                 "enabled_pairs": self.enabled_pairs,
             }
@@ -337,6 +340,13 @@ class St5Session:
         self.last_live_ts = data.get("last_live_ts", {pid: 0 for pid in ST5_PAIRS})
         en = data.get("enabled_pairs") or {}
         self.enabled_pairs = {pid: bool(en.get(pid, True)) for pid in ST5_PAIRS}
+        # восстановить коннектор (режим/счёт) — иначе после рестарта скатывался на paper
+        self.cfg.connector.mode = data.get("connector_mode", self.cfg.connector.mode)
+        self.cfg.connector.account_id = data.get("account_id", self.cfg.connector.account_id)
+        self.state["sandbox_active"] = bool(data.get("sandbox_active", False))
+        # авто-возобновление live, если шёл до рестарта (lifespan стартует _st5_autoresume)
+        self.state["resume_live"] = bool(data.get("live", False))
+        self.state["live"] = False                # live поднимется заново через autoresume
         # БЕЗОПАСНОСТЬ: рестарт ВСЕГДА снимает взвод реальной торговли (safe-by-default)
         self.state["real_trading_armed"] = False
         return True
@@ -368,7 +378,9 @@ class St5Session:
         while self.state["live"]:
             try:
                 if self.state.get("sandbox_active"):
-                    self.refresh_capital()
+                    # в отдельном потоке: refresh_capital делает блокирующий HTTP к T-Bank
+                    # (urlopen до 180с с ретраями) — синхронный вызов морозил весь event loop
+                    await asyncio.to_thread(self.refresh_capital)
                 async with self._lock:
                     for pid, eng in self.engines.items():
                         if not self.state["live"]:

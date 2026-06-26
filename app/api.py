@@ -131,6 +131,25 @@ async def _st4_autoresume(ST4: St4Session):
         await ST4.run_live()
 
 
+async def _st5_autoresume():
+    """Автостарт ST5 live после рестарта: восстановить sandbox-режим и продолжить торговать.
+
+    Коннектор (mode/account) и sandbox_active восстановлены из session-файла в load_session.
+    Журнал/история/last_live_ts тоже восстановлены — движок прогреется по last_live_ts."""
+    import time as _t
+    ST5.state["live"] = True
+    ST5.state["paused_by_user"] = False
+    ST5.state["data_source"] = "live"
+    if not ST5.state.get("session_started"):
+        ST5.state["session_started"] = _t.time()
+    # пересобрать sandbox_active по восстановленному коннектору (на случай рассогласования)
+    want_broker = ST5.cfg.connector.mode in ("tbank_sandbox", "tbank_real")
+    ST5.state["sandbox_active"] = bool(want_broker and ST5.cfg.connector.account_id)
+    ST5.log_event("info", f"автовозобновление ST5 live после рестарта ({ST5.cfg.connector.mode})")
+    if ST5.state["live"]:
+        await ST5.run_live()
+
+
 def _run_backtest_tbank(stop_sigma: float | None, ST4: St4Session) -> dict:
     """Прогон бэктеста на T-Bank-свечах + запись в историю. Блокирующий (to_thread)."""
     from .st4 import tbank_sandbox as _sb
@@ -196,6 +215,8 @@ async def lifespan(app: FastAPI):
         if s4.state.pop("resume_live", False):
             asyncio.create_task(_st4_autoresume(s4))   # автостарт: live шёл до рестарта
     ST5.load_session()                                  # портфельная сессия st5
+    if ST5.state.pop("resume_live", False):
+        asyncio.create_task(_st5_autoresume())          # автостарт: ST5 live шёл до рестарта
     _auto_bt_task = asyncio.create_task(_auto_backtest_loop())
     yield
     _auto_bt_task.cancel()
