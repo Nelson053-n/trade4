@@ -608,11 +608,6 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
           <table id="s5-bth"><thead><tr><th>время</th><th>тип</th><th>пара</th><th>дней</th><th>сделок</th><th>win%</th><th>net ₽</th><th>Sharpe</th><th>maxDD</th></tr></thead><tbody><tr><td colspan="9" class="empty">прогонов пока нет</td></tr></tbody></table>
         </div>
       </div>
-      <div class="card">
-        <h2>Доходность по инструментам за неделю <span class="em" id="s5-wk-sub">T-Bank · по дням: прибыль и комиссия</span>
-          <button class="btn" id="s5-btn-wk" style="float:right;font-size:11px;padding:3px 10px">обновить</button></h2>
-        <div id="s5-wk-wrap" style="margin-top:8px"><div class="empty" style="font-size:12px">нажмите «обновить» — бэктест за неделю по каждому инструменту</div></div>
-      </div>
     </div>
     <div>
       <div class="card">
@@ -666,6 +661,10 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
         <div id="s5-grid-wrap" style="display:none;margin-top:8px">
           <table id="s5-grid"><thead><tr><th>z_in</th><th>z_stop</th><th>H_max</th><th>сделок</th><th>win%</th><th>net ₽</th><th>Sharpe</th><th>PF</th><th>maxDD</th></tr></thead><tbody></tbody></table>
         </div>
+      </div>
+      <div class="card">
+        <h2>Доходность по инструментам <span class="em" id="s5-wk-sub">зафиксированная прибыль по дням (журнал live-сделок)</span></h2>
+        <div id="s5-wk-wrap" style="margin-top:8px"><div class="empty" style="font-size:12px">пока нет зафиксированных сделок</div></div>
       </div>
     </div>
   </div>
@@ -1469,7 +1468,7 @@ function s5Switch(strat){
   });
   $('tab-st4').hidden = strat!=='st4';
   $('tab-st5').hidden = strat!=='st5';
-  if(strat==='st5'){ s5Poll(); if(!_s5dailyLoaded){ _s5dailyLoaded=true; s5LoadDaily(); s5LoadGoInfo(); } }
+  if(strat==='st5'){ s5Poll(); s5LoadWeekly(); if(!_s5dailyLoaded){ _s5dailyLoaded=true; s5LoadDaily(); s5LoadGoInfo(); } }
 }
 function s5Render(s){
   _s5snap=s;
@@ -1686,38 +1685,44 @@ async function s5RenderBtHistory(){
     tb.innerHTML=h.map(r=>`<tr><td style="color:var(--ink-dim)">${r.ts}</td><td>${r.kind}</td><td>${r.pair}</td><td>${r.days||'—'}</td><td>${r.trades}</td><td>${r.win_rate_pct}%</td><td style="color:${r.net_pnl_rub>=0?'var(--signal)':'var(--loss)'}">${s5money(r.net_pnl_rub)}</td><td>${r.sharpe}</td><td>${r.max_drawdown_pct}%</td></tr>`).join('');
   }catch(e){}
 }
-async function s5Poll(){ if(_s5strat!=='st5') return; try{ const s=await s5api('/state'); _s5hist=s.history||{}; _s5trades=s.trades||[]; s5BuildChartSwitch(s.pairs); s5Render(s); s5DrawChart(); s5RenderBtHistory(); }catch(e){} }
-// доходность по инструментам за неделю — столбики net+комиссия на каждый день, блок на инструмент
+let _s5wkCount=-1;
+async function s5Poll(){ if(_s5strat!=='st5') return; try{ const s=await s5api('/state'); _s5hist=s.history||{}; _s5trades=s.trades||[]; s5BuildChartSwitch(s.pairs); s5Render(s); s5DrawChart(); s5RenderBtHistory();
+  if((s.trades||[]).length!==_s5wkCount){ _s5wkCount=(s.trades||[]).length; s5LoadWeekly(); }   // освежать доходность при новой сделке
+}catch(e){} }
+// доходность по инструментам — столбики зафиксированной прибыли+комиссии по дням из журнала live-сделок
 async function s5LoadWeekly(){
-  const wrap=$('s5-wk-wrap'); wrap.innerHTML='<div class="empty" style="font-size:12px">считаю бэктест за неделю…</div>';
+  const wrap=$('s5-wk-wrap');
   try{
     const d=await s5api('/weekly_by_pair'); const pairs=d.pairs||[];
+    const anyTrades=pairs.some(p=>(p.total_trades||0)>0);
+    if(!anyTrades){ wrap.innerHTML='<div class="empty" style="font-size:12px">пока нет зафиксированных сделок</div>'; return; }
     // общий масштаб столбиков по всем дням всех инструментов (для сопоставимости)
     let mx=1; pairs.forEach(p=>(p.rows||[]).forEach(r=>{ mx=Math.max(mx, Math.abs(r.net), Math.abs(r.fee)); }));
     const day=s=>{ const t=new Date(s+'T00:00:00'); return t.toLocaleDateString('ru',{day:'2-digit',month:'2-digit'}); };
+    const BH=70;   // высота области столбиков (крупнее)
     wrap.innerHTML=pairs.map(p=>{
-      if(p.error) return `<div style="margin-bottom:14px"><b>${p.label}</b> <span class="em">${p.legs||''}</span><div class="empty" style="font-size:12px">${p.error}</div></div>`;
       const rows=p.rows||[];
       const bars=rows.length? rows.map(r=>{
-        const nh=Math.round(Math.abs(r.net)/mx*46), fh=Math.round(Math.abs(r.fee)/mx*46);
+        const nh=Math.round(Math.abs(r.net)/mx*BH), fh=Math.round(Math.abs(r.fee)/mx*BH);
         const nc=r.net>=0?'var(--signal)':'var(--loss)';
-        return `<div style="display:flex;flex-direction:column;align-items:center;gap:3px;min-width:46px" title="${day(r.date)}: net ${s5money(r.net)}, комиссия −${r.fee}₽, сделок ${r.trades}">
-          <div style="display:flex;align-items:flex-end;gap:2px;height:50px">
-            <div style="width:11px;height:${Math.max(nh,2)}px;background:${nc};border-radius:2px 2px 0 0"></div>
-            <div style="width:11px;height:${Math.max(fh,2)}px;background:var(--ink-dim);opacity:.55;border-radius:2px 2px 0 0"></div>
+        return `<div style="display:flex;flex-direction:column;align-items:center;gap:4px;min-width:60px" title="${day(r.date)}: прибыль ${s5money(r.net)}, комиссия −${r.fee}₽, сделок ${r.trades}">
+          <div style="font-size:10px;color:${nc};font-weight:600">${r.net>=0?'+':''}${r.net}</div>
+          <div style="display:flex;align-items:flex-end;gap:3px;height:${BH}px">
+            <div style="width:16px;height:${Math.max(nh,2)}px;background:${nc};border-radius:3px 3px 0 0"></div>
+            <div style="width:16px;height:${Math.max(fh,2)}px;background:var(--ink-dim);opacity:.55;border-radius:3px 3px 0 0"></div>
           </div>
-          <div style="font-size:9px;color:var(--ink-dim)">${day(r.date)}</div>
+          <div style="font-size:10px;color:var(--ink-dim)">${day(r.date)}</div>
         </div>`;
-      }).join('') : '<div class="empty" style="font-size:12px">нет сделок за неделю</div>';
+      }).join('') : '<div class="empty" style="font-size:12px">нет зафиксированных сделок</div>';
       const tc=p.total_net>=0?'var(--signal)':'var(--loss)';
-      return `<div style="margin-bottom:16px;border:1px solid var(--line);border-radius:8px;padding:10px 12px">
-        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">
-          <b>${p.label}</b> <span class="em">${p.legs||''}</span>
+      return `<div style="margin-bottom:18px;border:1px solid var(--line);border-radius:8px;padding:12px 14px">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px">
+          <b style="font-size:14px">${p.label}</b>
           <span style="font-size:12px">прибыль <b style="color:${tc}">${s5money(p.total_net)}</b> · комиссия <b style="color:var(--ink-dim)">−${p.total_fee}₽</b> · ${p.total_trades} сделок</span>
         </div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">${bars}</div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">${bars}</div>
       </div>`;
-    }).join('') + `<div style="font-size:10px;color:var(--ink-dim);margin-top:2px"><span style="display:inline-block;width:9px;height:9px;background:var(--signal);border-radius:2px;vertical-align:middle"></span> прибыль (net) &nbsp; <span style="display:inline-block;width:9px;height:9px;background:var(--ink-dim);opacity:.55;border-radius:2px;vertical-align:middle"></span> комиссия</div>`;
+    }).join('') + `<div style="font-size:10px;color:var(--ink-dim);margin-top:2px"><span style="display:inline-block;width:10px;height:10px;background:var(--signal);border-radius:2px;vertical-align:middle"></span> зафиксированная прибыль &nbsp; <span style="display:inline-block;width:10px;height:10px;background:var(--ink-dim);opacity:.55;border-radius:2px;vertical-align:middle"></span> комиссия</div>`;
   }catch(e){ wrap.innerHTML='<div class="empty" style="font-size:12px">ошибка: '+e.message+'</div>'; }
 }
 function s5Init(){
@@ -1726,7 +1731,6 @@ function s5Init(){
   $('s5-btn-stop').onclick=async()=>{ try{ await s5api('/control/stop','POST'); s5Poll(); }catch(e){alert(e.message);} };
   $('s5-btn-flat').onclick=async()=>{ if(!confirm('Закрыть ВСЕ позиции ST5 по рынку?'))return; try{ await s5api('/control/flat-all','POST',{confirm:true}); s5Poll(); }catch(e){alert(e.message);} };
   $('s5-btn-resume').onclick=async()=>{ await s5api('/control/resume','POST'); s5Poll(); };
-  $('s5-btn-wk').onclick=()=> s5LoadWeekly();
   // зум графика z колёсиком + панорама перетаскиванием (как на ST4-графике)
   const s5cv=$('s5chart');
   if(s5cv){

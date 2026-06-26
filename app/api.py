@@ -625,47 +625,38 @@ async def st5_backtest_tbank(pair: str = "sber"):
 
 @app.get("/st5/weekly_by_pair")
 async def st5_weekly_by_pair():
-    """Доходность по инструментам за НЕДЕЛЮ (T-Bank, как live): по дням net-прибыль и комиссия.
+    """Доходность по инструментам по РЕАЛЬНЫМ зафиксированным сделкам из журнала ST5.
 
-    Отдельный блок на каждый инструмент. Бэктест на тех же котировках, что sandbox-ордера.
+    Отдельный блок на инструмент: по дням net-прибыль и комиссия фактических сделок бота
+    (ST5.trades — закрытые/частично-зафиксированные), НЕ бэктест.
     """
+    import datetime as _dtmod
+    from collections import defaultdict
     from .st5.service import ST5_PAIRS
 
-    def _run_pair(pid: str) -> dict:
-        import datetime as _dtmod
-        from collections import defaultdict
-        from .st4.config import St4Config as _C4
-        from .st4 import data_feed as _feed
-        from .st4 import tbank_sandbox as _sb
-        from .st5.engine import ST5Engine
-        ao, ap = ST5_PAIRS[pid][0], ST5_PAIRS[pid][1]
-        c4 = _C4(); c4.instruments.asset_ordinary = ao; c4.instruments.asset_preferred = ap
-        try:
-            so, sp = _feed.resolve_legs(c4)
-            uid_o = _sb.find_future(so.code)["uid"]; uid_p = _sb.find_future(sp.code)["uid"]
-            df = _feed.read_ohlcv_tbank(c4, 1000, uid_o, uid_p)
-        except Exception as e:  # noqa: BLE001
-            return {"pair": pid, "label": ST5_PAIRS[pid][3], "error": f"T-Bank: {e}", "rows": []}
-        if len(df) < 200:
-            return {"pair": pid, "label": ST5_PAIRS[pid][3],
-                    "error": f"мало баров: {len(df)}", "rows": []}
-        eng = ST5Engine(pid, _st5_pair_cfg(pid), base_lots=10, fee_per_lot=2.0, half_spread_pts=0.5)
-        for ts, row in df.iterrows():
-            eng.step(int(ts), float(row["price_a"]), float(row["price_b"]))
-        # дневные корзины: net-прибыль и комиссия
-        net = defaultdict(float); fee = defaultdict(float); cnt = defaultdict(int)
-        for t in eng.trades:
-            d = _dtmod.datetime.fromtimestamp(t.exit_ts / 1000, _MSK).strftime("%Y-%m-%d")
-            net[d] += t.net_pnl_rub; fee[d] += t.fees_rub; cnt[d] += 1
-        days = sorted(set(net) | set(fee))[-7:]   # последние 7 торговых дней
-        rows = [{"date": d, "net": round(net.get(d, 0)), "fee": round(fee.get(d, 0)),
-                 "trades": cnt.get(d, 0)} for d in days]
-        return {"pair": pid, "label": ST5_PAIRS[pid][3], "legs": f"{so.code}/{sp.code}",
-                "rows": rows, "total_net": round(sum(net.values())),
-                "total_fee": round(sum(fee.values())), "total_trades": sum(cnt.values())}
+    # группируем реальные сделки журнала по паре и дню (по exit_ts — момент фиксации)
+    by_pair = {pid: {"net": defaultdict(float), "fee": defaultdict(float), "cnt": defaultdict(int)}
+               for pid in ST5_PAIRS}
+    for t in ST5.trades:
+        pid = t.get("pair")
+        if pid not in by_pair or not t.get("exit_ts"):
+            continue
+        d = _dtmod.datetime.fromtimestamp(t["exit_ts"] / 1000, _MSK).strftime("%Y-%m-%d")
+        by_pair[pid]["net"][d] += t.get("net_pnl_rub", 0) or 0
+        by_pair[pid]["fee"][d] += t.get("fees_rub", 0) or 0   # старые сделки: fees_rub=None → 0
+        by_pair[pid]["cnt"][d] += 1
 
-    pairs = await asyncio.gather(*[asyncio.to_thread(_run_pair, p) for p in ST5_PAIRS])
-    return _clean({"pairs": list(pairs)})
+    pairs = []
+    for pid, spec in ST5_PAIRS.items():
+        b = by_pair[pid]
+        days = sorted(set(b["net"]) | set(b["cnt"]))[-7:]   # последние 7 дней с активностью
+        rows = [{"date": d, "net": round(b["net"].get(d, 0)), "fee": round(b["fee"].get(d, 0)),
+                 "trades": b["cnt"].get(d, 0)} for d in days]
+        pairs.append({"pair": pid, "label": spec[3], "rows": rows,
+                      "total_net": round(sum(b["net"].values())),
+                      "total_fee": round(sum(b["fee"].values())),
+                      "total_trades": sum(b["cnt"].values())})
+    return _clean({"pairs": pairs, "source": "журнал live-сделок"})
 
 
 @app.get("/st5/margin")
