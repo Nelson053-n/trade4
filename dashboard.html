@@ -608,6 +608,11 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
           <table id="s5-bth"><thead><tr><th>время</th><th>тип</th><th>пара</th><th>дней</th><th>сделок</th><th>win%</th><th>net ₽</th><th>Sharpe</th><th>maxDD</th></tr></thead><tbody><tr><td colspan="9" class="empty">прогонов пока нет</td></tr></tbody></table>
         </div>
       </div>
+      <div class="card">
+        <h2>Доходность по инструментам за неделю <span class="em" id="s5-wk-sub">T-Bank · по дням: прибыль и комиссия</span>
+          <button class="btn" id="s5-btn-wk" style="float:right;font-size:11px;padding:3px 10px">обновить</button></h2>
+        <div id="s5-wk-wrap" style="margin-top:8px"><div class="empty" style="font-size:12px">нажмите «обновить» — бэктест за неделю по каждому инструменту</div></div>
+      </div>
     </div>
     <div>
       <div class="card">
@@ -661,11 +666,6 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
         <div id="s5-grid-wrap" style="display:none;margin-top:8px">
           <table id="s5-grid"><thead><tr><th>z_in</th><th>z_stop</th><th>H_max</th><th>сделок</th><th>win%</th><th>net ₽</th><th>Sharpe</th><th>PF</th><th>maxDD</th></tr></thead><tbody></tbody></table>
         </div>
-      </div>
-      <div class="card">
-        <h2>Доходность по инструментам за неделю <span class="em" id="s5-wk-sub">T-Bank · по дням: прибыль и комиссия</span>
-          <button class="btn" id="s5-btn-wk" style="float:right;font-size:11px;padding:3px 10px">обновить</button></h2>
-        <div id="s5-wk-wrap" style="margin-top:8px"><div class="empty" style="font-size:12px">нажмите «обновить» — бэктест за неделю по каждому инструменту</div></div>
       </div>
     </div>
   </div>
@@ -1529,6 +1529,7 @@ function s5Render(s){
 }
 let _s5chartPair='sber', _s5hist={};
 let _s5trades=[], _s5geom=null, _s5pulse=0;
+let _s5zoom=1, _s5panRight=null, _s5fullLen=0;   // зум колёсиком: доля видимых баров + правый край окна
 function s5DrawChart(){
   const cv=$('s5chart'); if(!cv) return;
   const r=cv.getBoundingClientRect();
@@ -1536,7 +1537,12 @@ function s5DrawChart(){
   const dpr=devicePixelRatio||1; cv.width=r.width*dpr; cv.height=r.height*dpr;
   const ctx=cv.getContext('2d'); ctx.setTransform(1,0,0,1,0,0); ctx.scale(dpr,dpr);
   const W=r.width,H=r.height; ctx.clearRect(0,0,W,H);
-  const hist=(_s5hist[_s5chartPair]||[]).filter(p=>p.z!=null);
+  const histAll=(_s5hist[_s5chartPair]||[]).filter(p=>p.z!=null);
+  _s5fullLen=histAll.length;
+  // видимое окно по зуму/пану (как на ST4-графике)
+  const visN=Math.max(10,Math.round(histAll.length*_s5zoom));
+  const right=_s5panRight==null?histAll.length:Math.min(histAll.length,Math.max(visN,_s5panRight));
+  const hist=_s5zoom>=1?histAll:histAll.slice(Math.max(0,right-visN),right);
   $('s5-chart-pair').textContent=_s5chartPair.toUpperCase();
   if(hist.length<2){ ctx.fillStyle=getCSS('--ink-dim'); ctx.font='12px IBM Plex Mono,monospace'; ctx.fillText('прогрев индикаторов…',12,24); return; }
   const cs=getComputedStyle(document.documentElement);
@@ -1624,7 +1630,7 @@ function s5BuildChartSwitch(pairs){
   const el=$('s5-chart-switch'); if(!el||el.childElementCount) return;
   (pairs||[]).forEach(p=>{
     const b=document.createElement('button'); b.className='tf-btn'; b.textContent=p.label;
-    b.onclick=()=>{ _s5chartPair=p.pair; s5DrawChart(); document.querySelectorAll('#s5-chart-switch .tf-btn').forEach(x=>x.classList.toggle('on',x===b)); };
+    b.onclick=()=>{ _s5chartPair=p.pair; _s5zoom=1; _s5panRight=null; s5DrawChart(); document.querySelectorAll('#s5-chart-switch .tf-btn').forEach(x=>x.classList.toggle('on',x===b)); };
     if(p.pair===_s5chartPair) b.classList.add('on');
     el.appendChild(b);
   });
@@ -1720,6 +1726,30 @@ function s5Init(){
   $('s5-btn-flat').onclick=async()=>{ if(!confirm('Закрыть ВСЕ позиции ST5 по рынку?'))return; try{ await s5api('/control/flat-all','POST',{confirm:true}); s5Poll(); }catch(e){alert(e.message);} };
   $('s5-btn-resume').onclick=async()=>{ await s5api('/control/resume','POST'); s5Poll(); };
   $('s5-btn-wk').onclick=()=> s5LoadWeekly();
+  // зум графика z колёсиком + панорама перетаскиванием (как на ST4-графике)
+  const s5cv=$('s5chart');
+  if(s5cv){
+    s5cv.addEventListener('wheel',e=>{
+      e.preventDefault();
+      if(_s5fullLen<2) return;
+      const k=e.deltaY<0?0.85:1/0.85;
+      _s5zoom=Math.min(1,Math.max(10/_s5fullLen,_s5zoom*k));
+      if(_s5panRight==null) _s5panRight=_s5fullLen;
+      if(_s5zoom>=1) _s5panRight=null;
+      s5DrawChart();
+    },{passive:false});
+    let s5drag=null;
+    s5cv.addEventListener('mousedown',e=>{ s5drag={x:e.clientX,panRight:_s5panRight==null?_s5fullLen:_s5panRight}; s5cv.style.cursor='grabbing'; });
+    addEventListener('mousemove',e=>{
+      if(!s5drag||_s5fullLen<2) return;
+      const W=s5cv.getBoundingClientRect().width, visN=Math.max(10,Math.round(_s5fullLen*_s5zoom));
+      const dxBars=Math.round((e.clientX-s5drag.x)/W*visN);
+      let nr=s5drag.panRight-dxBars; nr=Math.max(visN,Math.min(_s5fullLen,nr));
+      _s5panRight=nr>=_s5fullLen?null:nr; s5DrawChart();
+    });
+    addEventListener('mouseup',()=>{ if(s5drag){ s5drag=null; s5cv.style.cursor=''; } });
+    s5cv.addEventListener('dblclick',()=>{ _s5zoom=1; _s5panRight=null; s5DrawChart(); });   // двойной клик — сброс
+  }
   $('s5-trading').onchange=async(e)=>{ await s5api('/control/trading?on='+e.target.checked,'POST'); s5Poll(); };
   $('s5-conn-mode').onchange=()=>{ $('s5-acc-fld').style.display=$('s5-conn-mode').value==='tbank_real'?'block':'none'; };
   $('s5-btn-conn').onclick=async()=>{
