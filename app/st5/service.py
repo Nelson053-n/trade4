@@ -27,12 +27,17 @@ ST5_PAIRS: dict[str, tuple] = {
     # Оверрайды откалиброваны sweep'ом на 365д (по Sharpe, ≥5 сделок). КАЖДАЯ пара статистически
     # разная — глобальные параметры ломают часть пар (напр. z_exit=0.1 хорош sber/tatn, но sngr
     # лучше с 0.35). Поэтому per-pair, как в st4.
+    # z_entry=1.25 (аудит 2026-06-26: OOS-проверено, +50-60% net в ОБЕИХ половинах всех пар,
+    # maxDD не вырос). Тиры сайзинга сдвинуты под z_entry (иначе вход разрешён, но size=None).
     "sber": ("SBRF", "SBPR", "SBER", "Сбербанк",
-             {"z_entry": 1.75, "z_take_partial": 1.5, "z_exit_full": 0.1}),
+             {"z_entry": 1.25, "z_take_partial": 1.5, "z_exit_full": 0.1,
+              "size_tiers": [(1.25, 1.75, 1.0), (1.75, 2.25, 1.5), (2.25, 4.0, 2.0)]}),
     "sngr": ("SNGR", "SNGP", "SNGR", "Сургутнефтегаз",
-             {"z_entry": 1.75, "z_take_partial": 1.5, "z_exit_full": 0.35}),
+             {"z_entry": 1.25, "z_take_partial": 1.5, "z_exit_full": 0.35,
+              "size_tiers": [(1.25, 1.75, 1.0), (1.75, 2.25, 1.5), (2.25, 4.0, 2.0)]}),
     "tatn": ("TATN", "TATP", "TATN", "Татнефть",
-             {"z_entry": 1.75, "z_take_partial": 1.25, "z_exit_full": 0.1}),
+             {"z_entry": 1.25, "z_take_partial": 1.25, "z_exit_full": 0.1,
+              "size_tiers": [(1.25, 1.75, 1.0), (1.75, 2.25, 1.5), (2.25, 4.0, 2.0)]}),
 }
 
 
