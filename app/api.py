@@ -494,6 +494,26 @@ def st5_flat_all(payload: dict):
     return {"ok": True, "closed": closed}
 
 
+@app.post("/st5/control/reconcile")
+def st5_reconcile():
+    """Ручная сверка движка с реальным счётом по всем парам (без ожидания нового бара).
+    Для разруливания рассинхрона: на счёте позиция, движок flat → усыновляем. Только sandbox/real."""
+    if not ST5.state.get("sandbox_active"):
+        raise HTTPException(400, "сверка доступна только при активном брокере (sandbox/real)")
+    out = []
+    for pid, eng in ST5.engines.items():
+        before = eng.position is not None
+        ST5._reconciled.discard(pid)   # разрешить повторную сверку
+        ST5._reconcile_pair(pid, eng)
+        ST5._reconciled.add(pid)
+        after = eng.position
+        out.append({"pair": pid, "was_open": before,
+                    "now": after.state.value if after else None,
+                    "lots": after.lots if after else 0})
+    ST5.save_session()
+    return {"ok": True, "pairs": out}
+
+
 @app.post("/st5/control/arm-real")
 def st5_arm_real(payload: dict):
     """Взвод реальной торговли (двойной включатель, требует confirm). Сбрасывается при рестарте."""

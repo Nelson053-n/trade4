@@ -570,21 +570,25 @@ class St5Session:
         # «холодный» движок после рестарта: last_ts большой, но spread_buf пуст. Прогреваем ВСЕМИ
         # доступными историческими барами (≤ last_ts) без сделок, чтобы набрать ADF/Hurst-окна.
         cold = len(eng.spread_buf) < min(len(df), self.cfg.strategy.adf_window)
+        # ШАГ 1: прогрев историей (бары ≤ last_ts), БЕЗ открытия позиций
+        live_rows = []
         for ts, row in df.iterrows():
             ts = int(ts)
             if ts <= last_ts:
-                if cold:   # прогрев историей до last_ts — БЕЗ открытия позиций (откатываем)
+                if cold:
                     eng.step(ts, float(row["price_a"]), float(row["price_b"]))
                     if eng.position is not None and eng.position.bars_held == 0:
                         eng.position = None   # прогревочный «вход» не исполняется в брокере
-                continue
-            # НОВЫЙ (живой) бар: ts > last_ts. Здесь исполняем реально (это не прогрев).
-            # Сверка со счётом — ОДИН раз на пару, прямо перед первым живым баром: прогрев уже
-            # набрал spread_buf/last_beta/filt, а откат прогревочных «входов» позади (не снесёт
-            # усыновлённую позицию). Совпало → ведём; парная на счёте → усыновляем; иначе flat.
-            if sandbox and pid not in self._reconciled:
-                self._reconcile_pair(pid, eng)
-                self._reconciled.add(pid)
+            else:
+                live_rows.append((ts, row))
+        # ШАГ 2: сверка со счётом — ОДИН раз на пару, ПОСЛЕ прогрева и НЕЗАВИСИМО от наличия нового
+        # бара (иначе при рестарте без свежих баров — выходные/пауза — позиция на счёте остаётся
+        # неусыновлённой бесконечно). Прогрев уже набрал spread_buf/last_beta/filt.
+        if sandbox and pid not in self._reconciled:
+            self._reconcile_pair(pid, eng)
+            self._reconciled.add(pid)
+        # ШАГ 3: живые бары (ts > last_ts) — реальное исполнение
+        for ts, row in live_rows:
             pos_before = eng.position is not None
             tr = eng.step(ts, float(row["price_a"]), float(row["price_b"]))
             self.last_live_ts[pid] = ts

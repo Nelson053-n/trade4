@@ -413,3 +413,37 @@ def test_portfolio_limit_uses_real_blocked():
     s.portfolio.real_blocked_rub = 48000.0
     ok2, reason = s.portfolio.can_open("sber", "SBER", 4000.0, s.engines, ST5_PAIRS)
     assert not ok2 and "портфельн" in reason   # 48000+4000=52000 > 50000
+
+
+def test_reconcile_endpoint_adopts_without_bar(monkeypatch):
+    """POST /st5/control/reconcile усыновляет позицию со счёта в движок БЕЗ ожидания бара
+    (фикс рассинхрона: на счёте позиция, движок flat → усыновляем сразу)."""
+    from fastapi.testclient import TestClient
+    from app.api import app, ST5
+    from app.st5.service import ST5_PAIRS, St5Portfolio
+    ST5.state["sandbox_active"] = True
+    St5Portfolio._go_cache = {pid: 1000.0 for pid in ST5_PAIRS}
+    for pid in ST5_PAIRS:
+        ST5.engines[pid].position = None
+    ST5._reconciled = set()
+    ST5._uid_cache["tatn"] = ("uo", "up")
+
+    class _FakeEx:
+        def broker_lots(self):  # на счёте tatn: обычка +1 / преф −1 → short_spread
+            return (1, -1)
+        def entry_prices(self):
+            return (600.0, 560.0)
+        def broker_entry_ts(self):
+            return 1700000000000
+    monkeypatch.setattr(ST5, "_make_executor", lambda pid: _FakeEx() if pid == "tatn" else None)
+
+    c = TestClient(app)
+    r = c.post("/st5/control/reconcile")
+    assert r.status_code == 200
+    body = r.json()
+    tatn = next(x for x in body["pairs"] if x["pair"] == "tatn")
+    assert tatn["now"] == "short_spread" and tatn["lots"] == 1
+    assert ST5.engines["tatn"].position is not None
+    # очистка, чтобы не влиять на другие тесты
+    ST5.engines["tatn"].position = None
+    ST5.state["sandbox_active"] = False
