@@ -231,7 +231,8 @@ class ST5Engine:
         tr = St5Trade(pair=self.pair, state=p.state, entry_ts=p.entry_ts, exit_ts=ts,
                       entry_z=p.entry_z, exit_z=z, entry_spread=p.entry_spread, exit_spread=exit_spread,
                       lots=close_lots, gross_pnl_rub=gross, fees_rub=fee, net_pnl_rub=net,
-                      reason="take_partial", bars_held=p.bars_held, entry_beta=p.entry_beta)
+                      reason="take_partial", bars_held=p.bars_held, entry_beta=p.entry_beta,
+                      adopted=p.adopted)
         self.trades.append(tr)
         return tr
 
@@ -246,7 +247,8 @@ class ST5Engine:
         tr = St5Trade(pair=self.pair, state=p.state, entry_ts=p.entry_ts, exit_ts=ts,
                       entry_z=p.entry_z, exit_z=z, entry_spread=p.entry_spread, exit_spread=exit_spread,
                       lots=p.lots, gross_pnl_rub=gross, fees_rub=fee, net_pnl_rub=net,
-                      reason=reason, bars_held=p.bars_held, entry_beta=p.entry_beta)
+                      reason=reason, bars_held=p.bars_held, entry_beta=p.entry_beta,
+                      adopted=p.adopted)
         self.trades.append(tr)
         self.position = None
         return tr

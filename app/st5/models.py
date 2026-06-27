@@ -33,6 +33,8 @@ class St5Position:
     partial_done: bool = False       # сделана ли частичная фиксация 50%
     fees_rub: float = 0.0            # накопленные комиссии (вход + частичные)
     realized_rub: float = 0.0        # реализованный P&L от частичных фиксаций
+    adopted: bool = False            # усыновлена со счёта при reconcile: entry_z/spread/bars_held
+                                     # с момента усыновления, НЕ реального входа → метрики искажены
 
     def notional(self) -> float:
         """Грубый нотионал позиции в пунктах (для %-лимитов): |pref| + |β·ord|."""
@@ -57,6 +59,7 @@ class St5Trade:
     reason: str                      # "take_partial" | "exit" | "z_stop" | "time_stop" | "adf_break" | "flat_all"
     bars_held: int = 0
     entry_beta: float = 1.0
+    adopted: bool = False            # сделка из усыновлённой позиции → entry-метрики искажены
 
 
 @dataclass

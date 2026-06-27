@@ -543,3 +543,29 @@ def test_daily_totals_only_active_days():
     # антирегресс: старая формула (по всем дням) дала бы фиктивный missed
     old_missed = sum(with_costs.values()) - sum(real.values())
     assert old_missed == 520 and old_missed != missed   # вот та самая «фикция»
+
+
+def test_adopted_flag_propagates_to_trade():
+    """Усыновлённая позиция помечается adopted=True, и флаг доходит до записи закрытой сделки
+    (entry-метрики усыновлённой искажены → флаг отличает её в журнале доходности)."""
+    from app.st5.models import St5State
+    s = _session_with_fake_executor()
+    ex = s._fake_ex
+    assert s._adopt_position_from_account("sber", bal_ord=1, bal_pref=-1, executor=ex)
+    eng = s.engines["sber"]
+    assert eng.position.adopted is True
+    # закрываем — флаг должен попасть в St5Trade
+    tr = eng._close(1700000600000, 0.1, 0.0, 600.0, 560.0, "exit")
+    assert tr.adopted is True
+
+def test_normal_position_not_adopted():
+    """Обычный вход (engine._open) → adopted=False, сделка тоже не помечена."""
+    from app.st5.service import ST5_PAIRS, St5Session
+    from app.st5.engine import ST5Engine
+    s = St5Session()
+    eng = s.engines["sber"]
+    # имитируем открытие через _open (z>0 → short)
+    eng._open(1700000000000, 2.5, 100.0, 1.0, 100.0, 100.0)
+    assert eng.position.adopted is False
+    tr = eng._close(1700000600000, 0.1, 0.0, 100.0, 100.0, "exit")
+    assert tr.adopted is False

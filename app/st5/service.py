@@ -462,7 +462,8 @@ class St5Session:
             half_life=eng.filt.half_life,
             # bars_held=1 (НЕ 0): откат прогревочных входов в _step_pair снимает позиции с
             # bars_held==0 — усыновлённую со счёта это снесло бы (она реальна, не прогрев).
-            bars_held=1)
+            bars_held=1,
+            adopted=True)   # пометка: entry_z/spread/bars_held — с момента усыновления, не входа
         return True
 
     def _position_matches_lots(self, eng, bal_ord: int, bal_pref: int) -> bool:
@@ -670,7 +671,8 @@ class St5Session:
         rec = {"pair": pid, "state": tr.state.value, "entry_ts": tr.entry_ts, "exit_ts": tr.exit_ts,
                "entry_z": tr.entry_z, "exit_z": tr.exit_z, "lots": tr.lots,
                "gross_pnl_rub": tr.gross_pnl_rub, "fees_rub": tr.fees_rub,
-               "net_pnl_rub": tr.net_pnl_rub, "reason": tr.reason, "bars_held": tr.bars_held}
+               "net_pnl_rub": tr.net_pnl_rub, "reason": tr.reason, "bars_held": tr.bars_held,
+               "adopted": tr.adopted}
         self.trades.append(rec)
         self.log_event("exit", f"{pid}: {tr.reason} net {tr.net_pnl_rub:+.0f}₽ ({tr.lots}лот)")
         self.save_session()   # немедленный персист закрытия/частичной фиксации (позиция + журнал)
