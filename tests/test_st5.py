@@ -521,3 +521,25 @@ def test_adopted_position_survives_warmup_rollback():
     assert s._adopt_position_from_account("sber", bal_ord=1, bal_pref=-1, executor=ex)
     p = s.engines["sber"].position
     assert p is not None and p.bars_held >= 1, "усыновлённая позиция должна иметь bars_held>=1"
+
+
+def test_daily_totals_only_active_days():
+    """Итоги /st5/daily (total/missed) считаются ТОЛЬКО по дням с real!=0 — иначе бэктест за
+    дни без бота раздувает missed фикцией. Воспроизводим логику итогов (api.py _run)."""
+    # бэктест за 5 дней, бот реально торговал только 2 последних
+    ideal      = {"d1": 100, "d2": 200, "d3": 300, "d4": 400, "d5": 500}
+    with_costs = {"d1":  90, "d2": 180, "d3": 280, "d4": 380, "d5": 470}
+    real       = {"d4": 420, "d5": 460}   # real!=0 только d4,d5
+    active = {d for d, v in real.items() if v}
+    sum_ideal = sum(ideal.get(d, 0) for d in active)
+    sum_costs = sum(with_costs.get(d, 0) for d in active)
+    sum_real  = sum(real.get(d, 0) for d in active)
+    assert len(active) == 2
+    assert sum_ideal == 900            # 400+500, НЕ 1500 (не вся история)
+    assert sum_costs == 850            # 380+470
+    assert sum_real == 880
+    missed = sum_costs - sum_real
+    assert missed == -30               # реал обогнал бэктест на сопоставимом отрезке
+    # антирегресс: старая формула (по всем дням) дала бы фиктивный missed
+    old_missed = sum(with_costs.values()) - sum(real.values())
+    assert old_missed == 520 and old_missed != missed   # вот та самая «фикция»

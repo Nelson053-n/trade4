@@ -616,12 +616,21 @@ async def st5_daily(pair: str = "sber", days: int = 30):
         all_days = sorted(set(ideal) | set(with_costs) | set(real))[-days:]
         rows = [{"date": d, "ideal": round(ideal.get(d, 0)), "with_costs": round(with_costs.get(d, 0)),
                  "real": round(real.get(d, 0))} for d in all_days]
+        # ИТОГИ — только по дням, где бот РЕАЛЬНО торговал (real!=0). Иначе total_ideal суммирует
+        # бэктест за дни, когда бота ещё не существовало (real=0) → missed раздувается фикцией
+        # «упущенного», хотя бот просто не работал в эти дни. Сравнивать ideal/real можно лишь
+        # на сопоставимом отрезке. rows остаются полными (весь бэктест — для контекста).
+        active = {d for d, v in real.items() if v}
+        sum_ideal = sum(ideal.get(d, 0) for d in active)
+        sum_costs = sum(with_costs.get(d, 0) for d in active)
+        sum_real = sum(real.get(d, 0) for d in active)
         return {"pair": pair, "legs": f"{so.code}/{sp.code}", "rows": rows,
-                "total_ideal": round(sum(ideal.values())),
-                "total_with_costs": round(sum(with_costs.values())),
-                "total_real": round(sum(real.values())),
-                "cost_of_execution": round(sum(ideal.values()) - sum(with_costs.values())),
-                "missed": round(sum(with_costs.values()) - sum(real.values()))}
+                "active_days": len(active),    # дней, по которым считаются итоги (real!=0)
+                "total_ideal": round(sum_ideal),
+                "total_with_costs": round(sum_costs),
+                "total_real": round(sum_real),
+                "cost_of_execution": round(sum_ideal - sum_costs),
+                "missed": round(sum_costs - sum_real)}
 
     return _clean(await asyncio.to_thread(_run))
 
