@@ -472,6 +472,28 @@ class St5Session:
         want_ord = -p.lots if p.state == St5State.LONG_SPREAD else p.lots
         return bal_pref == want_pref and bal_ord == want_ord
 
+    def _ensure_uid_cache(self, pid: str) -> bool:
+        """Заполнить _uid_cache[pid] (и _legs_cache) резолвом по коду СЕРИИ, если пусто.
+        Нужно ДО _make_executor/broker_lots: иначе executor резолвит по asset-коду (TATN) →
+        find_future не находит → broker_lots падает → reconcile молча no-op. True — uid готовы."""
+        if pid in self._uid_cache:
+            return True
+        try:
+            from .service import ST5_PAIRS as _P
+            from ..st4.config import St4Config as _C4
+            from ..st4 import tbank_sandbox as _sb
+            ao, ap = _P[pid][0], _P[pid][1]
+            c4 = _C4(); c4.instruments.asset_ordinary = ao; c4.instruments.asset_preferred = ap
+            c4.strategy.candle_interval_minutes = self.cfg.strategy.candle_interval_minutes
+            if pid not in self._legs_cache:
+                self._legs_cache[pid] = feed.resolve_legs(c4)
+            so, sp = self._legs_cache[pid]
+            self._uid_cache[pid] = (_sb.find_future(so.code)["uid"],
+                                    _sb.find_future(sp.code)["uid"])
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
     def _reconcile_pair(self, pid: str, eng) -> None:
         """Сверка позиции движка пары с РЕАЛЬНЫМ счётом при старте live (после прогрева).
 
@@ -480,6 +502,8 @@ class St5Session:
         логируем для ручного разбора (вслепую закрывать боевой счёт не закрываем).
         Сверка не должна ронять live — все ошибки глотаем в лог."""
         try:
+            # uid серий обязательны для broker_lots (иначе резолв по asset-коду промахивается)
+            self._ensure_uid_cache(pid)
             ex = self._make_executor(pid)
             if ex is None:
                 return
@@ -624,6 +648,7 @@ class St5Session:
                 self.log_event("warn", f"{pid}: вход в брокере не удался: {e}")
                 return
         self.log_event("position", f"{pid}: вход {p.state.value} z={p.entry_z:+.2f} lots={p.lots}")
+        self.save_session()   # немедленный персист: рестарт между открытием и концом прохода НЕ потеряет позицию
 
     def _on_engine_trade(self, pid: str, eng, tr, ord_px: float, pref_px: float) -> None:
         """Движок закрыл (полностью/частично). В брокере — реальный закрывающий ордер."""
@@ -645,3 +670,4 @@ class St5Session:
                "net_pnl_rub": tr.net_pnl_rub, "reason": tr.reason, "bars_held": tr.bars_held}
         self.trades.append(rec)
         self.log_event("exit", f"{pid}: {tr.reason} net {tr.net_pnl_rub:+.0f}₽ ({tr.lots}лот)")
+        self.save_session()   # немедленный персист закрытия/частичной фиксации (позиция + журнал)

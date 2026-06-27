@@ -415,12 +415,14 @@ def test_portfolio_limit_uses_real_blocked():
     assert not ok2 and "портфельн" in reason   # 48000+4000=52000 > 50000
 
 
-def test_reconcile_endpoint_adopts_without_bar(monkeypatch):
+def test_reconcile_endpoint_adopts_without_bar(monkeypatch, tmp_path):
     """POST /st5/control/reconcile усыновляет позицию со счёта в движок БЕЗ ожидания бара
     (фикс рассинхрона: на счёте позиция, движок flat → усыновляем сразу)."""
     from fastapi.testclient import TestClient
     from app.api import app, ST5
     from app.st5.service import ST5_PAIRS, St5Portfolio
+    ST5._session_file = tmp_path / "s5.json"               # не писать в реальный файл
+    monkeypatch.setattr(ST5, "_ensure_uid_cache", lambda pid: True)  # без сети
     ST5.state["sandbox_active"] = True
     St5Portfolio._go_cache = {pid: 1000.0 for pid in ST5_PAIRS}
     for pid in ST5_PAIRS:
@@ -447,3 +449,65 @@ def test_reconcile_endpoint_adopts_without_bar(monkeypatch):
     # очистка, чтобы не влиять на другие тесты
     ST5.engines["tatn"].position = None
     ST5.state["sandbox_active"] = False
+
+
+def test_ensure_uid_cache_fills_from_series(monkeypatch):
+    """_ensure_uid_cache резолвит uid по коду СЕРИИ (не asset) и кэширует. Без него reconcile
+    спотыкался о пустой кэш (broker_lots по asset-коду промахивается)."""
+    from app.st5.service import St5Session
+    from app.st4 import data_feed as feed
+    from app.st4 import tbank_sandbox as sb
+    s = St5Session()
+    s._uid_cache.pop("tatn", None)
+    s._legs_cache.pop("tatn", None)
+
+    class _Spec:  # объект с .code (код серии)
+        def __init__(self, code): self.code = code
+    monkeypatch.setattr(feed, "resolve_legs", lambda c4: (_Spec("TTU6"), _Spec("TPU6")))
+    monkeypatch.setattr(sb, "find_future", lambda code: {"uid": f"uid-{code}"})
+    assert s._ensure_uid_cache("tatn") is True
+    assert s._uid_cache["tatn"] == ("uid-TTU6", "uid-TPU6")
+    # повторный вызов — из кэша, без резолва
+    assert s._ensure_uid_cache("tatn") is True
+
+
+def test_reconcile_endpoint_fills_uid_cache(monkeypatch, tmp_path):
+    """reconcile-эндпоинт усыновляет даже при ПУСТОМ _uid_cache (фикс грабли 2026-06-27):
+    _ensure_uid_cache заполняет кэш перед broker_lots."""
+    from fastapi.testclient import TestClient
+    from app.api import app, ST5
+    from app.st5.service import ST5_PAIRS, St5Portfolio
+    from app.st4 import data_feed as feed
+    from app.st4 import tbank_sandbox as sb
+    ST5._session_file = tmp_path / "s5.json"
+    ST5.state["sandbox_active"] = True
+    St5Portfolio._go_cache = {pid: 1000.0 for pid in ST5_PAIRS}
+    for pid in ST5_PAIRS:
+        ST5.engines[pid].position = None
+    ST5._reconciled = set()
+    ST5._uid_cache.clear()   # ПУСТО — как после рестарта
+    ST5._legs_cache.clear()
+
+    class _Spec:
+        def __init__(self, code): self.code = code
+    monkeypatch.setattr(feed, "resolve_legs", lambda c4: (_Spec("TTU6"), _Spec("TPU6")))
+    monkeypatch.setattr(sb, "find_future", lambda code: {"uid": f"uid-{code}"})
+
+    class _FakeEx:
+        def broker_lots(self): return (1, -1)   # tatn short_spread на счёте
+        def entry_prices(self): return (600.0, 560.0)
+        def broker_entry_ts(self): return 1700000000000
+    # _make_executor вернёт фейк только для tatn (у которой теперь есть uid в кэше)
+    orig = ST5._make_executor
+    monkeypatch.setattr(ST5, "_make_executor",
+                        lambda pid: _FakeEx() if pid == "tatn" and pid in ST5._uid_cache else None)
+
+    c = TestClient(app)
+    r = c.post("/st5/control/reconcile")
+    assert r.status_code == 200
+    tatn = next(x for x in r.json()["pairs"] if x["pair"] == "tatn")
+    assert tatn["now"] == "short_spread" and tatn["lots"] == 1
+    # очистка
+    ST5.engines["tatn"].position = None
+    ST5.state["sandbox_active"] = False
+    ST5._uid_cache.clear()
