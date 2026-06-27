@@ -459,7 +459,10 @@ class St5Session:
             entry_z=eng.last_z if eng.last_z is not None else 0.0,
             entry_spread=pref_entry - beta * ord_entry, entry_beta=beta,
             lots=lots, entry_lots=lots, ord_entry=ord_entry, pref_entry=pref_entry,
-            half_life=eng.filt.half_life)
+            half_life=eng.filt.half_life,
+            # bars_held=1 (НЕ 0): откат прогревочных входов в _step_pair снимает позиции с
+            # bars_held==0 — усыновлённую со счёта это снесло бы (она реальна, не прогрев).
+            bars_held=1)
         return True
 
     def _position_matches_lots(self, eng, bal_ord: int, bal_pref: int) -> bool:

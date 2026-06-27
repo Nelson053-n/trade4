@@ -511,3 +511,13 @@ def test_reconcile_endpoint_fills_uid_cache(monkeypatch, tmp_path):
     ST5.engines["tatn"].position = None
     ST5.state["sandbox_active"] = False
     ST5._uid_cache.clear()
+
+
+def test_adopted_position_survives_warmup_rollback():
+    """Усыновлённая позиция имеет bars_held>=1 — откат прогревочных входов (_step_pair снимает
+    bars_held==0) её НЕ снесёт. Регресс на баг 2026-06-27 (tatn усыновлялась и сразу сносилась)."""
+    s = _session_with_fake_executor()
+    ex = s._fake_ex
+    assert s._adopt_position_from_account("sber", bal_ord=1, bal_pref=-1, executor=ex)
+    p = s.engines["sber"].position
+    assert p is not None and p.bars_held >= 1, "усыновлённая позиция должна иметь bars_held>=1"
