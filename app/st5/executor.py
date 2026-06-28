@@ -3,10 +3,17 @@
 Переиспользует REST-методы tbank_live/tbank_sandbox. CRITICAL-защиты (из ресёрча по реальному
 счёту): идемпотентность order_id с ДИСКРИМИНАТОРОМ ОПЕРАЦИИ (entry/take/unwind — иначе два
 логических ордера в одну секунду коллизируют), pre-trade ценовая sanity-проверка, аудит-лог
-каждого ордера, атомарность пары с unwind, тройной гейт через armed_cb.
+каждого ордера, атомарность пары с unwind, гейт реальной торговли через armed_cb.
 
-ВАЖНО: боевой post_order тратит реальные деньги. Гейт: mode==tbank_real И armed_cb() И
-trading_enabled (последнее — на уровне портфеля). На sandbox — те же методы SandboxService.
+ВАЖНО: боевой post_order тратит реальные деньги. Гейт на УРОВНЕ ОРДЕРА (этот класс):
+mode==tbank_real И armed_cb() (real_trading_armed + cooldown 600с). Применяется ко ВСЕМ
+ордерам — вход, выход, частичная фиксация, unwind, flat.
+
+`trading_enabled` НЕ проверяется здесь — это гейт ВХОДА на уровне портфеля (St5Portfolio.
+can_open, service.py): он блокирует только ОТКРЫТИЕ новой позиции. Выходы/flat/усыновление
+исполняются независимо от trading_enabled (сознательно — иначе при trading_enabled=False
+открытая позиция залипла бы, её нельзя было бы закрыть). На sandbox — те же методы
+SandboxService (armed_cb игнорируется, real=False).
 """
 from __future__ import annotations
 

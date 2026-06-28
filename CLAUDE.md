@@ -10,7 +10,8 @@ trade4 — самостоятельный сервис торговой стра
 Выделен из общего проекта `trade` в отдельный сервис (домен trade4.bananagen.ru, порт 8001),
 **не конфликтует** с `trade.service` (порт 8000).
 
-Фаза проекта: paper / T-Bank sandbox + опциональный боевой контур `tbank_real` под тройным гейтом.
+Фаза проекта: paper / T-Bank sandbox + опциональный боевой контур `tbank_real` под гейтом
+взвода (`tbank_real`+`real_trading_armed`; вход дополнительно гейтится `trading_enabled` — см. «Критичные инварианты»).
 
 ## Команды
 
@@ -76,8 +77,13 @@ pytest tests/test_st4.py::test_<name> -q      # один тест
 - **P&L по тикам** (§9.5): `(exit−entry)·dir·lots·(STEPPRICE/MINSTEP)` из спецификации инструмента,
   **не хардкод**. На `LOTVOLUME` НЕ умножать — STEPPRICE уже на целый контракт.
 - **Гейт входа** `AbsOfMean`: `|cur − SMA| ≥ DeviationPct·|SMA|` — знаконезависим (корректен при SMA<0).
-- **Боевой ордер** (`tbank_live.post_order`) тратит реальные деньги — вызывается только при тройном
-  гейте: `mode==tbank_real` И `real_trading_armed` И `trading_enabled`.
+- **Боевой ордер** (`tbank_live.post_order`) тратит реальные деньги. Гейт НА УРОВНЕ ОРДЕРА
+  (executor `_post`, для ВСЕХ ордеров — вход/выход/flat/unwind): `mode==tbank_real` И
+  `real_trading_armed` (+cooldown 600с). Дополнительно `trading_enabled` гейтит ТОЛЬКО ВХОД
+  в новую позицию (st4 `risk.can_enter`, st5 `St5Portfolio.can_open`) — выходы/flat/усыновление
+  от него НЕ зависят (сознательно: иначе при `trading_enabled=False` позиция залипнет — закрыть
+  нельзя). Т.е. реальный гейт ордера ДВОЙНОЙ (`tbank_real`+`armed`); `trading_enabled` — третье
+  условие лишь для открытия.
 - **Токен T-Bank** — только в окружении процесса (`TBANK_TOKEN`) или файле `app/st4/.tbank_token`.
   Никогда в git/snapshot: наружу отдаётся лишь булев `token_set`.
 - Sandbox/real исполнение активно **только в live** (MOEX ISS). На синтетике (player) — всегда paper.

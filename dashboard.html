@@ -696,6 +696,9 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
 /* ============================ ядро (без мультистратегийных артефактов) ============================ */
 const API='';                                   // same-origin
 const $=id=>document.getElementById(id);
+// экранирование строк от сервера/пользователя перед вставкой в innerHTML (защита от XSS):
+// account_id (ввод пользователя), e.message (эхо ошибок T-Bank/ISS). Числа/enum экранировать не нужно.
+const s4esc=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 
 /* ---- тема (светлая/тёмная), сохраняется в localStorage; применяется ДО рендера ---- */
 function s4ApplyTheme(t){
@@ -1141,7 +1144,7 @@ function s4Render(s){
     evbox.innerHTML = s.events.slice().reverse().map(e=>{
       const m=s4msk(e.ts*1000);
       const rep = e.count>1 ? ` <span style="color:var(--ink-faint)">×${e.count}</span>` : '';
-      return `<div style="padding:3px 0"><span style="color:var(--ink-faint)">${m.hh}:${m.mm}:${m.ss}</span> <span style="color:${kindColor[e.kind]||'var(--ink-dim)'}">${e.message}</span>${rep}</div>`;
+      return `<div style="padding:3px 0"><span style="color:var(--ink-faint)">${m.hh}:${m.mm}:${m.ss}</span> <span style="color:${kindColor[e.kind]||'var(--ink-dim)'}">${s4esc(e.message)}</span>${rep}</div>`;
     }).join('');
   } else evbox.innerHTML='<div class="empty">журнал пуст</div>';
 
@@ -1220,8 +1223,8 @@ async function s4LoadBrokerBalance(){
   try{
     const d=await s4api('/broker-balance');
     if(!d.ok){ el.textContent='реальный баланс: '+(d.error||'недоступен'); return; }
-    const poss=(d.positions||[]).filter(p=>p.qty).map(p=>`${p.type} ${p.qty}@${Math.round(p.avg)}`).join(', ')||'нет позиций';
-    el.innerHTML=`счёт <b>${d.account_id}</b> · итого <b>${s4money(d.total_rub)}</b> · деньги ${s4money(d.money_rub)}<br>позиции: ${poss}`;
+    const poss=(d.positions||[]).filter(p=>p.qty).map(p=>`${s4esc(p.type)} ${p.qty}@${Math.round(p.avg)}`).join(', ')||'нет позиций';
+    el.innerHTML=`счёт <b>${s4esc(d.account_id)}</b> · итого <b>${s4money(d.total_rub)}</b> · деньги ${s4money(d.money_rub)}<br>позиции: ${poss}`;
   }catch(e){ el.textContent='реальный баланс: ошибка'; }
 }
 
@@ -1782,7 +1785,7 @@ async function s5LoadWeekly(){
         <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">${bars}</div>
       </div>`;
     }).join('') + `<div style="font-size:10px;color:var(--ink-dim);margin-top:2px"><span style="display:inline-block;width:10px;height:10px;background:var(--signal);border-radius:2px;vertical-align:middle"></span> зафиксированная прибыль &nbsp; <span style="display:inline-block;width:10px;height:10px;background:var(--ink-dim);opacity:.55;border-radius:2px;vertical-align:middle"></span> комиссия</div>`;
-  }catch(e){ wrap.innerHTML='<div class="empty" style="font-size:12px">ошибка: '+e.message+'</div>'; }
+  }catch(e){ wrap.innerHTML='<div class="empty" style="font-size:12px">ошибка: '+s4esc(e.message)+'</div>'; }
 }
 function s5Init(){
   document.querySelectorAll('.strat-tab').forEach(b=> b.onclick=()=>s5Switch(b.dataset.strat));
