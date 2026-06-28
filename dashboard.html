@@ -1656,11 +1656,19 @@ function s5BuildChartSwitch(pairs){
 }
 async function s5LoadGoInfo(){
   try{ const d=await s5api('/margin');
-    let real='';
-    if(d.real_blocked_rub!=null){
-      real=`<b style="color:var(--signal)">реально заблокировано сейчас: ${(d.real_blocked_rub).toLocaleString('ru')} ₽</b> (с хедж-скидкой биржи)<br>`;
+    // ТЕКУЩИЙ залог — реально заблокировано на счёте сейчас (0 ₽ если позиций нет / None при flat)
+    const blocked = d.real_blocked_rub!=null ? d.real_blocked_rub : 0;
+    const cur = `<b style="color:${blocked>0?'var(--warn)':'var(--ink)'}">текущий залог: ${blocked.toLocaleString('ru')} ₽</b>${blocked>0?'':' (позиций нет)'}<br>`;
+    // если позиции открыты — во сколько раз реальный залог отличается от ISS-оценки (обычно ВЫШЕ)
+    let ratio='';
+    if(blocked>0 && d.go_all_3pairs_10lots>0){
+      const k=(blocked/d.go_all_3pairs_10lots);
+      ratio=` <span style="color:var(--ink-faint)">(×${k.toFixed(1)} к ISS-оценке)</span>`;
     }
-    $('s5-go-info').innerHTML=`<b>залог (ГО) на счёте при ${d.lots} лот:</b><br>${real}расчётная оценка 3 пар при открытии: <b style="color:var(--ink)">${(d.go_all_3pairs_10lots).toLocaleString('ru')} ₽</b> (${d.go_pct_of_capital}% капитала)<br>на 1 лот: ${(d.go_per_1lot).toLocaleString('ru')} ₽ · капитал ${(d.capital_rub).toLocaleString('ru')} ₽ · <span style="color:${d.self_check_ok?'var(--signal)':'var(--loss)'}">${d.self_check_ok?'✓ хватает':'⚠ мало'}</span><br><span style="color:var(--ink-faint)">оценка = полное ГО обеих ног (верхняя граница); реально биржа даёт скидку на спред-пару обычка/преф</span>`;
+    $('s5-go-info').innerHTML=`<b>залог (ГО), ${d.lots} лот:</b><br>${cur.replace('<br>',ratio+'<br>')}`+
+      `расчётная оценка 3 пар (ISS): <b style="color:var(--ink)">${(d.go_all_3pairs_10lots).toLocaleString('ru')} ₽</b> (${d.go_pct_of_capital}% капитала)<br>`+
+      `капитал ${(d.capital_rub).toLocaleString('ru')} ₽ · <span style="color:${d.self_check_ok?'var(--signal)':'var(--loss)'}">${d.self_check_ok?'✓ хватает':'⚠ мало'}</span><br>`+
+      `<span style="color:var(--ink-faint)">⚠ ISS-оценка ЗАНИЖАЕТ реальный залог (биржа блокирует больше, наблюдалось ~×4.5). Точная нагрузка — «текущий залог» при открытых позициях.</span>`;
   }catch(e){ $('s5-go-info').textContent='ГО недоступно: '+e.message; }
 }
 let _s5dailyLoaded=false;
