@@ -534,7 +534,9 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
     <span class="sb-state" id="s5-sb-state">ST5 остановлен</span>
     <span class="sb-count" id="s5-sb-count"></span>
     <span class="sb-count" id="s5-sb-stale" style="display:none"></span>
+    <span class="sb-count" id="s5-sb-forts"></span>
     <span style="flex:1"></span>
+    <span class="sb-clock" id="s5-sb-clock">--:--:-- МСК</span>
     <span class="sb-count" id="s5-sb-pnl"></span>
   </div>
   <div class="wrap">
@@ -1050,6 +1052,10 @@ function s4Clock(){
     const ct=$('s4-sb-count'); if(ct) ct.textContent=s.count?('· '+s.count):'';
     const ck=$('s4-sb-clock'); if(ck) ck.textContent=`${m.hh}:${m.mm}:${m.ss} МСК`;
   }
+  // инфо-бар ST5: то же расписание FORTS (раньше было только в шапке st4)
+  const f=$('s5-sb-forts');
+  if(f){ f.textContent='· '+s.txt.replace(/^торги идут — /,'')+(s.count?' · '+s.count:''); f.style.color=s.color; }
+  const sck=$('s5-sb-clock'); if(sck) sck.textContent=`${m.hh}:${m.mm}:${m.ss} МСК`;
 }
 setInterval(s4Clock,1000); s4Clock();
 
