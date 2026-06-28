@@ -9,12 +9,17 @@ venv/
 build/
 dist/
 
-# рантайм-состояние сессий st4 (не коммитим)
+# рантайм-состояние сессий st4/st5 (не коммитим)
 session_state_4*.json
+session_state_5*.json
 
 # токен T-Bank (секрет, НИКОГДА не коммитить)
 .tbank_token
 app/st4/.tbank_token
+
+# токен Telegram-бота (секрет, НИКОГДА не коммитить)
+.tg_bot_token
+app/st5/.tg_bot_token
 
 # рантайм-артефакты (история бэктестов, скан-отчёты)
 out/

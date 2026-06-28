@@ -569,3 +569,182 @@ def test_normal_position_not_adopted():
     assert eng.position.adopted is False
     tr = eng._close(1700000600000, 0.1, 0.0, 100.0, 100.0, "exit")
     assert tr.adopted is False
+
+
+# ============================ Telegram-уведомления (st5) ============================
+
+def test_forts_schedule_session_kinds():
+    """forts_kind: сессии/клиринг/выходной по минуте дня и dow."""
+    from app.st5.forts_schedule import forts_kind
+    # будни (dow=3, среда)
+    assert forts_kind(9 * 60 + 30, 3) == "live"      # утренняя
+    assert forts_kind(12 * 60, 3) == "live"          # основная
+    assert forts_kind(14 * 60 + 2, 3) == "warn"      # дневной клиринг 14:00-14:05
+    assert forts_kind(15 * 60, 3) == "live"          # основная после клиринга
+    assert forts_kind(18 * 60 + 50, 3) == "warn"     # вечерний клиринг 18:45-19:05
+    assert forts_kind(20 * 60, 3) == "live"          # вечерняя
+    assert forts_kind(23 * 60 + 55, 3) == "closed"   # после 23:50
+    assert forts_kind(3 * 60, 3) == "closed"         # ночь
+    # выходные — всегда closed
+    assert forts_kind(12 * 60, 6) == "closed"        # суббота
+    assert forts_kind(12 * 60, 0) == "closed"        # воскресенье
+
+
+def test_forts_msk_minute_dow_known_ts():
+    """msk_minute_dow для известного UTC-времени: 2026-06-29 06:20 UTC = 09:20 МСК, понедельник."""
+    from app.st5.forts_schedule import msk_minute_dow, is_trading_day
+    import calendar
+    ts = calendar.timegm((2026, 6, 29, 6, 20, 0, 0, 0, 0))  # пн 06:20 UTC
+    minute, sec, dow = msk_minute_dow(ts)
+    assert minute == 9 * 60 + 20                     # 09:20 МСК
+    assert dow == 1                                  # понедельник (JS: вс=0)
+    assert is_trading_day(dow) is True
+
+
+def test_notifier_gated_off_when_disabled_or_no_token(monkeypatch):
+    """send() возвращает False без исключений, если выключено / нет токена / нет chat_id."""
+    import asyncio
+    from app.st5.config import St5NotifyConfig
+    from app.st5.notifier import TelegramNotifier
+    monkeypatch.delenv("TG_BOT_TOKEN", raising=False)
+    # выключено
+    n = TelegramNotifier(cfg_cb=lambda: St5NotifyConfig(enabled=False, chat_id="1"))
+    assert asyncio.run(n.send("hi")) is False
+    # включено, но нет токена
+    n2 = TelegramNotifier(cfg_cb=lambda: St5NotifyConfig(enabled=True, chat_id="1"))
+    assert asyncio.run(n2.send("hi")) is False
+    # включено, токен есть, но нет chat_id
+    monkeypatch.setenv("TG_BOT_TOKEN", "xxx")
+    n3 = TelegramNotifier(cfg_cb=lambda: St5NotifyConfig(enabled=True, chat_id=""))
+    assert asyncio.run(n3.send("hi")) is False
+
+
+def test_notifier_swallows_network_error(monkeypatch):
+    """Сетевая ошибка httpx → send() == False + on_error вызван (торговый цикл не падает)."""
+    import asyncio
+    from app.st5.config import St5NotifyConfig
+    from app.st5 import notifier as tg
+    monkeypatch.setenv("TG_BOT_TOKEN", "xxx")
+    errs = []
+
+    class _Boom:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, *a, **k): raise RuntimeError("network down")
+
+    monkeypatch.setattr(tg.httpx, "AsyncClient", lambda *a, **k: _Boom())
+    n = tg.TelegramNotifier(cfg_cb=lambda: St5NotifyConfig(enabled=True, chat_id="1"),
+                            on_error=errs.append)
+    assert asyncio.run(n.send("hi")) is False
+    assert errs and "не удалась" in errs[0]
+
+
+def test_notifier_esc_html():
+    from app.st5.notifier import esc
+    assert esc("a<b>&c") == "a&lt;b&gt;&amp;c"
+
+
+def test_bot_token_save_load_has(tmp_path, monkeypatch):
+    """save/load/has токена бота: файл 0600 + env, has не раскрывает секрет."""
+    from app.st5 import notifier as tg
+    monkeypatch.delenv("TG_BOT_TOKEN", raising=False)
+    monkeypatch.setattr(tg, "_TOKEN_FILE", tmp_path / ".tg_bot_token")
+    assert tg.has_bot_token() is False
+    tg.save_bot_token("secret123")
+    assert tg.has_bot_token() is True
+    assert (tmp_path / ".tg_bot_token").read_text() == "secret123"
+    assert oct((tmp_path / ".tg_bot_token").stat().st_mode)[-3:] == "600"
+    # load из файла в чистый env
+    monkeypatch.delenv("TG_BOT_TOKEN", raising=False)
+    assert tg.load_bot_token() is True
+    import os
+    assert os.environ["TG_BOT_TOKEN"] == "secret123"
+    tg.save_bot_token("")   # очистка
+    assert tg.has_bot_token() is False
+
+
+def test_notify_config_persists_round_trip(tmp_path):
+    """cfg.notify сериализуется в session-файл и восстанавливается (токен — НЕ в файле)."""
+    import json
+    from app.st5.service import St5Session
+    s = St5Session()
+    s._session_file = tmp_path / "session_state_5.json"
+    s.cfg.notify.enabled = True
+    s.cfg.notify.chat_id = "12345"
+    s.cfg.notify.before_open_min = 7
+    s.save_session()
+    raw = json.loads(s._session_file.read_text())
+    assert raw["config"]["notify"]["chat_id"] == "12345"
+    assert "tg_bot_token" not in json.dumps(raw)   # секрет не утёк в файл
+    s2 = St5Session()
+    s2._session_file = s._session_file
+    s2.load_session()
+    assert s2.cfg.notify.enabled is True
+    assert s2.cfg.notify.chat_id == "12345"
+    assert s2.cfg.notify.before_open_min == 7
+
+
+def test_schedule_tick_before_open_once(monkeypatch):
+    """_schedule_tick шлёт напоминание об открытии один раз в окне до 09:00, не на выходных."""
+    import calendar
+    from app.st5.service import St5Session
+    s = St5Session()
+    s.state["data_source"] = "live"
+    s.cfg.notify.enabled = True
+    s.cfg.notify.before_open_min = 10
+    sent = []
+    monkeypatch.setattr(s, "_notify", lambda t: sent.append(t))
+    # пн 05:52 UTC = 08:52 МСК (в окне 08:50-09:00)
+    ts = calendar.timegm((2026, 6, 29, 5, 52, 0, 0, 0, 0))
+    s._schedule_tick(ts)
+    s._schedule_tick(ts + 60)   # повтор в том же окне/дне — не дублирует
+    assert sum(1 for m in sent if "открывается" in m) == 1
+    # суббота в том же окне — молчит
+    sent.clear()
+    s._sched_open_sent = None
+    sat = calendar.timegm((2026, 6, 27, 5, 52, 0, 0, 0, 0))
+    s._schedule_tick(sat)
+    assert not sent
+
+
+def test_schedule_tick_daily_summary_on_close(monkeypatch):
+    """Переход live→closed (конец вечерней сессии) шлёт дневную сводку один раз."""
+    import calendar
+    from app.st5.service import St5Session
+    s = St5Session()
+    s.state["data_source"] = "live"
+    s.cfg.notify.enabled = True
+    sent = []
+    monkeypatch.setattr(s, "_notify", lambda t: sent.append(t))
+    # пн 20:00 МСК (17:00 UTC) — вечерняя сессия live
+    s._schedule_tick(calendar.timegm((2026, 6, 29, 17, 0, 0, 0, 0, 0)))
+    assert not [m for m in sent if "Итоги дня" in m]
+    # пн 23:55 МСК (20:55 UTC) — закрыто → сводка
+    s._schedule_tick(calendar.timegm((2026, 6, 29, 20, 55, 0, 0, 0, 0)))
+    assert len([m for m in sent if "Итоги дня" in m]) == 1
+    # повторный тик в closed — не дублирует
+    s._schedule_tick(calendar.timegm((2026, 6, 29, 20, 56, 0, 0, 0, 0)))
+    assert len([m for m in sent if "Итоги дня" in m]) == 1
+
+
+def test_daily_summary_filters_today(monkeypatch):
+    """_daily_summary_text считает P&L только по сегодняшним сделкам (по exit_ts МСК)."""
+    import calendar
+    from app.st5 import service as svc
+    from app.st5.service import St5Session
+    s = St5Session()
+    # фиксируем «сейчас» = пн 2026-06-29 12:00 МСК (09:00 UTC)
+    now = calendar.timegm((2026, 6, 29, 9, 0, 0, 0, 0, 0))
+    monkeypatch.setattr(svc.time, "time", lambda: now)
+    today_ms = now * 1000
+    yest_ms = today_ms - 24 * 3600 * 1000
+    s.trades = [
+        {"exit_ts": yest_ms, "net_pnl_rub": 1000},        # вчера — игнор
+        {"exit_ts": today_ms, "net_pnl_rub": 500},        # сегодня +
+        {"exit_ts": today_ms + 3600 * 1000, "net_pnl_rub": -200},  # сегодня −
+    ]
+    txt = s._daily_summary_text()
+    assert "Итоги дня" in txt
+    assert "Сделок: 2" in txt          # только 2 сегодняшние
+    assert "+300 ₽" in txt             # 500 − 200, вчерашние 1000 не учтены
+    assert "win-rate 50%" in txt       # 1 из 2

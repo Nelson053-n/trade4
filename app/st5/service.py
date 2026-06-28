@@ -14,6 +14,8 @@ from pathlib import Path
 
 from ..st4 import data_feed as feed
 from ..st4.models import Role
+from . import forts_schedule as sched
+from . import notifier as tg
 from .config import St5Config
 from .engine import ST5Engine
 from .models import St5Position, St5State
@@ -205,6 +207,13 @@ class St5Session:
         self._uid_cache: dict[str, tuple] = {}   # pid -> (uid_ord, uid_pref): кэш против 429 T-Bank
         self._legs_cache: dict[str, tuple] = {}  # pid -> (spec_ord, spec_pref) от resolve_legs
         self._reconciled: set[str] = set()       # пары, по которым сверка со счётом уже сделана
+        # Telegram-уведомления (только исходящие). Конфиг читается лениво из cfg.notify.
+        self.notifier = tg.TelegramNotifier(
+            cfg_cb=lambda: self.cfg.notify,
+            on_error=lambda m: self.log_event("warn", m))
+        self._sched_open_sent: str | None = None   # дата (МСК) уже отправленного напоминания об открытии
+        self._sched_summary_sent: str | None = None  # дата уже отправленной дневной сводки
+        self._sched_last_kind: str | None = None   # пред. состояние сессии (для детекции закрытия)
 
     def _pair_cfg(self, pid: str) -> St5Config:
         """Конфиг пары = базовый ST5 + per-pair оверрайды StrategyConfig из ST5_PAIRS[pid][4]."""
@@ -215,6 +224,17 @@ class St5Session:
                 if hasattr(c.strategy, k):
                     setattr(c.strategy, k, v)
         return c
+
+    # ---------- Telegram ----------
+    def _notify(self, text: str) -> None:
+        """Fire-and-forget отправка в Telegram. Только в live (на синтетике не спамим).
+        Синхронный вызов из async-цикла → create_task; вне loop (тесты/CLI) — тихо пропускаем."""
+        if self.state["data_source"] != "live":
+            return
+        try:
+            asyncio.create_task(self.notifier.send(text))
+        except RuntimeError:
+            pass   # нет running loop (sync-тест) — уведомление не критично
 
     # ---------- журнал событий ----------
     def log_event(self, kind: str, message: str) -> None:
@@ -281,6 +301,8 @@ class St5Session:
             "limits": {"per_trade_pct": self.cfg.risk.risk_per_trade_pct,
                        "per_pair_pct": self.cfg.risk.risk_per_pair_pct,
                        "per_portfolio_pct": self.cfg.risk.risk_per_portfolio_pct},
+            "notify": self.cfg.notify.model_dump(),      # настройки Telegram (без токена)
+            "tg_set": tg.has_bot_token(),                # установлен ли токен бота (булев, не секрет)
         }
 
     # ---------- персистентность ----------
@@ -383,6 +405,13 @@ class St5Session:
         # восстановить коннектор (режим/счёт) — иначе после рестарта скатывался на paper
         self.cfg.connector.mode = data.get("connector_mode", self.cfg.connector.mode)
         self.cfg.connector.account_id = data.get("account_id", self.cfg.connector.account_id)
+        # настройки Telegram (chat_id/флаги) переживают рестарт; токен бота — НЕ здесь (env/файл)
+        nd = (data.get("config") or {}).get("notify")
+        if isinstance(nd, dict):
+            try:
+                self.cfg.notify = type(self.cfg.notify)(**nd)
+            except Exception:  # noqa: BLE001  битая запись не должна ронять старт
+                pass
         self.state["sandbox_active"] = bool(data.get("sandbox_active", False))
         # авто-возобновление live, если шёл до рестарта (lifespan стартует _st5_autoresume)
         self.state["resume_live"] = bool(data.get("live", False))
@@ -542,6 +571,7 @@ class St5Session:
         replayed = False
         while self.state["live"]:
             try:
+                self._schedule_tick()
                 if self.state.get("sandbox_active"):
                     # в отдельном потоке: refresh_capital делает блокирующий HTTP к T-Bank
                     # (urlopen до 180с с ретраями) — синхронный вызов морозил весь event loop
@@ -559,6 +589,51 @@ class St5Session:
             except Exception as e:  # noqa: BLE001
                 self.log_event("warn", f"ST5 live ошибка: {e}")
             await asyncio.sleep(self.cfg.poll_seconds)
+
+    # ---------- планировщик уведомлений об открытии/закрытии биржи ----------
+    def _schedule_tick(self, ts_sec: float | None = None) -> None:
+        """Раз за проход run_live: детектит окно «до открытия» и закрытие сессии, шлёт уведомления.
+        Идемпотентно по дате (одно напоминание/сводка в день). Только в live."""
+        if self.state["data_source"] != "live":
+            return
+        minute, _sec, dow = sched.msk_minute_dow(ts_sec)
+        date_key = time.strftime("%Y-%m-%d", time.gmtime((ts_sec or time.time()) + 3 * 3600))
+        kind = sched.forts_kind(minute, dow)
+
+        # напоминание за before_open_min до открытия (09:00) в будний день, один раз в день
+        n = self.cfg.notify
+        if n.notify_before_open and sched.is_trading_day(dow):
+            win_start = sched.OPEN_MIN - max(1, n.before_open_min)
+            if win_start <= minute < sched.OPEN_MIN and self._sched_open_sent != date_key:
+                self._sched_open_sent = date_key
+                self._notify(f"🔔 <b>Биржа открывается через ~{n.before_open_min} мин</b> (09:00 МСК)\n"
+                             f"Открытых позиций: {self._open_count()} · режим {tg.esc(self.cfg.connector.mode)}")
+
+        # дневная сводка при переходе сессия→закрыто (конец вечерней сессии), один раз в день
+        prev = self._sched_last_kind
+        if (n.daily_summary and prev in ("live", "warn") and kind == "closed"
+                and self._sched_summary_sent != date_key):
+            self._sched_summary_sent = date_key
+            self._notify(self._daily_summary_text())
+        self._sched_last_kind = kind
+
+    def _open_count(self) -> int:
+        return sum(1 for e in self.engines.values() if e.position is not None)
+
+    def _daily_summary_text(self) -> str:
+        """Сводка за сегодня (МСК): P&L, число сделок, win-rate, открытые позиции."""
+        today = time.strftime("%Y-%m-%d", time.gmtime(time.time() + 3 * 3600))
+        todays = [t for t in self.trades
+                  if time.strftime("%Y-%m-%d", time.gmtime(t.get("exit_ts", 0) / 1000 + 3 * 3600)) == today]
+        n_tr = len(todays)
+        net = sum(t.get("net_pnl_rub", 0) for t in todays)
+        wins = sum(1 for t in todays if t.get("net_pnl_rub", 0) > 0)
+        wr = (wins / n_tr * 100) if n_tr else 0.0
+        open_n = self._open_count()
+        return (f"🟦 <b>Итоги дня</b> · {today}\n"
+                f"Сделок: {n_tr} · win-rate {wr:.0f}%\n"
+                f"P&amp;L за день: <b>{net:+.0f} ₽</b>\n"
+                f"Открытых позиций (перенос): {open_n}")
 
     async def _step_pair(self, pid: str, eng, warmup_limit: int, replayed: bool) -> None:
         """Один проход по паре: тянем свежие бары, прогоняем движок, исполняем сделки.
@@ -650,8 +725,15 @@ class St5Session:
                 self.portfolio.on_error()
                 self.portfolio.halt_pair(pid, f"вход не исполнен: {e}")
                 self.log_event("warn", f"{pid}: вход в брокере не удался: {e}")
+                if self.cfg.notify.notify_errors:
+                    self._notify(f"⚠️ <b>Вход не исполнен</b> · {tg.esc(_P[pid][3])}\n{tg.esc(e)}")
                 return
         self.log_event("position", f"{pid}: вход {p.state.value} z={p.entry_z:+.2f} lots={p.lots}")
+        if self.cfg.notify.notify_entry:
+            label = _P[pid][3]
+            dir_txt = "LONG спред" if p.state == St5State.LONG_SPREAD else "SHORT спред"
+            self._notify(f"🟢 <b>Вход</b> · {tg.esc(label)}\n{dir_txt} · z={p.entry_z:+.2f} · "
+                         f"{p.lots} лот · {tg.esc(self.cfg.connector.mode)}")
         self.save_session()   # немедленный персист: рестарт между открытием и концом прохода НЕ потеряет позицию
 
     def _on_engine_trade(self, pid: str, eng, tr, ord_px: float, pref_px: float) -> None:
@@ -667,6 +749,9 @@ class St5Session:
                 self.portfolio.on_error()
                 self.portfolio.halt_pair(pid, f"выход не исполнен: {e}")
                 self.log_event("warn", f"{pid}: выход в брокере не удался: {e}")
+                if self.cfg.notify.notify_errors:
+                    from .service import ST5_PAIRS as _P
+                    self._notify(f"⚠️ <b>Выход не исполнен</b> · {tg.esc(_P[pid][3])}\n{tg.esc(e)}")
         self.portfolio.on_trade(tr.net_pnl_rub)
         rec = {"pair": pid, "state": tr.state.value, "entry_ts": tr.entry_ts, "exit_ts": tr.exit_ts,
                "entry_z": tr.entry_z, "exit_z": tr.exit_z, "lots": tr.lots,
@@ -675,4 +760,12 @@ class St5Session:
                "adopted": tr.adopted}
         self.trades.append(rec)
         self.log_event("exit", f"{pid}: {tr.reason} net {tr.net_pnl_rub:+.0f}₽ ({tr.lots}лот)")
+        if self.cfg.notify.notify_exit:
+            from .service import ST5_PAIRS as _P
+            label = _P[pid][3]
+            icon = "🔴" if tr.reason != "take_partial" else "🟡"
+            head = "Частичная фиксация" if tr.reason == "take_partial" else "Выход"
+            self._notify(f"{icon} <b>{head}</b> · {tg.esc(label)}\n{tg.esc(tr.reason)} · "
+                         f"net {tr.net_pnl_rub:+.0f} ₽ (комиссия {tr.fees_rub:.0f} ₽) · "
+                         f"{tr.lots} лот · {tr.bars_held} баров")
         self.save_session()   # немедленный персист закрытия/частичной фиксации (позиция + журнал)

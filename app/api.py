@@ -210,6 +210,8 @@ async def lifespan(app: FastAPI):
     _server_started = _time.time()
     from .st4 import tbank_sandbox as _sb
     _sb.load_token()                  # подтянуть сохранённый токен T-Bank (переживает рестарт)
+    from .st5 import notifier as _tg
+    _tg.load_bot_token()              # подтянуть токен Telegram-бота (переживает рестарт)
     for s4 in ST4S.values():
         s4.load_session()
         if s4.state.pop("resume_live", False):
@@ -428,6 +430,36 @@ def st5_trading(on: bool = True):
     ST5.cfg.risk.trading_enabled = on
     ST5.log_event("info", f"торговля {'включена' if on else 'выключена'}")
     return {"ok": True, "trading_enabled": on}
+
+
+@app.post("/st5/telegram")
+def st5_telegram(payload: dict):
+    """Настройки Telegram-уведомлений + (опц.) токен бота. Наружу токен НЕ отдаём (только tg_set).
+
+    payload: enabled, chat_id, notify_entry/exit/errors/before_open, before_open_min,
+    daily_summary — любые подмножества; "token" (опц.) сохраняется в env+файл (.tg_bot_token)."""
+    from .st5 import notifier as _tg
+    n = ST5.cfg.notify
+    if "token" in payload:                      # секрет — отдельно, в файл/env, не в config
+        _tg.save_bot_token(str(payload["token"]).strip())
+    for k in ("enabled", "notify_entry", "notify_exit", "notify_errors",
+              "notify_before_open", "daily_summary"):
+        if k in payload:
+            setattr(n, k, bool(payload[k]))
+    if "chat_id" in payload:
+        n.chat_id = str(payload["chat_id"]).strip()
+    if "before_open_min" in payload:
+        n.before_open_min = max(1, min(60, int(payload["before_open_min"])))
+    ST5.save_session()
+    ST5.log_event("info", "Telegram-уведомления настроены")
+    return {"ok": True, "notify": n.model_dump(), "tg_set": _tg.has_bot_token()}
+
+
+@app.post("/st5/telegram/test")
+async def st5_telegram_test():
+    """Отправить тестовое сообщение (проверка токена/chat_id). Игнорирует флаг data_source."""
+    ok = await ST5.notifier.send("✅ <b>trade4</b> · тестовое уведомление ST5")
+    return {"ok": ok}
 
 
 @app.post("/st5/control/resume")

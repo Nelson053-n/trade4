@@ -666,6 +666,22 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
         <div id="s5-conn-msg" style="font-size:12px;margin-top:6px;color:var(--ink-dim)"></div>
       </div>
       <div class="card">
+        <h2>Уведомления Telegram <span class="em" id="s5-tg-sub"></span></h2>
+        <div class="params" style="grid-template-columns:1fr;margin-bottom:11px">
+          <div class="fld"><label>токен бота</label><input id="s5-tg-token" type="password" placeholder="123456:ABC... (BotFather)"></div>
+          <div class="fld"><label>chat_id</label><input id="s5-tg-chat" placeholder="ваш Telegram chat_id"></div>
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px"><input type="checkbox" id="s5-tg-enabled"> включить уведомления</label>
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px"><input type="checkbox" id="s5-tg-entry"> входы в позицию</label>
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px"><input type="checkbox" id="s5-tg-exit"> выходы (с P&L)</label>
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px"><input type="checkbox" id="s5-tg-errors"> ошибки исполнения</label>
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px"><input type="checkbox" id="s5-tg-open"> напоминание до открытия биржи</label>
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px"><input type="checkbox" id="s5-tg-summary"> дневная сводка при закрытии</label>
+        </div>
+        <button class="btn primary" id="s5-btn-tg">сохранить</button>
+        <button class="btn" id="s5-btn-tg-test">тест</button>
+        <div id="s5-tg-msg" style="font-size:12px;margin-top:6px;color:var(--ink-dim)"></div>
+      </div>
+      <div class="card">
         <h2>Доходность по инструментам <span class="em" id="s5-wk-sub">зафиксированная прибыль по дням (журнал live-сделок)</span></h2>
         <div id="s5-wk-wrap" style="margin-top:8px"><div class="empty" style="font-size:12px">пока нет зафиксированных сделок</div></div>
       </div>
@@ -1536,6 +1552,16 @@ function s5Render(s){
   if(document.activeElement!==$('s5-trading')) $('s5-trading').checked=s.trading_enabled;
   $('s5-halt-msg').textContent = s.halted?('⚠ '+s.halt_reason):'';
   const cm=$('s5-conn-mode'); if(document.activeElement!==cm) cm.value=s.connector_mode;
+  // настройки Telegram (не перетираем пока пользователь редактирует поле)
+  const n=s.notify; if(n){
+    const setChk=(id,v)=>{ const e=$(id); if(e&&document.activeElement!==e) e.checked=!!v; };
+    setChk('s5-tg-enabled',n.enabled); setChk('s5-tg-entry',n.notify_entry);
+    setChk('s5-tg-exit',n.notify_exit); setChk('s5-tg-errors',n.notify_errors);
+    setChk('s5-tg-open',n.notify_before_open); setChk('s5-tg-summary',n.daily_summary);
+    if(document.activeElement!==$('s5-tg-chat')) $('s5-tg-chat').value=n.chat_id||'';
+    $('s5-tg-token').placeholder = s.tg_set ? 'токен установлен (ввести заново для замены)' : '123456:ABC... (BotFather)';
+    $('s5-tg-sub').textContent = (s.tg_set?'токен ✓':'токен не задан') + (n.enabled?' · вкл':' · выкл');
+  }
   // боевой взвод — строка в карточке управления, видна только в режиме tbank_real
   $('s5-real-arm-row').style.display = s.connector_mode==='tbank_real'?'flex':'none';
   if(document.activeElement!==$('s5-real-arm')) $('s5-real-arm').checked=s.real_trading_armed;
@@ -1791,6 +1817,22 @@ function s5Init(){
     if(mode==='tbank_real'){ const a=$('s5-conn-account').value.trim(); if(a)body.account_id=a; }
     try{ const d=await s5api('/connector','POST',body); $('s5-conn-token').value=''; $('s5-conn-msg').textContent='режим: '+d.connector_mode+(d.token_set?' · токен ✓':''); s5Poll(); }
     catch(e){ $('s5-conn-msg').textContent='ошибка: '+e.message; }
+  };
+  $('s5-btn-tg').onclick=async()=>{
+    const body={
+      enabled:$('s5-tg-enabled').checked, notify_entry:$('s5-tg-entry').checked,
+      notify_exit:$('s5-tg-exit').checked, notify_errors:$('s5-tg-errors').checked,
+      notify_before_open:$('s5-tg-open').checked, daily_summary:$('s5-tg-summary').checked,
+      chat_id:$('s5-tg-chat').value.trim() };
+    const tok=$('s5-tg-token').value.trim(); if(tok) body.token=tok;
+    try{ const d=await s5api('/telegram','POST',body); $('s5-tg-token').value='';
+      $('s5-tg-msg').textContent='сохранено'+(d.tg_set?' · токен ✓':' · токен не задан'); s5Poll(); }
+    catch(e){ $('s5-tg-msg').textContent='ошибка: '+e.message; }
+  };
+  $('s5-btn-tg-test').onclick=async()=>{
+    $('s5-tg-msg').textContent='отправка…';
+    try{ const d=await s5api('/telegram/test','POST'); $('s5-tg-msg').textContent=d.ok?'тест отправлен ✓':'не отправлено (проверьте токен/chat_id/включение)'; }
+    catch(e){ $('s5-tg-msg').textContent='ошибка: '+e.message; }
   };
   $('s5-real-arm').onchange=async()=>{
     const armed=$('s5-real-arm').checked;

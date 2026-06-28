@@ -93,6 +93,18 @@ class St5RiskConfig(BaseModel):
     trading_enabled: bool = True
 
 
+class St5NotifyConfig(BaseModel):
+    """Telegram-уведомления (только исходящие). Токен бота — НЕ здесь (env/файл .tg_bot_token)."""
+    enabled: bool = False
+    chat_id: str = ""                        # ID чата/пользователя для отправки
+    notify_entry: bool = True                # вход в позицию
+    notify_exit: bool = True                 # выход/частичная фиксация (с P&L)
+    notify_errors: bool = True               # ошибки исполнения/коннектора
+    notify_before_open: bool = True          # напоминание за before_open_min до открытия биржи
+    before_open_min: int = 10
+    daily_summary: bool = True               # дневная сводка при закрытии вечерней сессии
+
+
 class St5Config(BaseModel):
     """Полный конфиг ST5: стратегия + портфельный риск + общая инфраструктура (исполнение/коннектор)."""
     instruments: InstrumentsConfig = InstrumentsConfig()
@@ -102,5 +114,6 @@ class St5Config(BaseModel):
     session: SessionConfig = SessionConfig()
     paper: Paper = Paper()
     connector: ConnectorConfig = ConnectorConfig()
+    notify: St5NotifyConfig = St5NotifyConfig()
     auto_approve: bool = True                # statarb — авто-исполнение (ручной approve не нужен)
     poll_seconds: float = 15.0               # бар раз в 10 мин → частый опрос не нужен (+rate-limit)
