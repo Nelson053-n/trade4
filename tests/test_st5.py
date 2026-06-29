@@ -390,6 +390,23 @@ def test_trade_limit_uses_go_factor():
     assert not ok2 and "сделк" in reason
 
 
+def test_go_factor_persists_round_trip(tmp_path):
+    """go_factor переживает рестарт (был дырой: сбрасывался в 1.0 → первый вход при flat
+    гейтился по заниженному ISS-ГО). real_blocked_rub НЕ персистим (текущее заблокированное,
+    при flat=0)."""
+    from app.st5.service import St5Session
+    s = St5Session()
+    s._session_file = tmp_path / "session_state_5.json"
+    s.portfolio.go_factor = 4.5
+    s.portfolio.real_blocked_rub = 45000.0
+    s.save_session()
+    s2 = St5Session()
+    s2._session_file = s._session_file
+    s2.load_session()
+    assert abs(s2.portfolio.go_factor - 4.5) < 1e-9        # восстановлен
+    assert s2.portfolio.real_blocked_rub == 0.0           # НЕ персистится (обновится в refresh_capital)
+
+
 def test_portfolio_limit_uses_real_blocked():
     """Портфельный лимит считается от РЕАЛЬНО заблокированного (факт), а не суммы ISS-оценок.
     Лимит 5% от 1М = 50000. real_blocked=45000, кандидат (оценка 2000×factor1=2000) →

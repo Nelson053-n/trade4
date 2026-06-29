@@ -315,6 +315,11 @@ class St5Session:
                 "history": self.history,
                 "day_pnl_rub": self.portfolio.day_pnl_rub,
                 "capital_rub": self.portfolio.capital_rub,
+                # go_factor — эмпирическая поправка ISS→реальное ГО (~4.5), стабильна между
+                # сессиями. Персистим, иначе после рестарта при flat первый вход гейтится по
+                # ЗАНИЖЕННОЙ ISS-оценке (go_factor=1.0). real_blocked НЕ персистим (текущее
+                # заблокированное; при flat=0, обновляется в refresh_capital).
+                "go_factor": self.portfolio.go_factor,
                 "live": self.state["live"],
                 "paused_by_user": self.state["paused_by_user"],
                 "data_source": self.state["data_source"],
@@ -398,6 +403,10 @@ class St5Session:
         self.history = data.get("history", {pid: [] for pid in ST5_PAIRS})
         self.portfolio.day_pnl_rub = data.get("day_pnl_rub", 0.0)
         self.portfolio.capital_rub = data.get("capital_rub", self.cfg.paper.start_balance_rub)
+        # go_factor переживает рестарт (иначе первый вход при flat — по заниженному ISS-ГО).
+        # Защита: фактор должен быть >0; иначе дефолт 1.0 (битая запись не должна обнулить риск-гейт).
+        gf = data.get("go_factor", 1.0)
+        self.portfolio.go_factor = gf if isinstance(gf, (int, float)) and gf > 0 else 1.0
         self.state["data_source"] = data.get("data_source", "synthetic")
         self.last_live_ts = data.get("last_live_ts", {pid: 0 for pid in ST5_PAIRS})
         en = data.get("enabled_pairs") or {}
