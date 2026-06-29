@@ -1035,6 +1035,106 @@ def st5_calibrate_apply(pair: str = "sber", confirm: bool = False):
     return {"ok": True, "applied": params}
 
 
+# ---------- версионирование стратегии (сохранение/откат per-pair параметров) ----------
+
+def _st5_backtest_overrides(overrides: dict, days: int = 90) -> dict:
+    """Бэктест per-pair параметров (overrides {pid: {param}}) на ISS за days дней + split-half.
+    Возвращает {pid: {net,win,sharpe,trades, h1_net,h2_net}} — метрики для приложения к стратегии."""
+    from .st5.service import ST5_PAIRS, St5Session
+    from .st4.config import St4Config as _C4
+    from .st4 import data_feed as _feed
+    from .st5.backtest import run_backtest
+
+    def _pcfg(pid):
+        # конфиг пары с НАЛОЖЕННЫМ оверрайдом (как сделает apply_overrides), не трогая живой ST5
+        tmp = St5Session()
+        if overrides.get(pid):
+            tmp.pair_overrides[pid] = {k: v for k, v in overrides[pid].items()
+                                       if k in St5Session.OVERRIDE_KEYS}
+        return tmp._pair_cfg(pid)
+
+    out: dict = {}
+    for pid in ST5_PAIRS:
+        ao, ap = ST5_PAIRS[pid][0], ST5_PAIRS[pid][1]
+        c4 = _C4(); c4.instruments.asset_ordinary = ao; c4.instruments.asset_preferred = ap
+        c4.strategy.candle_interval_minutes = ST5.cfg.strategy.candle_interval_minutes
+        try:
+            so, sp = _feed.resolve_legs(c4)
+            since = _dt.fromtimestamp(_dt.now(_tz.utc).timestamp() - days * 86400, tz=_tz.utc)
+            df = _feed.read_ohlcv_moex_range(c4, since, so.code, sp.code)
+        except Exception as e:  # noqa: BLE001
+            out[pid] = {"error": f"данные недоступны: {e}"}
+            continue
+        if len(df) < 600:
+            out[pid] = {"error": f"мало баров: {len(df)}"}
+            continue
+        cfg = _pcfg(pid)
+        lots = ST5.cfg.execution.quantity_lots
+        m = run_backtest(df, cfg, pair=pid, base_lots=lots, fee_per_lot=2.0, half_spread_pts=0.5)
+        # split-half: устойчивость (выигрыш не в одной половине, а в обеих)
+        mid = len(df) // 2
+        h1 = run_backtest(df.iloc[:mid], cfg, pair=pid, base_lots=lots, fee_per_lot=2.0, half_spread_pts=0.5)
+        h2 = run_backtest(df.iloc[mid:], cfg, pair=pid, base_lots=lots, fee_per_lot=2.0, half_spread_pts=0.5)
+        out[pid] = {
+            "net": round(m.net_pnl_rub, 0), "win": round(m.win_rate_pct, 0),
+            "sharpe": round(m.sharpe, 2), "trades": m.trades, "bars": m.bars,
+            "h1_net": round(h1.net_pnl_rub, 0), "h2_net": round(h2.net_pnl_rub, 0),
+            "stable": bool(h1.net_pnl_rub > 0 and h2.net_pnl_rub > 0),
+        }
+    return out
+
+
+@app.get("/st5/strategies")
+def st5_strategies_list():
+    """Список сохранённых версий стратегии (новые сверху) + текущие действующие параметры."""
+    from .st5 import strategy_store as store
+    return _clean({"current": ST5.capture_current(),
+                   "overrides": ST5.pair_overrides,
+                   "strategies": store.list_strategies()})
+
+
+@app.post("/st5/strategies/save")
+async def st5_strategies_save(payload: dict):
+    """Снять ТЕКУЩИЕ действующие параметры + посчитать бэктест (90д ISS + split-half) → файл.
+    payload: {name, note, params?(опц. — иначе берём действующие)}."""
+    from .st5 import strategy_store as store
+    name = (payload.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "нужно имя стратегии (name)")
+    params = payload.get("params") or ST5.capture_current()
+    bt = await asyncio.to_thread(_st5_backtest_overrides, params, 90)
+    sid = store.save_strategy(name=name, params=params, backtest=_clean(bt),
+                              window="90д ISS (split-half)", note=(payload.get("note") or ""),
+                              source=payload.get("source") or "manual")
+    ST5.log_event("info", f"стратегия сохранена: {name} ({sid})")
+    return _clean({"ok": True, "id": sid, "backtest": bt})
+
+
+@app.post("/st5/strategies/apply")
+def st5_strategies_apply(payload: dict):
+    """Применить сохранённую стратегию (откат/смена) к живым движкам. Требует confirm и flat.
+    payload: {id, confirm}."""
+    from .st5 import strategy_store as store
+    if not payload.get("confirm"):
+        raise HTTPException(400, "нужно подтверждение: confirm=true")
+    rec = store.load_strategy(payload.get("id") or "")
+    if rec is None:
+        raise HTTPException(404, "стратегия не найдена")
+    ok, reason = ST5.apply_overrides(rec.get("params") or {})
+    if not ok:
+        raise HTTPException(409, reason)
+    ST5.log_event("warn", f"применена стратегия «{rec['name']}» ({rec['id']})")
+    return {"ok": True, "applied": rec["id"], "name": rec["name"], "params": ST5.capture_current()}
+
+
+@app.post("/st5/strategies/backtest")
+async def st5_strategies_backtest(payload: dict | None = None):
+    """Прогнать бэктест действующих (или переданных) параметров без сохранения — превью для UI."""
+    params = (payload or {}).get("params") or ST5.capture_current()
+    bt = await asyncio.to_thread(_st5_backtest_overrides, params, (payload or {}).get("days", 90))
+    return _clean({"params": params, "backtest": bt})
+
+
 @app.post("/st5/connector")
 def st5_connector(payload: dict):
     """Режим исполнителя st5: paper | tbank_sandbox | tbank_real (+account_id для real)."""

@@ -614,6 +614,19 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
         </div>
       </div>
       <div class="card">
+        <h2>Параметры стратегии <span class="em" id="s5-strat-sub">сохранение / откат версий</span></h2>
+        <div id="s5-strat-current" style="font-size:12px;margin-bottom:8px"></div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;align-items:center">
+          <input id="s5-strat-name" placeholder="название версии" style="flex:1;min-width:140px;background:var(--panel-2);border:1px solid var(--line);border-radius:6px;color:var(--ink);padding:5px 8px;font-size:12px">
+          <input id="s5-strat-note" placeholder="заметка (необяз.)" style="flex:1;min-width:140px;background:var(--panel-2);border:1px solid var(--line);border-radius:6px;color:var(--ink);padding:5px 8px;font-size:12px">
+          <button class="btn primary" id="s5-btn-strat-save">💾 сохранить текущую</button>
+        </div>
+        <div id="s5-strat-msg" style="font-size:12px;margin-bottom:8px"></div>
+        <div class="tblwrap" style="max-height:320px">
+          <table id="s5-strat-list"><thead><tr><th>дата</th><th>версия</th><th>параметры (z_exit по парам)</th><th>бэктест 90д (net / win)</th><th>устойч.</th><th></th></tr></thead><tbody><tr><td colspan="6" class="empty">сохранённых версий пока нет</td></tr></tbody></table>
+        </div>
+      </div>
+      <div class="card">
         <h2>Бэктест / калибровка <a href="/strategy5.md" target="_blank" rel="noopener" style="float:right;font-size:11px;font-weight:400;color:var(--ink-dim);text-decoration:none;border:1px solid var(--line);border-radius:6px;padding:3px 8px">📄 стратегия ST5</a></h2>
         <div class="params" style="grid-template-columns:1fr;margin-bottom:11px"><div class="fld"><label>пара</label><select id="s5-bt-pair"><option value="sber">Сбербанк</option><option value="sngr">Сургут</option><option value="tatn">Татнефть</option></select></div></div>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
@@ -1497,7 +1510,7 @@ function s5Switch(strat){
   });
   $('tab-st4').hidden = strat!=='st4';
   $('tab-st5').hidden = strat!=='st5';
-  if(strat==='st5'){ s5Poll(); s5LoadWeekly(); if(!_s5dailyLoaded){ _s5dailyLoaded=true; s5LoadDaily(); s5LoadGoInfo(); } }
+  if(strat==='st5'){ s5Poll(); s5LoadWeekly(); s5LoadStrategies(); if(!_s5dailyLoaded){ _s5dailyLoaded=true; s5LoadDaily(); s5LoadGoInfo(); } }
 }
 function s5Render(s){
   _s5snap=s;
@@ -1916,11 +1929,49 @@ function s5Init(){
       $('s5-calib-res').innerHTML=`лучшие: z_entry ${d.best_params.z_entry} z_stop ${d.best_params.z_stop} hurst ${d.best_params.hurst_max}<br>OOS net ${s5money(d.oos_total_net)} Sharpe ${d.oos_sharpe} · ${d.segments} сегм · стабильность ${(d.stability*100).toFixed(0)}% <button class="btn" onclick="s5ApplyCalib('${pair}')">применить</button>`;
     }catch(e){ $('s5-calib-res').textContent='ошибка: '+e.message; }
   };
+  $('s5-btn-strat-save').onclick=async()=>{
+    const name=$('s5-strat-name').value.trim();
+    if(!name){ $('s5-strat-msg').textContent='введи название версии'; return; }
+    $('s5-strat-msg').textContent='считаю бэктест (90д, может занять до минуты)…';
+    try{ const d=await s5api('/strategies/save','POST',{name, note:$('s5-strat-note').value.trim()});
+      $('s5-strat-msg').innerHTML='✓ сохранено: '+name; $('s5-strat-name').value=''; $('s5-strat-note').value='';
+      s5LoadStrategies();
+    }catch(e){ $('s5-strat-msg').textContent='ошибка: '+e.message; }
+  };
   // восстановить активную вкладку стратегии после обновления страницы
   let _strat='st4'; try{ _strat=localStorage.getItem('strat')||'st4'; }catch(e){}
   if(_strat==='st5') s5Switch('st5');
 }
 async function s5ApplyCalib(pair){ if(!confirm('Применить откалиброванные параметры к ST5?'))return; try{ await s5api('/calibrate/apply?pair='+pair+'&confirm=true','POST'); alert('применено'); s5Poll(); }catch(e){alert(e.message);} }
+
+// ---------- версии стратегии ----------
+function s5StratTiers(p){ const e=v=>v==null?'—':v; return `z_in ${e(p.z_entry)} · z_exit ${e(p.z_exit_full)} · z_½ ${e(p.z_take_partial)}`; }
+async function s5LoadStrategies(){
+  let d; try{ d=await s5api('/strategies'); }catch(e){ return; }
+  const cur=d.current||{};
+  $('s5-strat-current').innerHTML='<b>сейчас действует:</b> '+['sber','sngr','tatn'].map(p=>
+    `<span style="color:var(--ink-dim)">${p}</span> ${s5StratTiers(cur[p]||{})}`).join(' &nbsp;|&nbsp; ');
+  const tb=document.querySelector('#s5-strat-list tbody'); tb.innerHTML='';
+  const lst=d.strategies||[];
+  if(!lst.length){ tb.innerHTML='<tr><td colspan="6" class="empty">сохранённых версий пока нет</td></tr>'; return; }
+  for(const s of lst){
+    const dt=new Date(s.created_ts).toLocaleString('ru',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
+    const ez=['sber','sngr','tatn'].map(p=>(s.params[p]?.z_exit_full ?? '—')).join(' / ');
+    const bt=s.backtest||{};
+    const btTxt=['sber','sngr','tatn'].map(p=>{ const b=bt[p]; if(!b||b.error)return p+':—'; return `${p} ${s5money(b.net)}/${b.win}%`; }).join('<br>');
+    const stable=['sber','sngr','tatn'].every(p=>bt[p]&&bt[p].stable)?'✓ обе пол.':'⚠ не везде';
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${dt}</td><td><b>${s.name}</b>${s.note?'<br><span class="em" style="font-size:10px">'+s.note+'</span>':''}</td>`
+      +`<td style="font-family:var(--mono);font-size:11px">${ez}</td><td style="font-size:11px">${btTxt}</td>`
+      +`<td>${stable}</td><td><button class="btn" onclick="s5ApplyStrategy('${s.id}','${s.name.replace(/'/g,'')}')">применить</button></td>`;
+    tb.appendChild(tr);
+  }
+}
+async function s5ApplyStrategy(id,name){
+  if(!confirm('Применить стратегию «'+name+'» к ST5? (только при отсутствии открытых позиций)'))return;
+  try{ const d=await s5api('/strategies/apply','POST',{id,confirm:true}); $('s5-strat-msg').innerHTML='✓ применена: '+d.name; s5LoadStrategies(); s5Poll(); }
+  catch(e){ $('s5-strat-msg').textContent='ошибка: '+e.message; }
+}
 s5Init();
 setInterval(s5Poll, 2500);
 </script>
