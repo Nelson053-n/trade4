@@ -19,8 +19,14 @@ from .models import St5Metrics
 def run_backtest(df: pd.DataFrame, cfg: St5Config, pair: str = "test",
                  base_lots: int = 1, fee_per_lot: float = 2.0,
                  half_spread_pts: float = 0.5, slippage_pts: float = 0.0,
-                 start_balance: float = 1_000_000.0) -> St5Metrics:
-    """df с колонками price_a (ord), price_b (pref), индекс — ts (ms)."""
+                 start_balance: float = 1_000_000.0,
+                 no_entry_windows: bool = False) -> St5Metrics:
+    """df с колонками price_a (ord), price_b (pref), индекс — ts (ms).
+
+    no_entry_windows: True → подаём в движок минуту дня МСК (ts_local_min), активируя временные
+    фильтры _in_no_entry_window (вход запрещён на открытии/у клиринга/в конце дня). По умолчанию
+    False — фильтр инертен (исторически step зовётся без ts_local_min)."""
+    from . import forts_schedule as _sched
     eng = ST5Engine(pair, cfg, base_lots=base_lots, fee_per_lot=fee_per_lot,
                     half_spread_pts=half_spread_pts, slippage_pts=slippage_pts)
     m = St5Metrics()
@@ -28,7 +34,8 @@ def run_backtest(df: pd.DataFrame, cfg: St5Config, pair: str = "test",
     peak = start_balance
     equity_curve = []
     for ts, row in df.iterrows():
-        tr = eng.step(int(ts), float(row["price_a"]), float(row["price_b"]))
+        tlm = _sched.msk_minute_dow(int(ts) / 1000)[0] if no_entry_windows else None
+        tr = eng.step(int(ts), float(row["price_a"]), float(row["price_b"]), ts_local_min=tlm)
         if tr is not None:
             balance += tr.net_pnl_rub
         eq = balance + eng.unrealized_rub()

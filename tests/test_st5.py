@@ -133,6 +133,12 @@ def test_engine_trades_on_cointegrated_pair():
     assert m.trades > 0, "движок не открыл ни одной сделки на mean-reverting паре"
     # причины закрытия осмысленны
     assert set(m.reasons) <= {"exit", "take_partial", "z_stop", "time_stop", "adf_break", "flat_all"}
+    # no_entry_windows: дефолт инертен (= как без флага); True отсекает часть входов (вход
+    # запрещён на открытии/клиринге/в конце дня). Бэктест 2026-06-29 показал: фильтр режет
+    # ПРИБЫЛЬНЫЕ входы на всех 3 реальных парах → в live НЕ включаем, параметр — для исследований.
+    m_on = run_backtest(df, cfg, pair="syn", base_lots=10, fee_per_lot=2.0,
+                        half_spread_pts=0.5, no_entry_windows=True)
+    assert m_on.trades <= m.trades, "фильтр no_entry не должен УВЕЛИЧИВать число входов"
 
 
 def test_portfolio_limits_gate():
