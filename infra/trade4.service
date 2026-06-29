@@ -1,44 +1,50 @@
-# systemd-сервис backend trade4 (st4 спред-арбитраж) — uvicorn на 127.0.0.1:8004.
-# Отдельный сервис, не пересекается с trade.service (порт 8000). Свой домен trade4.bananagen.ru.
+# systemd-сервис backend trade4 (st4/st5 спред-арбитраж) — uvicorn на 127.0.0.1:8004.
+# Отдельный сервис, не пересекается с trade.service (порт 8000). Домен trade4.bananagen.ru.
 #
-# Установка на проде (требует sudo, рабочая папка /opt/trade4):
+# СООТВЕТСТВУЕТ реальному прод-юниту (проверено 2026-06-29): User=monitor, порт 8004,
+# WorkingDirectory=/opt/trade4, лог в /var/log/trade4.log. Креды/токен — в drop-in'ах
+# /etc/systemd/system/trade4.service.d/ (auth.conf: TRADE4_USER/PASS/SECRET; tbank.conf: TBANK_TOKEN;
+# oom.conf: OOMScoreAdjust=-500 — защита от OOM-killer, см. память prod-memory-oom).
+#
+# Установка/обновление (требует sudo). На боевом — рестарт ТОЛЬКО при flat-позициях:
 #   sudo cp /opt/trade4/infra/trade4.service /etc/systemd/system/trade4.service
-#   sudo systemctl daemon-reload
-#   sudo systemctl enable --now trade4
+#   sudo systemctl daemon-reload && sudo systemctl restart trade4
 # Проверка:   systemctl status trade4   |   journalctl -u trade4 -f
 #
-# Токен T-Bank подаётся через окружение (Environment=TBANK_TOKEN=... в drop-in
-# /etc/systemd/system/trade4.service.d/token.conf), либо файлом app/st4/.tbank_token.
+# M5 (аудит): сервис НЕ от root (User=monitor — уже так на проде). Ниже — hardening-директивы;
+# они закомментированы, т.к. их включение требует рестарта боевого сервиса и проверки, что
+# запись идёт только в разрешённые пути (session_state_*.json, .tbank_token, .tg_bot_token, out/,
+# /var/log/trade4.log). Включать осознанно, по одной, с проверкой что сервис стартует.
 
 [Unit]
-Description=trade4 backend (st4 spread arbitrage paper) — uvicorn API + panel
+Description=Trade4 st4 spread-arbitrage API (trade4.bananagen.ru)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-# M5 (аудит безопасности): НЕ root. Выделенный непривилегированный пользователь
-# (useradd -r -s /usr/sbin/nologin trade4; chown -R trade4:trade4 /opt/trade4). На текущем
-# проде сервис идёт под monitor — если оставляете так, поставьте User=monitor/Group=monitor.
-User=trade4
-Group=trade4
+User=monitor
+Group=monitor
 WorkingDirectory=/opt/trade4
 ExecStart=/opt/trade4/.venv/bin/python -m uvicorn app.api:app --host 127.0.0.1 --port 8004
 Restart=always
-RestartSec=3
-# мягкая остановка, чтобы фоновые задачи (плеер/поллер) завершились
+RestartSec=5
+StandardOutput=append:/var/log/trade4.log
+StandardError=append:/var/log/trade4.log
+# мягкая остановка, чтобы фоновые задачи (поллер/плеер) завершились
 KillSignal=SIGINT
 TimeoutStopSec=10
-# M5: sandbox-hardening (ограничить ущерб при RCE/path-traversal). Запись — только в каталог
-# состояния (session_state_*.json, .tbank_token, .tg_bot_token, out/).
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-PrivateTmp=true
-ProtectKernelTunables=true
-ProtectControlGroups=true
-RestrictSUIDSGID=true
-ReadWritePaths=/opt/trade4
+
+# M5 sandbox-hardening (раскомментировать осознанно, рестарт при flat-позициях):
+#   ReadWritePaths должен покрывать /opt/trade4 (state/токены) и /var/log/trade4.log (лог).
+# NoNewPrivileges=true
+# ProtectSystem=strict
+# ProtectHome=true
+# PrivateTmp=true
+# ProtectKernelTunables=true
+# ProtectControlGroups=true
+# RestrictSUIDSGID=true
+# ReadWritePaths=/opt/trade4 /var/log/trade4.log
 
 [Install]
 WantedBy=multi-user.target
