@@ -187,6 +187,9 @@ class St5Session:
         self.cfg = St5Config()
         self._session_file = _BASE / "session_state_5.json"
         self.portfolio = St5Portfolio(self.cfg)
+        # runtime per-pair оверрайды параметров стратегии (поверх ST5_PAIRS из кода). Пусто →
+        # действуют значения из кода. Применяются через apply_overrides, переживают рестарт.
+        self.pair_overrides: dict[str, dict] = {pid: {} for pid in ST5_PAIRS}
         # движок на каждую пару-кандидата — со СВОИМ конфигом (per-pair оверрайды из ST5_PAIRS)
         self.engines: dict[str, ST5Engine] = {}
         self.pair_cfgs: dict[str, St5Config] = {}
@@ -217,15 +220,49 @@ class St5Session:
         self._sched_summary_sent: str | None = None  # дата уже отправленной дневной сводки
         self._sched_last_kind: str | None = None   # пред. состояние сессии (для детекции закрытия)
 
+    # ключевые параметры стратегии, которыми оперирует версионирование/калибровка
+    OVERRIDE_KEYS = ("z_entry", "z_exit_full", "z_take_partial", "z_no_entry",
+                     "z_stop", "half_life_stop_mult", "size_tiers")
+
     def _pair_cfg(self, pid: str) -> St5Config:
-        """Конфиг пары = базовый ST5 + per-pair оверрайды StrategyConfig из ST5_PAIRS[pid][4]."""
+        """Конфиг пары = базовый ST5 + per-pair оверрайды из ST5_PAIRS[pid][4] (код) +
+        runtime-оверрайды pair_overrides[pid] (приоритет, применяются операторм)."""
         c = St5Config(**self.cfg.model_dump())
         spec = ST5_PAIRS[pid]
+        layered = {}
         if len(spec) > 4 and isinstance(spec[4], dict):
-            for k, v in spec[4].items():
-                if hasattr(c.strategy, k):
-                    setattr(c.strategy, k, v)
+            layered.update(spec[4])
+        layered.update(self.pair_overrides.get(pid, {}))   # runtime поверх кода
+        for k, v in layered.items():
+            if hasattr(c.strategy, k):
+                setattr(c.strategy, k, v)
         return c
+
+    def apply_overrides(self, overrides: dict[str, dict]) -> tuple[bool, str]:
+        """Применить runtime per-pair оверрайды к живым движкам (горячо, без рестарта).
+        Пары с открытой позицией НЕ трогаем (смена параметров на лету рвёт синхрон движок↔счёт).
+        overrides: {pid: {param: value}}. Возвращает (ok, причина)."""
+        targets = [pid for pid in overrides if pid in self.engines]
+        busy = [pid for pid in targets if self.engines[pid].position is not None]
+        if busy:
+            return False, f"открыта позиция: {', '.join(busy)} — закрой (flat-all) и повтори"
+        for pid in targets:
+            ov = {k: v for k, v in overrides[pid].items() if k in self.OVERRIDE_KEYS}
+            self.pair_overrides[pid] = ov
+            pcfg = self._pair_cfg(pid)
+            self.pair_cfgs[pid] = pcfg
+            self.engines[pid].cfg = pcfg          # движок читает cfg.strategy каждый бар
+        self.save_session()
+        self.log_event("info", f"параметры стратегии применены: {targets}")
+        return True, "ok"
+
+    def capture_current(self) -> dict[str, dict]:
+        """Снимок ДЕЙСТВУЮЩИХ per-pair параметров (код ST5_PAIRS + runtime-оверрайды)."""
+        snap: dict[str, dict] = {}
+        for pid in ST5_PAIRS:
+            st = self._pair_cfg(pid).strategy
+            snap[pid] = {k: getattr(st, k) for k in self.OVERRIDE_KEYS}
+        return snap
 
     # ---------- Telegram ----------
     def _notify(self, text: str) -> None:
@@ -330,6 +367,7 @@ class St5Session:
                 "account_id": self.cfg.connector.account_id,
                 "last_live_ts": self.last_live_ts,
                 "enabled_pairs": self.enabled_pairs,
+                "pair_overrides": self.pair_overrides,   # runtime per-pair параметры стратегии
                 # открытые позиции по парам переживают рестарт (St5State — str-enum,
                 # json.dumps сериализует .state как строку). None → пара flat.
                 "positions": {pid: (asdict(eng.position) if eng.position else None)
@@ -413,6 +451,17 @@ class St5Session:
         self.last_live_ts = data.get("last_live_ts", {pid: 0 for pid in ST5_PAIRS})
         en = data.get("enabled_pairs") or {}
         self.enabled_pairs = {pid: bool(en.get(pid, True)) for pid in ST5_PAIRS}
+        # runtime per-pair оверрайды стратегии — восстанавливаем и применяем к движкам
+        po = data.get("pair_overrides") or {}
+        if isinstance(po, dict):
+            for pid in ST5_PAIRS:
+                ov = po.get(pid)
+                if isinstance(ov, dict) and ov:
+                    self.pair_overrides[pid] = {k: v for k, v in ov.items()
+                                                if k in self.OVERRIDE_KEYS}
+                    pcfg = self._pair_cfg(pid)
+                    self.pair_cfgs[pid] = pcfg
+                    self.engines[pid].cfg = pcfg
         # восстановить коннектор (режим/счёт) — иначе после рестарта скатывался на paper
         self.cfg.connector.mode = data.get("connector_mode", self.cfg.connector.mode)
         self.cfg.connector.account_id = data.get("account_id", self.cfg.connector.account_id)

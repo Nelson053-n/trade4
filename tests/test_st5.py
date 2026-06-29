@@ -785,3 +785,84 @@ def test_pair_exit_full_calibrated_to_05():
     s = St5Session()
     for pid in ("sber", "sngr", "tatn"):
         assert s.engines[pid].cfg.strategy.z_exit_full == 0.5, pid
+
+
+# ============================ runtime per-pair оверрайды + хранилище стратегий ============================
+
+def test_pair_overrides_take_priority_in_pair_cfg():
+    """pair_overrides[pid] перекрывают ST5_PAIRS-оверрайды из кода в _pair_cfg."""
+    from app.st5.service import St5Session
+    s = St5Session()
+    assert s.engines["sber"].cfg.strategy.z_exit_full == 0.5     # из кода
+    s.pair_overrides["sber"] = {"z_exit_full": 0.1}
+    cfg = s._pair_cfg("sber")
+    assert cfg.strategy.z_exit_full == 0.1                       # runtime перекрыл
+
+
+def test_apply_overrides_updates_live_engine_when_flat():
+    """apply_overrides пересобирает движок пары на лету (позиция flat)."""
+    from app.st5.service import St5Session
+    s = St5Session()
+    assert s.engines["sngr"].position is None
+    ok, _ = s.apply_overrides({"sngr": {"z_exit_full": 0.1, "z_entry": 1.5}})
+    assert ok is True
+    assert s.engines["sngr"].cfg.strategy.z_exit_full == 0.1
+    assert s.engines["sngr"].cfg.strategy.z_entry == 1.5
+    assert s.pair_overrides["sngr"]["z_entry"] == 1.5
+
+
+def test_apply_overrides_blocked_with_open_position():
+    """apply_overrides НЕ трогает пару с открытой позицией (рассинхрон движок↔счёт)."""
+    from app.st5.service import St5Session
+    from app.st5.engine import ST5Engine
+    s = St5Session()
+    s.engines["tatn"]._open(1700000000000, 2.5, 100.0, 0.1, 100.0, 100.0)
+    assert s.engines["tatn"].position is not None
+    before = s.engines["tatn"].cfg.strategy.z_exit_full
+    ok, reason = s.apply_overrides({"tatn": {"z_exit_full": 0.1}})
+    assert ok is False
+    assert "позиц" in reason.lower()
+    assert s.engines["tatn"].cfg.strategy.z_exit_full == before   # не изменилось
+
+
+def test_pair_overrides_survive_session_round_trip(tmp_path, monkeypatch):
+    """pair_overrides переживают save/load session."""
+    from app.st5 import service as svc
+    from app.st5.service import St5Session
+    s = St5Session()
+    s._session_file = tmp_path / "ss5.json"
+    s.pair_overrides["sber"] = {"z_exit_full": 0.25}
+    s.save_session()
+    s2 = St5Session()
+    s2._session_file = tmp_path / "ss5.json"
+    assert s2.load_session() is True
+    assert s2.pair_overrides["sber"] == {"z_exit_full": 0.25}
+    assert s2.engines["sber"].cfg.strategy.z_exit_full == 0.25    # применилось к движку
+
+
+def test_capture_current_snapshots_effective_params():
+    """capture_current снимает ДЕЙСТВУЮЩИЕ per-pair параметры (код + runtime-оверрайды)."""
+    from app.st5.service import St5Session
+    s = St5Session()
+    s.pair_overrides["sngr"] = {"z_exit_full": 0.1}
+    snap = s.capture_current()
+    assert snap["sber"]["z_exit_full"] == 0.5      # из кода
+    assert snap["sngr"]["z_exit_full"] == 0.1      # runtime перекрыл
+    assert "z_entry" in snap["sber"]               # снимаются все ключевые параметры
+
+
+def test_strategy_store_save_list_load(tmp_path, monkeypatch):
+    """strategy_store: save → list → load round-trip с метриками бэктеста."""
+    from app.st5 import strategy_store as store
+    monkeypatch.setattr(store, "_STORE_DIR", tmp_path)
+    params = {"sber": {"z_exit_full": 0.5, "z_entry": 1.25}}
+    backtest = {"sber": {"net": 8801, "win": 99, "sharpe": 15.8}}
+    sid = store.save_strategy(name="test-v1", params=params, backtest=backtest,
+                              window="90д ISS", note="проба", source="manual", ts_ms=1782735000000)
+    lst = store.list_strategies()
+    assert any(x["id"] == sid for x in lst)
+    rec = store.load_strategy(sid)
+    assert rec["name"] == "test-v1"
+    assert rec["params"]["sber"]["z_exit_full"] == 0.5
+    assert rec["backtest"]["sber"]["net"] == 8801
+    assert rec["window"] == "90д ISS"
