@@ -35,17 +35,22 @@ _MSK = _tz(_td(hours=3))                                 # московское 
 
 # ====================== авторизация (логин/пароль + подписанная cookie) ======================
 # Один пользователь из окружения. Авторизация ВКЛЮЧАЕТСЯ только когда заданы оба
-# TRADE4_USER и TRADE4_PASS (на проде — через systemd drop-in). Без них (локальная
-# разработка, тесты) AUTH_ENABLED=False и middleware пропускает всё.
+# TRADE4_USER и TRADE4_PASS (на проде — через systemd drop-in).
 _AUTH_USER = os.environ.get("TRADE4_USER", "")
 _AUTH_PASS = os.environ.get("TRADE4_PASS", "")
 AUTH_ENABLED = bool(_AUTH_USER and _AUTH_PASS)
-# Секрет подписи cookie: явный TRADE4_SECRET либо дериват от пароля (смена пароля
-# разлогинивает все сессии — это нормально).
+# H1 (fail-closed): без заданных кредов сервис НЕ открывается анонимам (боевой контур!).
+# Локальная разработка/тесты должны выставить TRADE4_ALLOW_NOAUTH=1 явно — тогда middleware
+# пропускает всё. Иначе при пустых кредах всё, кроме whitelist, отдаёт 503.
+_ALLOW_NOAUTH = os.environ.get("TRADE4_ALLOW_NOAUTH", "") == "1"
+# H2: секрет подписи cookie — ТРЕБУЕМ явный TRADE4_SECRET. Фолбэк-дериват от пароля оставлен
+# для совместимости (смена пароля разлогинивает сессии), но это слабее — при старте логируем
+# предупреждение (см. lifespan), чтобы на проде задавали отдельный TRADE4_SECRET ≥32 байт.
 _AUTH_SECRET = (os.environ.get("TRADE4_SECRET", "")
                 or hashlib.sha256(("trade4-cookie-v1|" + _AUTH_PASS).encode()).hexdigest())
+_SECRET_IS_DERIVED = not os.environ.get("TRADE4_SECRET", "")
 _COOKIE_NAME = "trade4_session"
-_SESSION_TTL = 7 * 86400                                 # 7 дней
+_SESSION_TTL = 24 * 3600                                 # H2: 24ч (было 7 дней)
 # пути, доступные без авторизации
 _AUTH_WHITELIST = {"/login", "/logout", "/login.html", "/health", "/favicon.ico", "/favicon.svg"}
 
@@ -208,6 +213,16 @@ async def lifespan(app: FastAPI):
     import time as _time
     global _server_started
     _server_started = _time.time()
+    # предупреждения о конфигурации безопасности (H1/H2)
+    if not AUTH_ENABLED:
+        if _ALLOW_NOAUTH:
+            print("⚠️  trade4: запуск БЕЗ авторизации (TRADE4_ALLOW_NOAUTH=1) — только для dev/тестов")
+        else:
+            print("⛔ trade4: TRADE4_USER/PASS не заданы — сервис fail-closed (503 на всё). "
+                  "Задайте креды или TRADE4_ALLOW_NOAUTH=1 для dev")
+    elif _SECRET_IS_DERIVED:
+        print("⚠️  trade4: TRADE4_SECRET не задан — секрет cookie деривируется из пароля (слабее). "
+              "Задайте отдельный TRADE4_SECRET ≥32 байт на проде")
     from .st4 import tbank_sandbox as _sb
     _sb.load_token()                  # подтянуть сохранённый токен T-Bank (переживает рестарт)
     from .st5 import notifier as _tg
@@ -233,24 +248,100 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="trade4 — st4 spread arbitrage", version="1.0", lifespan=lifespan)
 
 
+def _csrf_ok(request: Request) -> bool:
+    """C2: для мутирующих запросов (POST/PUT/PATCH/DELETE) требуем same-origin.
+    Проверяем Sec-Fetch-Site (современные браузеры) ИЛИ Origin против Host. Отсутствие обоих
+    (curl/скрипты без заголовков) пропускаем — CSRF возможен только из браузера, где заголовки
+    проставляются автоматически и их подделать кросс-сайтом нельзя."""
+    sfs = request.headers.get("sec-fetch-site")
+    if sfs is not None:
+        return sfs in ("same-origin", "same-site", "none")
+    origin = request.headers.get("origin")
+    if origin:
+        host = request.headers.get("host", "")
+        return origin.split("://", 1)[-1] == host
+    return True   # ни Sec-Fetch-Site, ни Origin — не браузерный кросс-сайт
+
+
 @app.middleware("http")
 async def _auth_gate(request: Request, call_next):
-    """Закрывает весь сервис за авторизацией (safe-by-default). Без валидной сессии
-    «/» отдаёт страницу логина, остальное — 401. Whitelist: логин/логаут/health."""
-    if not AUTH_ENABLED or request.url.path in _AUTH_WHITELIST:
+    """Закрывает весь сервис за авторизацией (safe-by-default, H1 fail-closed). Без валидной
+    сессии «/» отдаёт логин, остальное — 401. Мутирующие запросы — CSRF-проверка (C2)."""
+    path = request.url.path
+    resp = await _route(request, call_next, path)
+    _apply_security_headers(resp)   # M1: на ВСЕ ответы (включая 401/403/503/логин)
+    return resp
+
+
+async def _route(request: Request, call_next, path: str):
+    if path in _AUTH_WHITELIST:
         return await call_next(request)
-    if _verify(request.cookies.get(_COOKIE_NAME, "")):
-        return await call_next(request)
-    if request.url.path == "/":
-        if LOGIN_PAGE.exists():
-            return FileResponse(LOGIN_PAGE, headers={"Cache-Control": "no-cache"})
-        return JSONResponse({"detail": "login.html не найден"}, status_code=500)
-    return JSONResponse({"detail": "не авторизован"}, status_code=401)
+    if not AUTH_ENABLED:
+        # H1: без кредов открыто ТОЛЬКО при явном dev-флаге, иначе fail-closed (503)
+        if _ALLOW_NOAUTH:
+            return await call_next(request)
+        return JSONResponse({"detail": "сервис не сконфигурирован (нет TRADE4_USER/PASS)"},
+                            status_code=503)
+    if not _verify(request.cookies.get(_COOKIE_NAME, "")):
+        if path == "/":
+            if LOGIN_PAGE.exists():
+                return FileResponse(LOGIN_PAGE, headers={"Cache-Control": "no-cache"})
+            return JSONResponse({"detail": "login.html не найден"}, status_code=500)
+        return JSONResponse({"detail": "не авторизован"}, status_code=401)
+    # C2: авторизован — но мутирующие методы защищаем от CSRF (кросс-сайт POST с cookie)
+    if request.method in ("POST", "PUT", "PATCH", "DELETE") and not _csrf_ok(request):
+        return JSONResponse({"detail": "CSRF: cross-origin запрос отклонён"}, status_code=403)
+    return await call_next(request)
+
+
+# M1: заголовки безопасности на уровне приложения (работают даже при прямом доступе к origin,
+# не только через nginx). CSP разрешает inline-стили/скрипты — дашборд самодостаточный
+# (один файл со встроенными <style>/<script>), плюс шрифты Google.
+_SECURITY_HEADERS = {
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "same-origin",
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+    "Content-Security-Policy": (
+        "default-src 'self'; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com; "
+        "script-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "connect-src 'self'; "
+        "frame-ancestors 'none'; base-uri 'self'"),
+}
+
+
+def _apply_security_headers(resp) -> None:
+    for k, v in _SECURITY_HEADERS.items():
+        resp.headers.setdefault(k, v)
+
+
+# H3: лёгкий in-process anti-bruteforce на /login — окно по IP. Не замена nginx limit_req,
+# но закрывает базовый перебор пароля панели боевой торговли.
+_LOGIN_FAILS: dict[str, list] = {}                      # ip -> [ts неудач в окне]
+_LOGIN_WINDOW = 300                                     # окно 5 мин
+_LOGIN_MAX_FAILS = 10                                   # >10 неудач за окно → 429
+
+
+def _login_blocked(ip: str) -> bool:
+    now = time.time()
+    fails = [t for t in _LOGIN_FAILS.get(ip, []) if now - t < _LOGIN_WINDOW]
+    _LOGIN_FAILS[ip] = fails
+    return len(fails) >= _LOGIN_MAX_FAILS
+
+
+def _login_record_fail(ip: str) -> None:
+    _LOGIN_FAILS.setdefault(ip, []).append(time.time())
 
 
 @app.post("/login")
 async def login(request: Request):
     """Вход по логину/паролю (form-data или JSON). Успех → подписанная HttpOnly cookie."""
+    ip = request.client.host if request.client else "?"
+    if _login_blocked(ip):
+        return JSONResponse({"detail": "слишком много попыток, подождите"}, status_code=429)
     ct = request.headers.get("content-type", "")
     if "application/json" in ct:
         data = await request.json()
@@ -261,10 +352,12 @@ async def login(request: Request):
     ok = (hmac.compare_digest(user, _AUTH_USER)
           and hmac.compare_digest(pw, _AUTH_PASS)) if AUTH_ENABLED else True
     if not ok:
+        _login_record_fail(ip)
         return JSONResponse({"detail": "неверный логин или пароль"}, status_code=401)
+    _LOGIN_FAILS.pop(ip, None)                           # успех — сбросить счётчик
     resp = JSONResponse({"ok": True})
     resp.set_cookie(_COOKIE_NAME, _make_session(), max_age=_SESSION_TTL,
-                    httponly=True, samesite="lax", secure=True, path="/")
+                    httponly=True, samesite="strict", secure=True, path="/")  # H2: Strict
     return resp
 
 

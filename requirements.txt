@@ -1,13 +1,15 @@
-pandas>=2.0
-numpy>=1.26
-pydantic>=2.5
-fastapi>=0.110
-uvicorn>=0.27
+# Верхние границы (M4 аудит): защита от breaking changes внезапного мажора.
+# Для воспроизводимости прода прогонять pip-audit; при апгрейде мажора — тесты.
+pandas>=2.0,<4
+numpy>=1.26,<3
+pydantic>=2.5,<3
+fastapi>=0.110,<1
+uvicorn>=0.27,<1
 
 # st5 statarb: ADF-тест коинтеграции, OLS, half-life
-statsmodels>=0.14
-scipy>=1.11
+statsmodels>=0.14,<1
+scipy>=1.11,<2
 
 # dev (тесты)
-pytest>=8.0
-httpx>=0.27
+pytest>=8.0,<10
+httpx>=0.27,<1

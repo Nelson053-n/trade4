@@ -1,4 +1,4 @@
-# systemd-сервис backend trade4 (st4 спред-арбитраж) — uvicorn на 127.0.0.1:8001.
+# systemd-сервис backend trade4 (st4 спред-арбитраж) — uvicorn на 127.0.0.1:8004.
 # Отдельный сервис, не пересекается с trade.service (порт 8000). Свой домен trade4.bananagen.ru.
 #
 # Установка на проде (требует sudo, рабочая папка /opt/trade4):
@@ -17,15 +17,28 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
-Group=root
+# M5 (аудит безопасности): НЕ root. Выделенный непривилегированный пользователь
+# (useradd -r -s /usr/sbin/nologin trade4; chown -R trade4:trade4 /opt/trade4). На текущем
+# проде сервис идёт под monitor — если оставляете так, поставьте User=monitor/Group=monitor.
+User=trade4
+Group=trade4
 WorkingDirectory=/opt/trade4
-ExecStart=/opt/trade4/.venv/bin/python -m uvicorn app.api:app --host 127.0.0.1 --port 8001
+ExecStart=/opt/trade4/.venv/bin/python -m uvicorn app.api:app --host 127.0.0.1 --port 8004
 Restart=always
 RestartSec=3
 # мягкая остановка, чтобы фоновые задачи (плеер/поллер) завершились
 KillSignal=SIGINT
 TimeoutStopSec=10
+# M5: sandbox-hardening (ограничить ущерб при RCE/path-traversal). Запись — только в каталог
+# состояния (session_state_*.json, .tbank_token, .tg_bot_token, out/).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/opt/trade4
 
 [Install]
 WantedBy=multi-user.target
