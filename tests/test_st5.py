@@ -799,3 +799,43 @@ def test_watchdog_should_restart_predicate():
     # цикл ещё ни разу не завершил проход (_live_hb==0) → не считаем зависанием
     s._live_hb = 0.0
     assert s._watchdog_should_restart(NOW, ts_sec=MON_OPEN) is False
+
+
+def test_day_pnl_resets_on_new_day():
+    """day_pnl обнуляется при смене торгового дня (МСК), а не копит за всё время."""
+    import calendar
+    from app.st5.service import St5Portfolio
+    from app.st5.config import St5Config
+    p = St5Portfolio(St5Config())
+    d1 = calendar.timegm((2026, 6, 29, 9, 0, 0, 0, 0, 0)) * 1000   # пн 12:00 МСК
+    d1b = d1 + 3600 * 1000                                          # пн 13:00 МСК
+    d2 = calendar.timegm((2026, 6, 30, 9, 0, 0, 0, 0, 0)) * 1000   # вт 12:00 МСК
+    p.on_trade(500, d1)
+    p.on_trade(-200, d1b)
+    assert p.day_pnl_rub == 300                # день 1: 500 − 200
+    p.on_trade(1000, d2)
+    assert p.day_pnl_rub == 1000               # новый день → обнулилось, не 1300
+
+
+def test_day_pnl_recomputed_from_journal_on_load(monkeypatch):
+    """load_session пересчитывает day_pnl из СЕГОДНЯШНИХ сделок, игнорируя копивший счётчик файла."""
+    import calendar, json
+    from app.st5 import service as svc
+    from app.st5.service import St5Session
+    now = calendar.timegm((2026, 6, 29, 9, 0, 0, 0, 0, 0))   # пн 12:00 МСК
+    monkeypatch.setattr(svc.time, "time", lambda: now)
+    today_ms = now * 1000
+    yest_ms = today_ms - 24 * 3600 * 1000
+    s = St5Session()
+    payload = {
+        "day_pnl_rub": 9999,    # «накопленный за всё время» из старой версии — должен игнорироваться
+        "trades": [
+            {"exit_ts": yest_ms, "net_pnl_rub": 1000},   # вчера — не в дневном
+            {"exit_ts": today_ms, "net_pnl_rub": 500},   # сегодня
+            {"exit_ts": today_ms + 3600 * 1000, "net_pnl_rub": -200},  # сегодня
+        ],
+    }
+    monkeypatch.setattr(type(s._session_file), "read_text", lambda self: json.dumps(payload))
+    monkeypatch.setattr(type(s._session_file), "exists", lambda self: True)
+    s.load_session()
+    assert s.portfolio.day_pnl_rub == 300      # 500 − 200, не 9999 и не +1000 вчерашних

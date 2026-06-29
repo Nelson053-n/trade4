@@ -51,6 +51,7 @@ class St5Portfolio:
         self.cfg = cfg
         self.capital_rub: float = cfg.paper.start_balance_rub   # обновляется реальным портфелем в live
         self.day_pnl_rub: float = 0.0
+        self._day: str = ""           # текущий торговый день (YYYY-MM-DD МСК) — для сброса day_pnl
         self.consecutive_errors: int = 0
         self.halted: bool = False
         self.halt_reason: str = ""
@@ -154,7 +155,14 @@ class St5Portfolio:
             return 0.0
         return cls.pair_go_per_lot(pid) * p.lots
 
-    def on_trade(self, net_pnl_rub: float) -> None:
+    def on_trade(self, net_pnl_rub: float, ts_ms: int | None = None) -> None:
+        """Учесть закрытую сделку в дневном P&L. При смене дня (МСК) day_pnl обнуляется —
+        иначе он копит за всё время и совпадает с общим net (баг). ts_ms — exit_ts сделки;
+        None → берём текущее время (совместимость со старыми вызовами/тестами)."""
+        day = time.strftime("%Y-%m-%d", time.gmtime(((ts_ms / 1000) if ts_ms else time.time()) + 3 * 3600))
+        if day != self._day:
+            self._day = day
+            self.day_pnl_rub = 0.0
         self.day_pnl_rub += net_pnl_rub
 
     def on_error(self) -> None:
@@ -403,7 +411,13 @@ class St5Session:
             return False
         self.trades = data.get("trades", [])
         self.history = data.get("history", {pid: [] for pid in ST5_PAIRS})
-        self.portfolio.day_pnl_rub = data.get("day_pnl_rub", 0.0)
+        # day_pnl пересчитываем из журнала по СЕГОДНЯШНИМ сделкам (МСК), а не берём из файла:
+        # копивший за всё время счётчик из старых версий совпадал с общим net (баг отображения).
+        today = time.strftime("%Y-%m-%d", time.gmtime(time.time() + 3 * 3600))
+        self.portfolio._day = today
+        self.portfolio.day_pnl_rub = sum(
+            t.get("net_pnl_rub", 0) for t in self.trades
+            if time.strftime("%Y-%m-%d", time.gmtime(t.get("exit_ts", 0) / 1000 + 3 * 3600)) == today)
         self.portfolio.capital_rub = data.get("capital_rub", self.cfg.paper.start_balance_rub)
         # go_factor переживает рестарт (иначе первый вход при flat — по заниженному ISS-ГО).
         # Защита: фактор должен быть >0; иначе дефолт 1.0 (битая запись не должна обнулить риск-гейт).
@@ -814,7 +828,7 @@ class St5Session:
                 if self.cfg.notify.notify_errors:
                     from .service import ST5_PAIRS as _P
                     self._notify(f"⚠️ <b>Выход не исполнен</b> · {tg.esc(_P[pid][3])}\n{tg.esc(e)}")
-        self.portfolio.on_trade(tr.net_pnl_rub)
+        self.portfolio.on_trade(tr.net_pnl_rub, tr.exit_ts)
         rec = {"pair": pid, "state": tr.state.value, "entry_ts": tr.entry_ts, "exit_ts": tr.exit_ts,
                "entry_z": tr.entry_z, "exit_z": tr.exit_z, "lots": tr.lots,
                "gross_pnl_rub": tr.gross_pnl_rub, "fees_rub": tr.fees_rub,
