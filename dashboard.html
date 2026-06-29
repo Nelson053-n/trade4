@@ -170,6 +170,15 @@ a{color:var(--accent-2);text-decoration:none}
   background:var(--tip-bg);border:1px solid var(--line);border-radius:8px;
   padding:8px 11px;font-family:var(--mono);font-size:11px;line-height:1.55;
   backdrop-filter:blur(4px);box-shadow:0 12px 30px -8px rgba(0,0,0,.35);max-width:230px}
+/* модальное подтверждение (закрыть всё и т.п.) */
+.modal-ov{position:fixed;inset:0;z-index:200;display:none;align-items:center;justify-content:center;
+  background:rgba(0,0,0,.5);backdrop-filter:blur(3px)}
+.modal-ov.on{display:flex}
+.modal-box{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px 24px;
+  max-width:380px;width:90%;box-shadow:0 20px 50px -12px rgba(0,0,0,.5)}
+.modal-box h3{margin:0 0 8px;font-size:16px;color:var(--ink)}
+.modal-box p{margin:0 0 18px;font-size:13px;color:var(--ink-dim);line-height:1.5}
+.modal-box .modal-actions{display:flex;gap:10px;justify-content:flex-end}
 .legend{display:flex;gap:16px;flex-wrap:wrap;margin-top:10px;font-family:var(--mono);font-size:10.5px;color:var(--ink-dim)}
 .legend i{display:inline-block;width:13px;height:0;border-top-width:2px;border-top-style:solid;vertical-align:middle;margin-right:6px}
 
@@ -651,7 +660,7 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
           <button class="btn primary" id="s5-btn-start">▶ старт</button>
           <button class="btn" id="s5-btn-stop">❚❚ стоп</button>
           <button class="btn warn" id="s5-btn-flat">✕ закрыть всё</button>
-          <button class="btn danger" id="s5-btn-resume">снять HALT</button>
+          <button class="btn danger" id="s5-btn-resume" title="Снять аварийную остановку (HALT). Бот сам уходит в HALT при серии ошибок исполнения или достижении дневного лимита убытка — новые позиции не открываются. Нажми после того, как разобрался с причиной, чтобы разрешить торговлю снова.">снять HALT</button>
         </div>
         <div class="params" style="grid-template-columns:1fr 1fr;margin-bottom:11px">
           <div class="fld"><label>объём контрактов (1–100 лот)</label><input id="s5-p-lots" type="number" value="10" min="1" max="100" step="1"></div>
@@ -704,6 +713,18 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
   </div>
   </div>
 </div><!-- /tab-st5 -->
+
+<!-- модальное подтверждение «закрыть всё» (st5) -->
+<div class="modal-ov" id="s5-flat-modal">
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="s5-flat-modal-title">
+    <h3 id="s5-flat-modal-title">Закрыть все позиции ST5?</h3>
+    <p id="s5-flat-modal-text">Все открытые позиции будут закрыты по рынку. Действие необратимо.</p>
+    <div class="modal-actions">
+      <button class="btn" id="s5-flat-cancel">Отмена</button>
+      <button class="btn warn" id="s5-flat-confirm">✕ Закрыть всё</button>
+    </div>
+  </div>
+</div>
 
 <script>
 /* ============================ ядро (без мультистратегийных артефактов) ============================ */
@@ -1590,9 +1611,13 @@ function s5Render(s){
   // параметры: объём контрактов + макс. позиций (не перетираем пока пользователь вводит)
   if(document.activeElement!==$('s5-p-lots') && s.quantity_lots!=null) $('s5-p-lots').value=s.quantity_lots;
   if(document.activeElement!==$('s5-p-maxpos') && s.max_open_positions!=null) $('s5-p-maxpos').value=s.max_open_positions;
-  // блокировка опасных кнопок/полей при открытых позициях
-  const hasPos=s.open_positions>0;
-  ['s5-conn-mode','s5-conn-token','s5-btn-conn','s5-btn-stop','s5-bt-pair','s5-p-lots','s5-p-maxpos','s5-btn-params'].forEach(id=>{ const e=$(id); if(e){e.disabled=hasPos; e.title=hasPos?'Активные позиции — действие невозможно':''}});
+  // блокировка кнопок/полей, влияющих на процесс торговли, пока торговля идёт (live) ИЛИ висят
+  // позиции. НЕ блокируем управление остановкой: «стоп», «закрыть всё» (через модалку), «снять HALT».
+  const busy = s.live || s.open_positions>0;
+  const tip = s.live ? 'Торговля запущена — сначала «стоп»' : 'Активные позиции — действие невозможно';
+  ['s5-btn-start','s5-conn-mode','s5-conn-token','s5-conn-account','s5-btn-conn',
+   's5-bt-pair','s5-p-lots','s5-p-maxpos','s5-btn-params','s5-btn-strat-save']
+    .forEach(id=>{ const e=$(id); if(e){ e.disabled=busy; e.title=busy?tip:''; }});
 }
 let _s5chartPair='sber', _s5hist={};
 let _s5trades=[], _s5geom=null, _s5pulse=0;
@@ -1804,7 +1829,19 @@ function s5Init(){
   document.querySelectorAll('.strat-tab').forEach(b=> b.onclick=()=>s5Switch(b.dataset.strat));
   $('s5-btn-start').onclick=async()=>{ try{ await s5api('/control/start','POST'); s5Poll(); }catch(e){alert(e.message);} };
   $('s5-btn-stop').onclick=async()=>{ try{ await s5api('/control/stop','POST'); s5Poll(); }catch(e){alert(e.message);} };
-  $('s5-btn-flat').onclick=async()=>{ if(!confirm('Закрыть ВСЕ позиции ST5 по рынку?'))return; try{ await s5api('/control/flat-all','POST',{confirm:true}); s5Poll(); }catch(e){alert(e.message);} };
+  // «закрыть всё» — через кастомную модалку подтверждения (а не нативный confirm)
+  const flatModal=$('s5-flat-modal');
+  const closeFlatModal=()=>flatModal.classList.remove('on');
+  $('s5-btn-flat').onclick=()=>{
+    const n=_s5snap?_s5snap.open_positions:0;
+    $('s5-flat-modal-text').textContent = n>0
+      ? `Все открытые позиции (${n}) будут закрыты по рынку. Действие необратимо.`
+      : 'Открытых позиций нет — закрывать нечего.';
+    flatModal.classList.add('on');
+  };
+  $('s5-flat-cancel').onclick=closeFlatModal;
+  flatModal.onclick=e=>{ if(e.target===flatModal) closeFlatModal(); };   // клик по фону = отмена
+  $('s5-flat-confirm').onclick=async()=>{ closeFlatModal(); try{ await s5api('/control/flat-all','POST',{confirm:true}); s5Poll(); }catch(e){alert(e.message);} };
   $('s5-btn-resume').onclick=async()=>{ await s5api('/control/resume','POST'); s5Poll(); };
   // зум графика z колёсиком + панорама перетаскиванием (как на ST4-графике)
   const s5cv=$('s5chart');
