@@ -771,3 +771,17 @@ def test_daily_summary_filters_today(monkeypatch):
     assert "Сделок: 2" in txt          # только 2 сегодняшние
     assert "+300 ₽" in txt             # 500 − 200, вчерашние 1000 не учтены
     assert "win-rate 50%" in txt       # 1 из 2
+
+
+def test_pair_exit_full_calibrated_to_05():
+    """z_exit_full всех пар = 0.5 (калибровка 2026-06-29: split-half бэктест на 90д ISS показал
+    0.5 > 0.1/0.35 по net И win-rate в ОБЕИХ половинах у sber/sngr/tatn — устойчиво, не overfit).
+    Закрытие остатка на |z|<0.5 (а не дожидаться почти полного схождения) уходит из β-дрейфа/
+    time-stop'ов на копеечном хвосте движения. Меняли — пересними бэктест."""
+    from app.st5.service import ST5_PAIRS, St5Session
+    for pid in ("sber", "sngr", "tatn"):
+        assert ST5_PAIRS[pid][4]["z_exit_full"] == 0.5, pid
+    # _pair_cfg должен реально применить оверрайд к движку
+    s = St5Session()
+    for pid in ("sber", "sngr", "tatn"):
+        assert s.engines[pid].cfg.strategy.z_exit_full == 0.5, pid
