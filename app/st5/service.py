@@ -203,7 +203,9 @@ class St5Session:
         # какие пары торгуем (чекбоксы в UI). По умолчанию все включены.
         self.enabled_pairs: dict[str, bool] = {pid: True for pid in ST5_PAIRS}
         self._lock = asyncio.Lock()
-        self._live_task = None
+        self._live_task = None                   # asyncio.Task текущего run_live (для watchdog-рестарта)
+        self._live_hb = 0.0                      # monotonic-время последнего завершённого прохода run_live
+        self._watchdog_stale_min = 20            # порог «зависания» цикла, мин (см. _watchdog_should_restart)
         self._uid_cache: dict[str, tuple] = {}   # pid -> (uid_ord, uid_pref): кэш против 429 T-Bank
         self._legs_cache: dict[str, tuple] = {}  # pid -> (spec_ord, spec_pref) от resolve_legs
         self._reconciled: set[str] = set()       # пары, по которым сверка со счётом уже сделана
@@ -578,6 +580,7 @@ class St5Session:
                                f"{len(self.engines)} пар, до {self.cfg.risk.max_open_positions} позиций)")
         warmup_limit = max(self.cfg.strategy.adf_window, self.cfg.strategy.hurst_window) + 60
         replayed = False
+        self._live_hb = time.monotonic()   # старт прохода: ещё не завис
         while self.state["live"]:
             try:
                 self._schedule_tick()
@@ -595,9 +598,59 @@ class St5Session:
                         await asyncio.sleep(1.0)   # throttle между парами — против 429 T-Bank
                 replayed = True
                 self.save_session()
+                self._live_hb = time.monotonic()   # проход успешно завершён → watchdog спокоен
             except Exception as e:  # noqa: BLE001
                 self.log_event("warn", f"ST5 live ошибка: {e}")
             await asyncio.sleep(self.cfg.poll_seconds)
+
+    def start_live(self) -> None:
+        """Запустить run_live как фоновую задачу с сохранением ссылки в _live_task (для watchdog).
+        Идемпотентно: если задача уже жива — не дублируем. Вне event loop (тест/CLI) — тихо."""
+        if self._live_task is not None and not self._live_task.done():
+            return
+        try:
+            self._live_task = asyncio.create_task(self.run_live())
+        except RuntimeError:
+            self._live_task = None   # нет running loop (тест/CLI)
+
+    def _watchdog_should_restart(self, now_mono: float, ts_sec: float | None = None) -> bool:
+        """Чистый предикат: завис ли live-цикл и нужно ли его перезапустить.
+
+        True ⇔ state["live"] И биржа сейчас открыта (forts_kind=='live') И с последнего успешно
+        завершённого прохода (_live_hb) прошло больше _watchdog_stale_min минут. Биржу проверяем,
+        чтобы НЕ дёргать перезапуск ночью/в выходные (там баров нет легитимно — это не зависание)."""
+        if not self.state.get("live"):
+            return False
+        minute, _sec, dow = sched.msk_minute_dow(ts_sec)
+        if sched.forts_kind(minute, dow) != "live":
+            return False
+        if self._live_hb <= 0:
+            return False   # цикл ещё ни разу не завершил проход — не считаем зависанием
+        return (now_mono - self._live_hb) > self._watchdog_stale_min * 60
+
+    async def watchdog_loop(self) -> None:
+        """Сторож зависания live-цикла: раз в 60с проверяет _watchdog_should_restart; при срабатывании
+        отменяет залипшую задачу run_live и поднимает новую. Так live самовосстанавливается без рестарта
+        сервиса (autoresume стартует цикл после рестарта, но не ловит зависание ПОСЛЕ старта)."""
+        while True:
+            await asyncio.sleep(60)
+            try:
+                if not self._watchdog_should_restart(time.monotonic()):
+                    continue
+                stale = int((time.monotonic() - self._live_hb) / 60)
+                self.log_event("warn", f"watchdog: live-цикл завис ({stale}м без прохода) — перезапуск")
+                t = self._live_task
+                if t is not None and not t.done():
+                    t.cancel()
+                    try:
+                        await t
+                    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                        pass
+                self._live_task = None
+                self.start_live()
+                self._notify(f"🔄 <b>ST5 live перезапущен</b> (watchdog: цикл завис {stale}м)")
+            except Exception as e:  # noqa: BLE001
+                self.log_event("warn", f"watchdog ошибка: {e}")
 
     # ---------- планировщик уведомлений об открытии/закрытии биржи ----------
     def _schedule_tick(self, ts_sec: float | None = None) -> None:

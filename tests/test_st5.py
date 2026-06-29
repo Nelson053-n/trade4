@@ -771,3 +771,31 @@ def test_daily_summary_filters_today(monkeypatch):
     assert "Сделок: 2" in txt          # только 2 сегодняшние
     assert "+300 ₽" in txt             # 500 − 200, вчерашние 1000 не учтены
     assert "win-rate 50%" in txt       # 1 из 2
+
+
+def test_watchdog_should_restart_predicate():
+    """Watchdog перезапускает live-цикл только если он реально завис ПРИ открытой бирже."""
+    from app.st5.service import St5Session
+    s = St5Session()
+    MON_OPEN = 1782723600    # понедельник 12:00 МСК — FORTS открыт (forts_kind=='live')
+    SUN_CLOSED = 1782637200  # воскресенье 12:00 МСК — биржа закрыта
+    NOW = 100000.0           # произвольный monotonic-момент
+    stale = s._watchdog_stale_min * 60
+
+    # не live → никогда не перезапускаем
+    s.state["live"] = False
+    s._live_hb = NOW - stale - 100
+    assert s._watchdog_should_restart(NOW, ts_sec=MON_OPEN) is False
+
+    s.state["live"] = True
+    # биржа открыта + проход устарел сильнее порога → перезапуск
+    s._live_hb = NOW - stale - 100
+    assert s._watchdog_should_restart(NOW, ts_sec=MON_OPEN) is True
+    # тот же застой, но биржа ЗАКРЫТА (ночь/выходной) → НЕ перезапуск (баров нет легитимно)
+    assert s._watchdog_should_restart(NOW, ts_sec=SUN_CLOSED) is False
+    # биржа открыта, но проход свежий → не трогаем
+    s._live_hb = NOW - 60
+    assert s._watchdog_should_restart(NOW, ts_sec=MON_OPEN) is False
+    # цикл ещё ни разу не завершил проход (_live_hb==0) → не считаем зависанием
+    s._live_hb = 0.0
+    assert s._watchdog_should_restart(NOW, ts_sec=MON_OPEN) is False

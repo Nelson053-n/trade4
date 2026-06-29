@@ -152,7 +152,7 @@ async def _st5_autoresume():
     ST5.state["sandbox_active"] = bool(want_broker and ST5.cfg.connector.account_id)
     ST5.log_event("info", f"автовозобновление ST5 live после рестарта ({ST5.cfg.connector.mode})")
     if ST5.state["live"]:
-        await ST5.run_live()
+        ST5.start_live()
 
 
 def _run_backtest_tbank(stop_sigma: float | None, ST4: St4Session) -> dict:
@@ -234,8 +234,10 @@ async def lifespan(app: FastAPI):
     ST5.load_session()                                  # портфельная сессия st5
     if ST5.state.pop("resume_live", False):
         asyncio.create_task(_st5_autoresume())          # автостарт: ST5 live шёл до рестарта
+    _watchdog_task = asyncio.create_task(ST5.watchdog_loop())  # самовосстановление зависшего live-цикла
     _auto_bt_task = asyncio.create_task(_auto_backtest_loop())
     yield
+    _watchdog_task.cancel()
     _auto_bt_task.cancel()
     for s4 in ST4S.values():
         s4.save_session()
@@ -580,13 +582,8 @@ async def st5_start():
     want_broker = ST5.cfg.connector.mode in ("tbank_sandbox", "tbank_real")
     ST5.state["sandbox_active"] = bool(want_broker and ST5.cfg.connector.account_id)
 
-    async def _boot():
-        if ST5.state["live"]:
-            await ST5.run_live()
-
-    try:
-        asyncio.create_task(_boot())
-    except RuntimeError:
+    ST5.start_live()
+    if ST5._live_task is None:
         ST5.state["live"] = False   # нет event loop (тест/CLI) — не стартуем фоном
     return {"ok": True, "mode": ST5.cfg.connector.mode, "sandbox_active": ST5.state["sandbox_active"]}
 
