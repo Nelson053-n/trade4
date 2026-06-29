@@ -1821,19 +1821,32 @@ async function s5LoadWeekly(){
     const day=s=>{ const t=new Date(s+'T00:00:00'); return t.toLocaleDateString('ru',{day:'2-digit',month:'2-digit'}); };
     const BH=70;        // высота области столбиков
     const COLW=60+10;   // ширина «колонки» дня = min-width(60) + gap(10), как у flex-столбиков
-    // фоновая линия дневной net: огибающая по верхушкам net-столбиков (та же |net|/mx*BH от низа,
-    // что и у столбиков). Знак виден цветом столбика/числом. Единая mx → линии сопоставимы между
-    // инструментами. SVG позиционируется ровно в зоне столбиков (высота BH, над подписями дат).
+    // фоновая линия дневной net: ГЛАДКАЯ кривая (Catmull-Rom → Безье) по дневным точкам. Верхний
+    // отступ PAD оставляет место под цифры над столбиками (даже максимум не доходит до верха зоны).
+    // Единая mx → линии сопоставимы между инструментами.
+    const PAD=16;       // зарезервировано сверху под цифры (чтобы линия их не перекрывала)
     const lineSvg=rows=>{
       if(rows.length<1) return '';
       const w=rows.length*COLW;
-      const y=v=>BH - Math.min(Math.abs(v)/mx*BH, BH);   // верхушка столбика net от низа зоны
-      const pts=rows.map((r,i)=>`${Math.round(i*COLW+COLW/2)},${Math.round(y(r.net))}`).join(' ');
+      const y=v=>BH - Math.min(Math.abs(v)/mx*(BH-PAD), BH-PAD);   // 0..(BH-PAD) от низа
+      const P=rows.map((r,i)=>[i*COLW+COLW/2, y(r.net)]);
+      // гладкий путь: Catmull-Rom через точки, сконвертированный в кубические Безье
+      let d;
+      if(P.length===1){ d=`M${P[0][0].toFixed(1)},${P[0][1].toFixed(1)} l0.01,0`; }
+      else {
+        d=`M${P[0][0].toFixed(1)},${P[0][1].toFixed(1)}`;
+        for(let i=0;i<P.length-1;i++){
+          const p0=P[i-1]||P[i], p1=P[i], p2=P[i+1], p3=P[i+2]||P[i+1];
+          const c1x=p1[0]+(p2[0]-p0[0])/6, c1y=p1[1]+(p2[1]-p0[1])/6;
+          const c2x=p2[0]-(p3[0]-p1[0])/6, c2y=p2[1]-(p3[1]-p1[1])/6;
+          d+=` C${c1x.toFixed(1)},${c1y.toFixed(1)} ${c2x.toFixed(1)},${c2y.toFixed(1)} ${p2[0].toFixed(1)},${p2[1].toFixed(1)}`;
+        }
+      }
       return `<svg width="${w}" height="${BH}" viewBox="0 0 ${w} ${BH}" preserveAspectRatio="none"
-        style="position:absolute;left:0;bottom:32px;pointer-events:none;overflow:visible;opacity:.45">
-        <polyline points="${pts}" fill="none" stroke="var(--chart-line)" stroke-width="2"
+        style="position:absolute;left:0;bottom:32px;pointer-events:none;overflow:visible;opacity:.4">
+        <path d="${d}" fill="none" stroke="var(--chart-line)" stroke-width="2"
           stroke-linejoin="round" stroke-linecap="round"/>
-        ${rows.map((r,i)=>`<circle cx="${Math.round(i*COLW+COLW/2)}" cy="${Math.round(y(r.net))}" r="2.5" fill="var(--chart-line)"/>`).join('')}
+        ${P.map(p=>`<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="2" fill="var(--chart-line)"/>`).join('')}
       </svg>`;
     };
     wrap.innerHTML=pairs.map(p=>{
@@ -1842,7 +1855,7 @@ async function s5LoadWeekly(){
         const nh=Math.round(Math.abs(r.net)/mx*BH), fh=Math.round(Math.abs(r.fee)/mx*BH);
         const nc=r.net>=0?'var(--signal)':'var(--loss)';
         return `<div style="display:flex;flex-direction:column;align-items:center;gap:4px;min-width:60px" title="${day(r.date)}: прибыль ${s5money(r.net)}, комиссия −${r.fee}₽, сделок ${r.trades}">
-          <div style="font-size:10px;color:${nc};font-weight:600">${r.net>=0?'+':''}${r.net}</div>
+          <div style="font-size:10px;color:${nc};font-weight:600;position:relative;z-index:1">${r.net>=0?'+':''}${r.net}</div>
           <div style="display:flex;align-items:flex-end;gap:3px;height:${BH}px">
             <div style="width:16px;height:${Math.max(nh,2)}px;background:${nc};border-radius:3px 3px 0 0"></div>
             <div style="width:16px;height:${Math.max(fh,2)}px;background:var(--ink-dim);opacity:.55;border-radius:3px 3px 0 0"></div>
