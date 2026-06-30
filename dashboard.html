@@ -1911,6 +1911,7 @@ async function s5LoadWeekly(){
     // столбики — по |net|/|fee|, фоновая линия дневной net — по той же mx, с осью ноля посередине.
     let mx=1; pairs.forEach(p=>(p.rows||[]).forEach(r=>{ mx=Math.max(mx, Math.abs(r.net), Math.abs(r.fee)); }));
     const day=s=>{ const t=new Date(s+'T00:00:00'); return t.toLocaleDateString('ru',{day:'2-digit',month:'2-digit'}); };
+    const dow=s=>{ const t=new Date(s+'T00:00:00'); return t.toLocaleDateString('ru',{weekday:'short'}); };   // пн/вт/…
     const BH=70;        // высота области столбиков
     const COLW=60+10;   // ширина «колонки» дня = min-width(60) + gap(10), как у flex-столбиков
     // фоновая линия дневной net: ГЛАДКАЯ кривая (Catmull-Rom → Безье) по дневным точкам. Верхний
@@ -1952,7 +1953,7 @@ async function s5LoadWeekly(){
             <div style="width:16px;height:${Math.max(nh,2)}px;background:${nc};border-radius:3px 3px 0 0"></div>
             <div style="width:16px;height:${Math.max(fh,2)}px;background:var(--ink-dim);opacity:.55;border-radius:3px 3px 0 0"></div>
           </div>
-          <div style="font-size:10px;color:var(--ink-dim)">${day(r.date)}</div>
+          <div style="font-size:10px;color:var(--ink-dim);text-align:center;line-height:1.3">${day(r.date)}<br><span style="color:var(--ink-faint)">${dow(r.date)}</span></div>
         </div>`;
       }).join('') : '<div class="empty" style="font-size:12px">нет зафиксированных сделок</div>';
       const tc=p.total_net>=0?'var(--signal)':'var(--loss)';
