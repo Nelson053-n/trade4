@@ -445,6 +445,23 @@ def test_calibrate_noop_when_flat_or_no_data():
     assert s.portfolio.go_factor == 3.0   # не сбросили в 1.0 на пустых данных
 
 
+def test_order_book_parses_levels(monkeypatch):
+    """order_book парсит bids/asks T-Bank GetOrderBook в {price,qty} + last."""
+    from app.st4 import tbank_sandbox as sb
+    fake = {
+        "bids": [{"price": {"units": "28218", "nano": 0}, "quantity": "4"},
+                 {"price": {"units": "28217", "nano": 0}, "quantity": "2"}],
+        "asks": [{"price": {"units": "28219", "nano": 0}, "quantity": "1"}],
+        "lastPrice": {"units": "28218", "nano": 0},
+    }
+    monkeypatch.setattr(sb, "_call", lambda *a, **k: fake)
+    ob = sb.order_book("uid", depth=10)
+    assert ob["bids"][0] == {"price": 28218.0, "qty": 4}
+    assert ob["bids"][1]["qty"] == 2
+    assert ob["asks"][0] == {"price": 28219.0, "qty": 1}
+    assert ob["last"] == 28218.0
+
+
 def test_live_intent_resumes_after_graceful_restart(tmp_path):
     """resume_live считается по live_intent (намерение оператора), а НЕ по live (факт. состояние).
     graceful restart ставит live=False, но intent остаётся → autoresume стартует."""

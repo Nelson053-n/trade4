@@ -227,6 +227,18 @@ def last_price(figi: str) -> float:
     return _q_to_float(lp[0]["price"]) if lp else 0.0
 
 
+def order_book(instrument_id: str, depth: int = 10) -> dict:
+    """Биржевой стакан (DOM): уровни bid/ask с объёмами. instrument_id — uid/figi серии.
+    Возвращает {bids:[{price,qty}], asks:[{price,qty}], last}. bids — по убыванию цены,
+    asks — по возрастанию (как отдаёт T-Bank)."""
+    resp = _call(_MARKETDATA, "GetOrderBook", {"instrumentId": instrument_id, "depth": depth})
+    def _lvls(key):
+        return [{"price": _q_to_float(r.get("price")), "qty": int(r.get("quantity", 0))}
+                for r in resp.get(key, [])]
+    return {"bids": _lvls("bids"), "asks": _lvls("asks"),
+            "last": _q_to_float(resp.get("lastPrice"))}
+
+
 def is_tradable(instrument_id: str) -> bool:
     """Доступен ли инструмент для торгов СЕЙЧАС (tradingStatus + флаги ордеров).
     Чтобы не слать ордер в неторговое время (клиринг/ночь/выходные) → HTTP400 30079."""

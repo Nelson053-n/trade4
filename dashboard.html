@@ -695,6 +695,12 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
         </div>
       </div>
       <div class="card">
+        <h2>Стакан (DOM) <span class="em" id="s5-ob-sub">объём bid/ask по уровням</span>
+          <select id="s5-ob-pair" style="float:right;font-size:11px;background:var(--panel-2);border:1px solid var(--line);border-radius:6px;color:var(--ink);padding:2px 6px"><option value="sber">Сбер</option><option value="sngr">Сургут</option><option value="tatn">Татнефть</option></select></h2>
+        <button class="btn" id="s5-btn-ob" style="margin-bottom:10px">обновить стакан</button>
+        <div id="s5-ob-out" style="font-size:11px"><span style="color:var(--ink-faint)">нажми «обновить» (только при активном брокере)</span></div>
+      </div>
+      <div class="card">
         <h2>Коннектор / боевой контур</h2>
         <div class="params" style="grid-template-columns:1fr;margin-bottom:11px">
           <div class="fld"><label>режим</label><select id="s5-conn-mode">
@@ -1611,7 +1617,7 @@ function s5Render(s){
   if(!trs.length) trb.innerHTML='<tr><td colspan="8" class="empty">сделок пока нет</td></tr>';
   const rowHtml=t=>{
     const dir=t.state==='long_spread'?'лонг':'шорт';
-    const reason={take_partial:'фикс 50%',exit:'выход z<0.35',z_stop:'стоп z',time_stop:'тайм-стоп',adf_break:'разрыв коинт.',flat_all:'flat-all',flat_interrupt:'закрыто по прерыванию'}[t.reason]||t.reason;
+    const reason={take_partial:'фикс 50%',exit:'выход (z→0)',z_stop:'стоп z',time_stop:'тайм-стоп',adf_break:'разрыв коинт.',flat_all:'flat-all',flat_interrupt:'закрыто по прерыванию'}[t.reason]||t.reason;
     const fee = t.fees_rub!=null ? '−'+Math.round(t.fees_rub)+' ₽' : '—';
     // время закрытия сделки (по МСК); усыновлённые помечаем значком (entry-метрики искажены)
     const when = s4dateMsk(t.exit_ts) + (t.adopted ? ' <span title="усыновлена со счёта — z/время входа неточны" style="color:var(--warn)">⇪</span>' : '');
@@ -1754,7 +1760,7 @@ requestAnimationFrame(s5AnimLoop);
     let best=null,bd=16;
     (_s5geom.pts||[]).forEach(p=>{ const d=Math.hypot(p.X-mx,p.Y-my); if(d<bd){bd=d;best=p;} });
     if(best){ const t=best.t;
-      const rs={take_partial:'фиксация 50% (z вернулся к ±1)',exit:'полный выход (z<0.35, к равновесию)',z_stop:'СТОП: z>4.25 (разошлось дальше)',time_stop:'тайм-стоп (3×half-life)',adf_break:'разрыв коинтеграции (ADF>0.15)',flat_all:'аварийное закрытие'}[t.reason]||t.reason;
+      const rs={take_partial:'фиксация 50% (z вернулся к порогу)',exit:'полный выход остатка (z к равновесию)',z_stop:'СТОП: z разошёлся дальше',time_stop:'тайм-стоп (3×half-life)',adf_break:'разрыв коинтеграции (ADF>0.15)',flat_all:'аварийное закрытие'}[t.reason]||t.reason;
       tip.innerHTML=`<b>${best.kind==='entry'?'ВХОД':'ВЫХОД'}</b> · ${t.state==='long_spread'?'лонг':'шорт'} спреда<br>z ${best.kind==='entry'?t.entry_z.toFixed(2):t.exit_z.toFixed(2)} · ${t.lots} лот<br>${best.kind==='exit'?rs+'<br>':''}net <span style="color:${t.net_pnl_rub>=0?'var(--signal)':'var(--loss)'}">${s5money(t.net_pnl_rub)}</span>`;
       tip.style.display='block'; tip.style.left=Math.min(mx+14,r.width-160)+'px'; tip.style.top=(my+14)+'px'; return;
     }
@@ -1815,6 +1821,30 @@ function s5CalcGo(){
     `ГО на сделку (макс. пара, ${lots} лот): <b>${rub(trade)}</b> ${limTrade>0?'/ лимит '+rub(limTrade)+' '+mark(okT):''}<br>`+
     `ГО портфеля (${nPairs} пар × ${lots} лот): <b>${rub(port)}</b> ${limPort>0?'/ лимит '+rub(limPort)+' '+mark(okP):''}<br>`+
     `<span style="color:var(--ink-faint)">с поправкой go_factor ×${gf} (реально блокируемое биржей). ISS-оценка без поправки: сделка ${rub(trade/gf)}, портфель ${rub(port/gf)}.</span>`;
+}
+// стакан (DOM): одна нога = asks сверху (к спреду) + bids снизу, бар = объём/макс
+function s5RenderLeg(leg){
+  if(!leg||leg.error) return `<div style="color:var(--loss)">${leg&&leg.error?s4esc(leg.error):'нет данных'}</div>`;
+  const all=[...(leg.asks||[]),...(leg.bids||[])];
+  const mx=Math.max(1,...all.map(l=>l.qty));
+  const bar=(qty,col)=>`<div style="display:flex;align-items:center;gap:4px"><span style="display:inline-block;height:9px;width:${Math.round(qty/mx*60)}px;min-width:2px;background:${col};border-radius:2px"></span><span style="color:var(--ink-dim)">${qty}</span></div>`;
+  const row=(l,col)=>`<tr><td style="text-align:right;color:${col};font-family:var(--mono)">${l.price}</td><td>${bar(l.qty,col)}</td></tr>`;
+  const asks=(leg.asks||[]).slice().reverse().map(l=>row(l,'var(--loss)')).join('');   // дальние сверху, лучший ask внизу
+  const bids=(leg.bids||[]).map(l=>row(l,'var(--signal)')).join('');                    // лучший bid сверху
+  return `<div style="font-weight:600;margin-bottom:3px">${leg.code}</div>`+
+    `<table style="width:100%;border-collapse:collapse;font-size:11px">${asks}`+
+    `<tr><td colspan="2" style="border-top:1px solid var(--line);border-bottom:1px solid var(--line);text-align:center;color:var(--ink-faint);padding:2px 0">${leg.last||'—'}</td></tr>`+
+    `${bids}</table>`;
+}
+async function s5LoadOrderBook(){
+  const pair=$('s5-ob-pair').value, out=$('s5-ob-out');
+  out.innerHTML='<span style="color:var(--ink-faint)">гружу стакан…</span>';
+  try{ const d=await s5api('/orderbook?pair='+pair+'&depth=10');
+    if(d.error){ out.innerHTML='<span style="color:var(--loss)">'+s4esc(d.error)+'</span>'; return; }
+    out.innerHTML=`<div style="display:flex;gap:16px">`+
+      `<div style="flex:1">${s5RenderLeg(d.ord)}</div><div style="flex:1">${s5RenderLeg(d.pref)}</div></div>`+
+      `<div style="color:var(--ink-faint);margin-top:6px">красный — ask (продажа), зелёный — bid (покупка); полоса = объём (лотов). Снимок на момент запроса.</div>`;
+  }catch(e){ out.innerHTML='<span style="color:var(--loss)">ошибка: '+s4esc(e.message)+'</span>'; }
 }
 let _s5dailyLoaded=false;
 async function s5LoadDaily(){
@@ -2030,6 +2060,9 @@ function s5Init(){
   };
   // калькулятор ГО: пересчёт на лету при вводе
   ['s5-calc-lots','s5-calc-pairs'].forEach(id=>{ const e=$(id); if(e) e.oninput=s5CalcGo; });
+  // стакан (DOM): по кнопке и при смене пары (без автополлинга — снимок по запросу)
+  $('s5-btn-ob').onclick=s5LoadOrderBook;
+  $('s5-ob-pair').onchange=s5LoadOrderBook;
   $('s5-btn-sweep').onclick=async()=>{
     const pair=$('s5-sw-pair').value, param=$('s5-sw-param').value, days=$('s5-sw-days').value;
     $('s5-sweep-res').textContent='перебор '+param+' на '+days+' (может занять минуту)…';

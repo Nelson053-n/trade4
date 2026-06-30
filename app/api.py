@@ -884,6 +884,35 @@ async def st5_margin():
     return _clean(await asyncio.to_thread(_run))
 
 
+@app.get("/st5/orderbook")
+async def st5_orderbook(pair: str = "sber", depth: int = 10):
+    """Биржевой стакан (DOM) обеих ног пары: bids/asks с объёмами. Только при активном брокере."""
+    from .st5.service import ST5_PAIRS
+    if pair not in ST5_PAIRS:
+        raise HTTPException(400, "pair: " + " | ".join(ST5_PAIRS))
+    if not ST5.state.get("sandbox_active"):
+        raise HTTPException(400, "стакан доступен только при активном брокере (sandbox/real)")
+
+    def _run():
+        from .st4.config import St4Config as _C4
+        from .st4 import data_feed as _feed
+        from .st4 import tbank_sandbox as _sb
+        spec = ST5_PAIRS[pair]
+        c4 = _C4(); c4.instruments.asset_ordinary = spec[0]; c4.instruments.asset_preferred = spec[1]
+        c4.strategy.candle_interval_minutes = ST5.cfg.strategy.candle_interval_minutes
+        try:
+            so, sp = _feed.resolve_legs(c4)
+            uo = _sb.find_future(so.code)["uid"]
+            up = _sb.find_future(sp.code)["uid"]
+            return {"pair": pair, "depth": depth,
+                    "ord": {"code": so.code, **_sb.order_book(uo, depth)},
+                    "pref": {"code": sp.code, **_sb.order_book(up, depth)}}
+        except Exception as e:  # noqa: BLE001
+            return {"error": f"стакан недоступен: {e}"}
+
+    return _clean(await asyncio.to_thread(_run))
+
+
 _ST5_SWEEP_PARAMS = {
     "z_entry": [1.75, 2.0, 2.25, 2.5, 2.75, 3.0],
     "z_stop": [3.5, 4.0, 4.25, 4.5, 5.0, 6.0],
