@@ -881,7 +881,7 @@ class St5Session:
         if self.cfg.notify.notify_entry:
             label = _P[pid][3]
             dir_txt = "LONG спред" if p.state == St5State.LONG_SPREAD else "SHORT спред"
-            self._notify(f"🟢 <b>Вход</b> · {tg.esc(label)}\n{dir_txt} · z={p.entry_z:+.2f} · "
+            self._notify(f"⚪ <b>Вход</b> · {tg.esc(label)}\n{dir_txt} · z={p.entry_z:+.2f} · "
                          f"{p.lots} лот · {tg.esc(self.cfg.connector.mode)}")
         self.save_session()   # немедленный персист: рестарт между открытием и концом прохода НЕ потеряет позицию
 
@@ -912,7 +912,7 @@ class St5Session:
         if self.cfg.notify.notify_exit:
             from .service import ST5_PAIRS as _P
             label = _P[pid][3]
-            icon = "🔴" if tr.reason != "take_partial" else "🟡"
+            icon = "🟢" if tr.net_pnl_rub >= 0 else "🔴"   # выход в плюс — зелёный, в минус — красный
             head = "Частичная фиксация" if tr.reason == "take_partial" else "Выход"
             self._notify(f"{icon} <b>{head}</b> · {tg.esc(label)}\n{tg.esc(tr.reason)} · "
                          f"net {tr.net_pnl_rub:+.0f} ₽ (комиссия {tr.fees_rub:.0f} ₽) · "

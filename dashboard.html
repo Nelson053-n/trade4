@@ -1721,15 +1721,14 @@ function s5DrawChart(){
   const t0=hist[0].ts, t1=hist[hist.length-1].ts;
   const idxAt=ts=>{ let bi=-1,bd=Infinity; hist.forEach((p,i)=>{const d=Math.abs(p.ts-ts); if(d<bd){bd=d;bi=i;}}); return bd<6e5*3?bi:-1; };
   const ring=(X,Y,col,rd)=>{ ctx.beginPath();ctx.arc(X,Y,rd||4.5,0,7);ctx.fillStyle=C.panel;ctx.fill();ctx.lineWidth=2;ctx.strokeStyle=col;ctx.stroke(); };
-  const reasonCol={take_partial:C.warn,exit:C.win,z_stop:C.loss,time_stop:C.loss,adf_break:C.loss,flat_all:C.ink};
   const geomPts=[];
   (_s5trades||[]).filter(t=>t.pair===_s5chartPair).forEach(t=>{
     const ei=idxAt(t.entry_ts), xi=idxAt(t.exit_ts);
-    if(ei>=0){ const X=x(ei),Y=y(t.entry_z); // вход — кольцо цвета направления
-      const col=t.state==='long_spread'?C.win:C.short;
-      if(xi>=0){ const X2=x(xi),Y2=y(t.exit_z); ctx.save();ctx.globalAlpha=.4;ctx.strokeStyle=reasonCol[t.reason]||C.ax;ctx.lineWidth=1.4;ctx.beginPath();ctx.moveTo(X,Y);ctx.lineTo(X2,Y2);ctx.stroke();ctx.restore();
-        ring(X2,Y2,reasonCol[t.reason]||C.ax,t.reason==='take_partial'?3.5:4.5); geomPts.push({X:X2,Y:Y2,t,kind:'exit'}); }
-      ring(X,Y,col); geomPts.push({X,Y,t,kind:'entry'});
+    if(ei>=0){ const X=x(ei),Y=y(t.entry_z); // вход — СЕРОЕ кольцо; выход — по net (плюс зелёный / минус красный)
+      const exitCol=(t.net_pnl_rub>=0)?C.win:C.loss;
+      if(xi>=0){ const X2=x(xi),Y2=y(t.exit_z); ctx.save();ctx.globalAlpha=.4;ctx.strokeStyle=exitCol;ctx.lineWidth=1.4;ctx.beginPath();ctx.moveTo(X,Y);ctx.lineTo(X2,Y2);ctx.stroke();ctx.restore();
+        ring(X2,Y2,exitCol,t.reason==='take_partial'?3.5:4.5); geomPts.push({X:X2,Y:Y2,t,kind:'exit'}); }
+      ring(X,Y,C.ax); geomPts.push({X,Y,t,kind:'entry'});
     }
   });
   // последняя точка z — пульсация (анимация «живого» сигнала)
