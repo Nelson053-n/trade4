@@ -445,6 +445,39 @@ def test_calibrate_noop_when_flat_or_no_data():
     assert s.portfolio.go_factor == 3.0   # не сбросили в 1.0 на пустых данных
 
 
+def test_live_intent_resumes_after_graceful_restart(tmp_path):
+    """resume_live считается по live_intent (намерение оператора), а НЕ по live (факт. состояние).
+    graceful restart ставит live=False, но intent остаётся → autoresume стартует."""
+    from app.st5.service import St5Session
+    s = St5Session()
+    s._session_file = tmp_path / "s5.json"
+    # оператор запустил торговлю: intent=True
+    s.state["live_intent"] = True
+    s.state["live"] = True
+    # graceful shutdown (lifespan): live→False, но intent НЕ трогаем
+    s.state["live"] = False
+    s.save_session()
+    # рестарт: новый процесс грузит сессию
+    s2 = St5Session()
+    s2._session_file = s._session_file
+    s2.load_session()
+    assert s2.state["resume_live"] is True, "intent=True → должен возобновить live после рестарта"
+
+
+def test_stop_clears_intent_no_resume(tmp_path):
+    """Оператор нажал «стоп» (intent=False) → после рестарта НЕ возобновляем (он сам остановил)."""
+    from app.st5.service import St5Session
+    s = St5Session()
+    s._session_file = tmp_path / "s5.json"
+    s.state["live_intent"] = False    # оператор остановил
+    s.state["live"] = False
+    s.save_session()
+    s2 = St5Session()
+    s2._session_file = s._session_file
+    s2.load_session()
+    assert s2.state["resume_live"] is False
+
+
 def test_trade_limit_uses_go_factor():
     """Лимит ГО на сделку считается от ОЦЕНКИ×go_factor. Лимит 0.5% от 1М = 5000.
     risk_rub=2000, factor=4.5 → эффективно 9000 > 5000 → отказ."""

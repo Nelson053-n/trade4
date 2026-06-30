@@ -143,6 +143,7 @@ async def _st5_autoresume():
     Журнал/история/last_live_ts тоже восстановлены — движок прогреется по last_live_ts."""
     import time as _t
     ST5.state["live"] = True
+    ST5.state["live_intent"] = True    # сохраняем намерение → цепочка автостартов не прервётся
     ST5.state["paused_by_user"] = False
     ST5.state["data_source"] = "live"
     if not ST5.state.get("session_started"):
@@ -577,6 +578,7 @@ async def st5_start():
         return {"ok": True, "already": True}
     import time as _t
     ST5.state["live"] = True
+    ST5.state["live_intent"] = True    # намерение торговать → автостарт после будущих рестартов
     ST5.state["paused_by_user"] = False
     ST5.state["session_started"] = _t.time()
     ST5.state["data_source"] = "live"
@@ -587,6 +589,7 @@ async def st5_start():
     ST5.start_live()
     if ST5._live_task is None:
         ST5.state["live"] = False   # нет event loop (тест/CLI) — не стартуем фоном
+    ST5.save_session()              # персистим live_intent сразу (автостарт переживёт рестарт)
     return {"ok": True, "mode": ST5.cfg.connector.mode, "sandbox_active": ST5.state["sandbox_active"]}
 
 
@@ -594,6 +597,7 @@ async def st5_start():
 def st5_stop():
     _st5_guard_no_position("пауза")
     ST5.state["live"] = False
+    ST5.state["live_intent"] = False   # оператор сам остановил → НЕ автостартовать после рестарта
     ST5.state["paused_by_user"] = True
     ST5.save_session()
     return {"ok": True}

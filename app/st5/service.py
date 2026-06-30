@@ -212,9 +212,9 @@ class St5Session:
         self.trades: list[dict] = []             # общий журнал портфеля (json-записи)
         self.history: dict[str, list] = {pid: [] for pid in ST5_PAIRS}   # история спреда по парам
         self.events: list[dict] = []
-        self.state = {"live": False, "session_started": None, "paused_by_user": False,
-                      "data_source": "synthetic", "sandbox_active": False,
-                      "real_trading_armed": False}
+        self.state = {"live": False, "live_intent": False, "session_started": None,
+                      "paused_by_user": False, "data_source": "synthetic",
+                      "sandbox_active": False, "real_trading_armed": False}
         self.last_live_ts: dict[str, int] = {pid: 0 for pid in ST5_PAIRS}
         # какие пары торгуем (чекбоксы в UI). По умолчанию все включены.
         self.enabled_pairs: dict[str, bool] = {pid: True for pid in ST5_PAIRS}
@@ -376,6 +376,10 @@ class St5Session:
                 # заблокированное; при flat=0, обновляется в refresh_capital).
                 "go_factor": self.portfolio.go_factor,
                 "live": self.state["live"],
+                # live_intent — НАМЕРЕНИЕ оператора торговать (start→True, stop→False). В отличие от
+                # live (факт. состояние, сбрасывается в False на graceful shutdown) переживает
+                # рестарт → автостарт после деплоя/рестарта без ручного /control/start.
+                "live_intent": self.state.get("live_intent", False),
                 "paused_by_user": self.state["paused_by_user"],
                 "data_source": self.state["data_source"],
                 "sandbox_active": self.state.get("sandbox_active", False),
@@ -503,8 +507,12 @@ class St5Session:
             except Exception:  # noqa: BLE001  битая запись не должна ронять старт
                 pass
         self.state["sandbox_active"] = bool(data.get("sandbox_active", False))
-        # авто-возобновление live, если шёл до рестарта (lifespan стартует _st5_autoresume)
-        self.state["resume_live"] = bool(data.get("live", False))
+        # авто-возобновление live по НАМЕРЕНИЮ оператора (live_intent), а не по факт. live: graceful
+        # restart пишет live=False, но intent переживает → автостарт после рестарта/деплоя.
+        # Fallback на live для старых session-файлов без поля live_intent.
+        intent = data.get("live_intent")
+        self.state["live_intent"] = bool(intent if intent is not None else data.get("live", False))
+        self.state["resume_live"] = self.state["live_intent"]
         self.state["live"] = False                # live поднимется заново через autoresume
         # БЕЗОПАСНОСТЬ: рестарт ВСЕГДА снимает взвод реальной торговли (safe-by-default)
         self.state["real_trading_armed"] = False
