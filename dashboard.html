@@ -1839,12 +1839,22 @@ function s5RenderLeg(leg){
 async function s5LoadOrderBook(){
   const pair=$('s5-ob-pair').value, out=$('s5-ob-out');
   out.innerHTML='<span style="color:var(--ink-faint)">гружу стакан…</span>';
-  try{ const d=await s5api('/orderbook?pair='+pair+'&depth=10');
-    if(d.error){ out.innerHTML='<span style="color:var(--loss)">'+s4esc(d.error)+'</span>'; return; }
-    out.innerHTML=`<div style="display:flex;gap:16px">`+
-      `<div style="flex:1">${s5RenderLeg(d.ord)}</div><div style="flex:1">${s5RenderLeg(d.pref)}</div></div>`+
-      `<div style="color:var(--ink-faint);margin-top:6px">красный — ask (продажа), зелёный — bid (покупка); полоса = объём (лотов). Снимок на момент запроса.</div>`;
-  }catch(e){ out.innerHTML='<span style="color:var(--loss)">ошибка: '+s4esc(e.message)+'</span>'; }
+  // транзиентный сетевой сбой к T-Bank (Remote end closed / timeout) — авто-ретрай до 2 раз
+  for(let attempt=0; attempt<3; attempt++){
+    try{ const d=await s5api('/orderbook?pair='+pair+'&depth=10');
+      if(d.error){
+        if(attempt<2){ out.innerHTML='<span style="color:var(--ink-faint)">соединение сорвалось, повтор…</span>'; await new Promise(r=>setTimeout(r,800)); continue; }
+        out.innerHTML='<span style="color:var(--warn)">биржа временно не ответила. Нажми «обновить» ещё раз.</span>'; return;
+      }
+      out.innerHTML=`<div style="display:flex;gap:16px">`+
+        `<div style="flex:1">${s5RenderLeg(d.ord)}</div><div style="flex:1">${s5RenderLeg(d.pref)}</div></div>`+
+        `<div style="color:var(--ink-faint);margin-top:6px">красный — ask (продажа), зелёный — bid (покупка); полоса = объём (лотов). Снимок на момент запроса.</div>`;
+      return;
+    }catch(e){
+      if(attempt<2){ await new Promise(r=>setTimeout(r,800)); continue; }
+      out.innerHTML='<span style="color:var(--warn)">биржа временно не ответила. Нажми «обновить» ещё раз.</span>';
+    }
+  }
 }
 let _s5dailyLoaded=false;
 async function s5LoadDaily(){
