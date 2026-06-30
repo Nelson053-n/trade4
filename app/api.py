@@ -490,6 +490,8 @@ def st5_set_config(payload: dict):
     s.adf_p_enter = _num("adf_p_enter", 0.001, 0.5, s.adf_p_enter)
     s.rv_ratio_max = _num("rv_ratio_max", 0.5, 5.0, s.rv_ratio_max)
     r.max_open_positions = int(_num("max_open_positions", 1, 3, r.max_open_positions))
+    r.max_go_per_trade_rub = _num("max_go_per_trade_rub", 0, 10_000_000, r.max_go_per_trade_rub)
+    r.max_go_portfolio_rub = _num("max_go_portfolio_rub", 0, 50_000_000, r.max_go_portfolio_rub)
     if "quantity_lots" in payload:
         lots = int(_num("quantity_lots", 1, 100, ST5.cfg.execution.quantity_lots))
         ST5.cfg.execution.quantity_lots = lots

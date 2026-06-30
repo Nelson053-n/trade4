@@ -147,6 +147,9 @@ def test_portfolio_limits_gate():
     from app.st5.models import St5Position, St5State
     s = St5Session()
     s.portfolio.capital_rub = 1_000_000.0
+    # этот тест проверяет ИМЕННО %-механику → отключаем ₽-лимиты (fallback на % капитала)
+    s.cfg.risk.max_go_per_trade_rub = 0.0
+    s.cfg.risk.max_go_portfolio_rub = 0.0
     # мок ГО-кэша (иначе pair_go_per_lot лезет в сеть): 1000₽/лот на пару
     St5Portfolio._go_cache = {pid: 1000.0 for pid in ST5_PAIRS}
     # риск (ГО) на сделку 0.5% = 5000: риск 4000 проходит, 6000 — нет
@@ -178,6 +181,69 @@ def test_portfolio_limits_gate():
     s.portfolio.halt("тест")
     ok4, _ = s.portfolio.can_open("sber", "SBER", 1000.0, s.engines, ST5_PAIRS)
     assert not ok4
+
+
+def test_go_limit_fixed_rub_not_capital_pct():
+    """Лимит ГО на сделку/портфель — ФИКСИРОВАННЫЙ в ₽, НЕ % капитала (для боевого малого счёта).
+    Если max_go_*_rub > 0 — применяется он; иначе fallback на %-капитала."""
+    from app.st5.service import ST5_PAIRS, St5Portfolio, St5Session
+    from app.st5.models import St5Position, St5State
+    s = St5Session()
+    St5Portfolio._go_cache = {pid: 10_000.0 for pid in ST5_PAIRS}   # ГО 10к/лот на пару
+    r = s.cfg.risk
+    r.max_go_per_trade_rub = 50_000.0
+    r.max_go_portfolio_rub = 300_000.0
+    s.portfolio.go_factor = 2.69
+    # НЕ зависит от капитала: даже на крошечном счёте лимит остаётся 50к
+    s.portfolio.capital_rub = 100_000.0
+    # ГО сделки = 10000 × 2.69 = 26900 ≤ 50000 → проходит (при %-логике 0.5%×100к=500 → резало бы)
+    ok, _ = s.portfolio.can_open("sber", "SBER", 10_000.0, s.engines, ST5_PAIRS)
+    assert ok, "ГО 26900 ≤ потолок 50000 — должно проходить независимо от капитала"
+    # ГО сделки = 20000 × 2.69 = 53800 > 50000 → режется по ₽-потолку
+    ok2, reason = s.portfolio.can_open("sber", "SBER", 20_000.0, s.engines, ST5_PAIRS)
+    assert not ok2 and "сделк" in reason.lower()
+    # портфельный ₽-лимит: открыта sngr с ГО 10к×2.69≈26900; новая sber 10к×2.69≈26900;
+    # сумма ≈53800 ≤ 300000 → проходит
+    s.engines["sngr"].position = St5Position(
+        pair="sngr", state=St5State.LONG_SPREAD, entry_ts=0, entry_z=-2.5, entry_spread=0.0,
+        entry_beta=1.0, lots=1, entry_lots=1, ord_entry=100.0, pref_entry=100.0, half_life=10)
+    okP, _ = s.portfolio.can_open("sber", "SBER", 10_000.0, s.engines, ST5_PAIRS)
+    assert okP
+    s.engines["sngr"].position = None
+
+
+def test_go_limits_persist_round_trip(tmp_path):
+    """₽-лимиты ГО переживают рестарт (грузятся из session-файла, не сбрасываются в дефолт кода)."""
+    from app.st5.service import St5Session
+    s = St5Session()
+    s._session_file = tmp_path / "s5.json"
+    s.cfg.risk.max_go_per_trade_rub = 70_000.0
+    s.cfg.risk.max_go_portfolio_rub = 200_000.0
+    s.save_session()
+    s2 = St5Session()
+    s2._session_file = s._session_file
+    s2.load_session()
+    assert s2.cfg.risk.max_go_per_trade_rub == 70_000.0
+    assert s2.cfg.risk.max_go_portfolio_rub == 200_000.0
+
+
+def test_config_endpoint_sets_go_limits(tmp_path):
+    """POST /st5/config принимает ₽-лимиты ГО и применяет к риск-конфигу."""
+    from fastapi.testclient import TestClient
+    from app.api import app, ST5
+    ST5._session_file = tmp_path / "s5.json"
+    for e in ST5.engines.values():
+        e.position = None                       # flat → смена параметров разрешена
+    c = TestClient(app)
+    r = c.post("/st5/config", json={"max_go_per_trade_rub": 90_000, "max_go_portfolio_rub": 250_000})
+    assert r.status_code == 200, r.text
+    assert ST5.cfg.risk.max_go_per_trade_rub == 90_000.0
+    assert ST5.cfg.risk.max_go_portfolio_rub == 250_000.0
+    # снапшот отдаёт лимиты + go_factor (для калькулятора UI)
+    snap = ST5.snapshot()
+    assert snap["limits"]["max_go_per_trade_rub"] == 90_000.0
+    assert snap["limits"]["max_go_portfolio_rub"] == 250_000.0
+    assert "go_factor" in snap["limits"]
 
 
 def test_real_trading_armed_cooldown():
@@ -385,6 +451,8 @@ def test_trade_limit_uses_go_factor():
     from app.st5.service import ST5_PAIRS, St5Portfolio, St5Session
     s = St5Session()
     s.portfolio.capital_rub = 1_000_000.0
+    s.cfg.risk.max_go_per_trade_rub = 0.0     # проверяем %-fallback → отключаем ₽-лимит
+    s.cfg.risk.max_go_portfolio_rub = 0.0
     St5Portfolio._go_cache = {pid: 1000.0 for pid in ST5_PAIRS}
     # factor=1: risk 2000 проходит (< 5000)
     s.portfolio.go_factor = 1.0
@@ -421,6 +489,8 @@ def test_portfolio_limit_uses_real_blocked():
     from app.st5.models import St5Position, St5State
     s = St5Session()
     s.portfolio.capital_rub = 1_000_000.0
+    s.cfg.risk.max_go_per_trade_rub = 0.0     # проверяем %-fallback → отключаем ₽-лимит
+    s.cfg.risk.max_go_portfolio_rub = 0.0
     St5Portfolio._go_cache = {pid: 1000.0 for pid in ST5_PAIRS}
     s.portfolio.go_factor = 1.0
     s.portfolio.real_blocked_rub = 45000.0   # факт по уже открытой tatn

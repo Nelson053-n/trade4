@@ -678,6 +678,23 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
         <div id="s5-go-info" style="font-size:11px;margin-top:8px;padding:8px;background:var(--bg2);border-radius:8px;color:var(--ink-dim)">залог рассчитывается…</div>
       </div>
       <div class="card">
+        <h2>Риск-лимиты ГО <span class="em" id="s5-risk-sub">фиксированные ₽, не % счёта</span></h2>
+        <div class="params" style="grid-template-columns:1fr 1fr;margin-bottom:10px">
+          <div class="fld"><label>лимит ГО на сделку (₽)</label><input id="s5-lim-trade" type="number" min="0" step="5000" placeholder="напр. 80000"></div>
+          <div class="fld"><label>лимит ГО портфеля (₽)</label><input id="s5-lim-port" type="number" min="0" step="10000" placeholder="напр. 150000"></div>
+        </div>
+        <button class="btn primary" id="s5-btn-lim" style="margin-bottom:6px">применить лимиты</button>
+        <div id="s5-lim-msg" style="font-size:11px;margin-bottom:10px;color:var(--ink-dim)"></div>
+        <div style="border-top:1px solid var(--line);padding-top:10px">
+          <div style="font-size:12px;font-weight:600;margin-bottom:6px">Калькулятор ГО</div>
+          <div class="params" style="grid-template-columns:1fr 1fr;margin-bottom:8px">
+            <div class="fld"><label>контрактов на пару</label><input id="s5-calc-lots" type="number" value="1" min="1" max="20" step="1"></div>
+            <div class="fld"><label>пар одновременно</label><input id="s5-calc-pairs" type="number" value="3" min="1" max="3" step="1"></div>
+          </div>
+          <div id="s5-calc-out" style="font-size:12px;line-height:1.7"></div>
+        </div>
+      </div>
+      <div class="card">
         <h2>Коннектор / боевой контур</h2>
         <div class="params" style="grid-template-columns:1fr;margin-bottom:11px">
           <div class="fld"><label>режим</label><select id="s5-conn-mode">
@@ -1612,6 +1629,13 @@ function s5Render(s){
   });
   // управление
   if(document.activeElement!==$('s5-trading')) $('s5-trading').checked=s.trading_enabled;
+  // риск-лимиты ГО (₽): заполняем поля из снапшота, не перетирая при вводе; обновляем калькулятор
+  if(s.limits){
+    const lt=$('s5-lim-trade'), lp=$('s5-lim-port');
+    if(lt && document.activeElement!==lt && s.limits.max_go_per_trade_rub!=null) lt.value=Math.round(s.limits.max_go_per_trade_rub);
+    if(lp && document.activeElement!==lp && s.limits.max_go_portfolio_rub!=null) lp.value=Math.round(s.limits.max_go_portfolio_rub);
+    s5CalcGo();
+  }
   $('s5-halt-msg').textContent = s.halted?('⚠ '+s.halt_reason):'';
   const cm=$('s5-conn-mode'); if(document.activeElement!==cm) cm.value=s.connector_mode;
   // настройки Telegram (не перетираем пока пользователь редактирует поле)
@@ -1746,8 +1770,10 @@ function s5BuildChartSwitch(pairs){
     el.appendChild(b);
   });
 }
+let _s5goRows=null;   // ГО по парам (на 1 лот) из /margin — для калькулятора
 async function s5LoadGoInfo(){
   try{ const d=await s5api('/margin');
+    _s5goRows=(d.rows||[]).filter(r=>!r.error); s5CalcGo();
     // ТЕКУЩИЙ залог — реально заблокировано на счёте сейчас (0 ₽ если позиций нет / None при flat)
     const blocked = d.real_blocked_rub!=null ? d.real_blocked_rub : 0;
     const cur = `<b style="color:${blocked>0?'var(--warn)':'var(--ink)'}">текущий залог: ${blocked.toLocaleString('ru')} ₽</b>${blocked>0?'':' (позиций нет)'}<br>`;
@@ -1762,6 +1788,28 @@ async function s5LoadGoInfo(){
       `капитал ${(d.capital_rub).toLocaleString('ru')} ₽ · <span style="color:${d.self_check_ok?'var(--signal)':'var(--loss)'}">${d.self_check_ok?'✓ хватает':'⚠ мало'}</span><br>`+
       `<span style="color:var(--ink-faint)">⚠ ISS-оценка ЗАНИЖАЕТ реальный залог (биржа блокирует больше, наблюдалось ~×4.5). Точная нагрузка — «текущий залог» при открытых позициях.</span>`;
   }catch(e){ $('s5-go-info').textContent='ГО недоступно: '+e.message; }
+}
+// калькулятор ГО: по ГО на лот каждой пары (ISS) × go_factor × лоты × число пар → нужно денег
+function s5CalcGo(){
+  const out=$('s5-calc-out'); if(!out) return;
+  if(!_s5goRows||!_s5goRows.length){ out.innerHTML='<span style="color:var(--ink-faint)">данные ГО грузятся…</span>'; return; }
+  const lots=Math.max(1,parseInt($('s5-calc-lots').value||'1',10));
+  const nPairs=Math.max(1,Math.min(3,parseInt($('s5-calc-pairs').value||'3',10)));
+  const gf=(_s5snap&&_s5snap.limits&&_s5snap.limits.go_factor)||1;
+  // go_pair_10lots в /margin = ГО пары на 1 лот (имя legacy). Берём nPairs самых ДОРОГИХ пар (худший случай).
+  const perPair=_s5goRows.map(r=>({pair:r.pair,go:(r.go_pair_10lots||0)})).sort((a,b)=>b.go-a.go);
+  const chosen=perPair.slice(0,nPairs);
+  const trade=chosen[0]?chosen[0].go*lots*gf:0;                  // самая дорогая сделка
+  const port=chosen.reduce((s,p)=>s+p.go*lots*gf,0);            // суммарно по выбранным парам
+  const limTrade=(_s5snap&&_s5snap.limits&&_s5snap.limits.max_go_per_trade_rub)||0;
+  const limPort=(_s5snap&&_s5snap.limits&&_s5snap.limits.max_go_portfolio_rub)||0;
+  const rub=v=>Math.round(v).toLocaleString('ru')+' ₽';
+  const okT=limTrade<=0||trade<=limTrade, okP=limPort<=0||port<=limPort;
+  const mark=ok=>ok?'<span style="color:var(--signal)">✓</span>':'<span style="color:var(--loss)">✗ не влезает</span>';
+  out.innerHTML=
+    `ГО на сделку (макс. пара, ${lots} лот): <b>${rub(trade)}</b> ${limTrade>0?'/ лимит '+rub(limTrade)+' '+mark(okT):''}<br>`+
+    `ГО портфеля (${nPairs} пар × ${lots} лот): <b>${rub(port)}</b> ${limPort>0?'/ лимит '+rub(limPort)+' '+mark(okP):''}<br>`+
+    `<span style="color:var(--ink-faint)">с поправкой go_factor ×${gf} (реально блокируемое биржей). ISS-оценка без поправки: сделка ${rub(trade/gf)}, портфель ${rub(port/gf)}.</span>`;
 }
 let _s5dailyLoaded=false;
 async function s5LoadDaily(){
@@ -1968,6 +2016,15 @@ function s5Init(){
     const body={ quantity_lots:+$('s5-p-lots').value, max_open_positions:+$('s5-p-maxpos').value };
     try{ await s5api('/config','POST',body); s5LoadGoInfo(); s5Poll(); }catch(e){ alert(e.message); }
   };
+  // риск-лимиты ГО: применить
+  $('s5-btn-lim').onclick=async()=>{
+    const body={ max_go_per_trade_rub:+$('s5-lim-trade').value||0, max_go_portfolio_rub:+$('s5-lim-port').value||0 };
+    $('s5-lim-msg').textContent='применяю…';
+    try{ await s5api('/config','POST',body); $('s5-lim-msg').innerHTML='✓ применено'; s5Poll(); }
+    catch(e){ $('s5-lim-msg').textContent='ошибка: '+e.message; }
+  };
+  // калькулятор ГО: пересчёт на лету при вводе
+  ['s5-calc-lots','s5-calc-pairs'].forEach(id=>{ const e=$(id); if(e) e.oninput=s5CalcGo; });
   $('s5-btn-sweep').onclick=async()=>{
     const pair=$('s5-sw-pair').value, param=$('s5-sw-param').value, days=$('s5-sw-days').value;
     $('s5-sweep-res').textContent='перебор '+param+' на '+days+' (может занять минуту)…';

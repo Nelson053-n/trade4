@@ -110,9 +110,11 @@ class St5Portfolio:
             return False, f"уже есть позиция по эмитенту {issuer}"
         # ГО кандидата = ISS-оценка × go_factor (поправка на занижение ISS относительно реального)
         risk_real = risk_rub * self.go_factor
-        # лимит ГО на сделку (% капитала)
-        if risk_real > r.risk_per_trade_pct * self.capital_rub:
-            return False, f"ГО сделки {risk_real:.0f}₽ > лимит {r.risk_per_trade_pct*100:.1f}% ({r.risk_per_trade_pct*self.capital_rub:.0f}₽)"
+        # лимит ГО на сделку: ФИКСИРОВАННЫЙ ₽-потолок если задан (>0), иначе % капитала (legacy).
+        # ГО фьючерса — абсолютная величина, не зависит от размера счёта → ₽-лимит корректнее.
+        trade_cap = r.max_go_per_trade_rub if r.max_go_per_trade_rub > 0 else r.risk_per_trade_pct * self.capital_rub
+        if risk_real > trade_cap:
+            return False, f"ГО сделки {risk_real:.0f}₽ > лимит {trade_cap:.0f}₽"
         # лимит ГО на портфель: УЖЕ занятое + новая. Занятое — РЕАЛЬНО заблокированное со счёта
         # (факт, с хедж-скидкой биржи), если есть; иначе оценка открытых × go_factor.
         if self.real_blocked_rub > 0:
@@ -120,8 +122,9 @@ class St5Portfolio:
         else:
             cur = sum(self._pos_risk(pid, e) * self.go_factor for pid, e in engines.items()
                       if e.position is not None and pid != pair)
-        if cur + risk_real > r.risk_per_portfolio_pct * self.capital_rub:
-            return False, "превышен портфельный лимит ГО"
+        port_cap = r.max_go_portfolio_rub if r.max_go_portfolio_rub > 0 else r.risk_per_portfolio_pct * self.capital_rub
+        if cur + risk_real > port_cap:
+            return False, f"портфельный лимит ГО {port_cap:.0f}₽ превышен ({cur+risk_real:.0f}₽)"
         # дневной лимит убытка
         if self.day_pnl_rub <= -r.max_daily_loss_rub:
             return False, "дневной лимит убытка"
@@ -349,7 +352,10 @@ class St5Session:
             "history": self.history,
             "limits": {"per_trade_pct": self.cfg.risk.risk_per_trade_pct,
                        "per_pair_pct": self.cfg.risk.risk_per_pair_pct,
-                       "per_portfolio_pct": self.cfg.risk.risk_per_portfolio_pct},
+                       "per_portfolio_pct": self.cfg.risk.risk_per_portfolio_pct,
+                       "max_go_per_trade_rub": self.cfg.risk.max_go_per_trade_rub,
+                       "max_go_portfolio_rub": self.cfg.risk.max_go_portfolio_rub,
+                       "go_factor": round(self.portfolio.go_factor, 3)},
             "notify": self.cfg.notify.model_dump(),      # настройки Telegram (без токена)
             "tg_set": tg.has_bot_token(),                # установлен ли токен бота (булев, не секрет)
         }
@@ -378,6 +384,9 @@ class St5Session:
                 "last_live_ts": self.last_live_ts,
                 "enabled_pairs": self.enabled_pairs,
                 "pair_overrides": self.pair_overrides,   # runtime per-pair параметры стратегии
+                # ₽-лимиты ГО персистим (меняются оператором в UI; иначе рестарт сбросит в дефолт)
+                "max_go_per_trade_rub": self.cfg.risk.max_go_per_trade_rub,
+                "max_go_portfolio_rub": self.cfg.risk.max_go_portfolio_rub,
                 # открытые позиции по парам переживают рестарт (St5State — str-enum,
                 # json.dumps сериализует .state как строку). None → пара flat.
                 "positions": {pid: (asdict(eng.position) if eng.position else None)
@@ -463,6 +472,11 @@ class St5Session:
         # Защита: фактор должен быть >0; иначе дефолт 1.0 (битая запись не должна обнулить риск-гейт).
         gf = data.get("go_factor", 1.0)
         self.portfolio.go_factor = gf if isinstance(gf, (int, float)) and gf > 0 else 1.0
+        # ₽-лимиты ГО, заданные оператором в UI (иначе рестарт вернул бы дефолт кода)
+        for k in ("max_go_per_trade_rub", "max_go_portfolio_rub"):
+            v = data.get(k)
+            if isinstance(v, (int, float)) and v >= 0:
+                setattr(self.cfg.risk, k, float(v))
         self.state["data_source"] = data.get("data_source", "synthetic")
         self.last_live_ts = data.get("last_live_ts", {pid: 0 for pid in ST5_PAIRS})
         en = data.get("enabled_pairs") or {}
