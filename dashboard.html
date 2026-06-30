@@ -1672,7 +1672,12 @@ function s5DrawChart(){
   const dpr=devicePixelRatio||1; cv.width=r.width*dpr; cv.height=r.height*dpr;
   const ctx=cv.getContext('2d'); ctx.setTransform(1,0,0,1,0,0); ctx.scale(dpr,dpr);
   const W=r.width,H=r.height; ctx.clearRect(0,0,W,H);
-  const histAll=(_s5hist[_s5chartPair]||[]).filter(p=>p.z!=null);
+  let histAll=(_s5hist[_s5chartPair]||[]).filter(p=>p.z!=null);
+  // отрезаем ВЕДУЩИЙ хвост прогрева: первые бары z-score имеют недосформированный rolling-std →
+  // |z| раздут (наблюдалось z=14-18 у tatn). Режем только непрерывный префикс с |z|>6 (заведомо
+  // выше z_stop=4.25 — реальный сигнал столько не даёт), середину/конец не трогаем.
+  let _cut=0; while(_cut<histAll.length && Math.abs(histAll[_cut].z)>6) _cut++;
+  if(_cut>0) histAll=histAll.slice(_cut);
   _s5fullLen=histAll.length;
   // видимое окно по зуму/пану (как на ST4-графике)
   const visN=Math.max(10,Math.round(histAll.length*_s5zoom));
