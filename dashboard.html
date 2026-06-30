@@ -1945,13 +1945,12 @@ async function s5LoadWeekly(){
     wrap.innerHTML=pairs.map(p=>{
       const rows=p.rows||[];
       const bars=rows.length? rows.map(r=>{
-        const nh=Math.round(Math.abs(r.net)/mx*BH), fh=Math.round(Math.abs(r.fee)/mx*BH);
+        const nh=Math.round(Math.abs(r.net)/mx*BH);
         const nc=r.net>=0?'var(--signal)':'var(--loss)';
         return `<div style="display:flex;flex-direction:column;align-items:center;gap:4px;min-width:60px" title="${day(r.date)}: прибыль ${s5money(r.net)}, комиссия −${r.fee}₽, сделок ${r.trades}">
           <div style="font-size:10px;color:${nc};font-weight:600;position:relative;z-index:1">${r.net>=0?'+':''}${r.net}</div>
-          <div style="display:flex;align-items:flex-end;gap:3px;height:${BH}px">
-            <div style="width:16px;height:${Math.max(nh,2)}px;background:${nc};border-radius:3px 3px 0 0"></div>
-            <div style="width:16px;height:${Math.max(fh,2)}px;background:var(--ink-dim);opacity:.55;border-radius:3px 3px 0 0"></div>
+          <div style="display:flex;align-items:flex-end;height:${BH}px">
+            <div style="width:18px;height:${Math.max(nh,2)}px;background:${nc};border-radius:3px 3px 0 0"></div>
           </div>
           <div style="font-size:10px;color:var(--ink-dim);text-align:center;line-height:1.3">${day(r.date)}<br><span style="color:var(--ink-faint)">${dow(r.date)}</span></div>
         </div>`;
@@ -1964,7 +1963,7 @@ async function s5LoadWeekly(){
         </div>
         <div style="position:relative;display:flex;gap:10px;flex-wrap:nowrap;align-items:flex-end;overflow-x:auto">${rows.length?lineSvg(rows):''}${bars}</div>
       </div>`;
-    }).join('') + `<div style="font-size:10px;color:var(--ink-dim);margin-top:2px"><span style="display:inline-block;width:10px;height:10px;background:var(--signal);border-radius:2px;vertical-align:middle"></span> зафиксированная прибыль &nbsp; <span style="display:inline-block;width:10px;height:10px;background:var(--ink-dim);opacity:.55;border-radius:2px;vertical-align:middle"></span> комиссия &nbsp; <span style="display:inline-block;width:14px;height:0;border-top:2px solid var(--chart-line);vertical-align:middle"></span> дневная net (линия, единый масштаб)</div>`;
+    }).join('') + `<div style="font-size:10px;color:var(--ink-dim);margin-top:2px"><span style="display:inline-block;width:10px;height:10px;background:var(--signal);border-radius:2px;vertical-align:middle"></span> прибыль за день (зелёный +, красный −) &nbsp; <span style="display:inline-block;width:14px;height:0;border-top:2px solid var(--chart-line);vertical-align:middle"></span> дневная net (линия, единый масштаб)</div>`;
   }catch(e){ wrap.innerHTML='<div class="empty" style="font-size:12px">ошибка: '+s4esc(e.message)+'</div>'; }
 }
 function s5Init(){
