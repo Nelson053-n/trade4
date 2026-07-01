@@ -1788,16 +1788,14 @@ async function s5LoadGoInfo(){
     // ТЕКУЩИЙ залог — реально заблокировано на счёте сейчас (0 ₽ если позиций нет / None при flat)
     const blocked = d.real_blocked_rub!=null ? d.real_blocked_rub : 0;
     const cur = `<b style="color:${blocked>0?'var(--warn)':'var(--ink)'}">текущий залог: ${blocked.toLocaleString('ru')} ₽</b>${blocked>0?'':' (позиций нет)'}<br>`;
-    // если позиции открыты — во сколько раз реальный залог отличается от ISS-оценки (обычно ВЫШЕ)
-    let ratio='';
-    if(blocked>0 && d.go_all_3pairs_10lots>0){
-      const k=(blocked/d.go_all_3pairs_10lots);
-      ratio=` <span style="color:var(--ink-faint)">(×${k.toFixed(1)} к ISS-оценке)</span>`;
-    }
+    // множитель реал/ISS — это откалиброванный go_factor из state (real_blocked / ISS-оценка ОТКРЫТЫХ),
+    // а НЕ blocked/go_all_3pairs (то делило залог открытых пар на ISS всех трёх → ложные ×1.3).
+    const gf=(_s5snap&&_s5snap.limits&&_s5snap.limits.go_factor)||0;
+    const ratio = gf>0 ? ` <span style="color:var(--ink-faint)">(×${gf.toFixed(1)} к ISS-оценке, go_factor)</span>` : '';
     $('s5-go-info').innerHTML=`<b>залог (ГО), ${d.lots} лот:</b><br>${cur.replace('<br>',ratio+'<br>')}`+
       `расчётная оценка 3 пар (ISS): <b style="color:var(--ink)">${(d.go_all_3pairs_10lots).toLocaleString('ru')} ₽</b> (${d.go_pct_of_capital}% капитала)<br>`+
       `капитал ${(d.capital_rub).toLocaleString('ru')} ₽ · <span style="color:${d.self_check_ok?'var(--signal)':'var(--loss)'}">${d.self_check_ok?'✓ хватает':'⚠ мало'}</span><br>`+
-      `<span style="color:var(--ink-faint)">⚠ ISS-оценка ЗАНИЖАЕТ реальный залог (биржа блокирует больше, наблюдалось ~×4.5). Точная нагрузка — «текущий залог» при открытых позициях.</span>`;
+      `<span style="color:var(--ink-faint)">⚠ ISS-оценка ЗАНИЖАЕТ реальный залог: биржа блокирует ×${(gf||1).toFixed(1)} (go_factor, откалиброван по факту). Реальная оценка 3 пар ≈ ${Math.round((d.go_all_3pairs_10lots||0)*(gf||1)).toLocaleString('ru')} ₽. Точная нагрузка — «текущий залог» при открытых позициях.</span>`;
   }catch(e){ $('s5-go-info').textContent='ГО недоступно: '+e.message; }
 }
 // калькулятор ГО: по ГО на лот каждой пары (ISS) × go_factor × лоты × число пар → нужно денег
