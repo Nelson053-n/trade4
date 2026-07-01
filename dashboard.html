@@ -603,6 +603,17 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
         <div class="tblwrap" style="max-height:340px"><table id="s5-daily"><thead><tr><th>дата</th><th>идеал ₽</th><th>с издерж. ₽</th><th>реал ₽</th></tr></thead><tbody></tbody></table></div>
       </div>
       <div class="card">
+        <h2>Залог в течение дня <span class="em" id="s5-mt-sub">по 10-минуткам</span>
+          <input type="date" id="s5-mt-date" style="float:right;font-size:11px;background:var(--panel-2);border:1px solid var(--line);border-radius:6px;color:var(--ink);padding:2px 6px"></h2>
+        <canvas id="s5-mt-chart" style="width:100%;height:150px;display:block;margin:6px 0"></canvas>
+        <div class="legend" style="margin-bottom:6px">
+          <span><i style="height:9px;border:0;background:var(--warn);opacity:.7;border-radius:1px"></i>залог ГО (₽)</span>
+          <span>цифра над баром — сколько позиций стояло</span>
+        </div>
+        <div id="s5-mt-totals" style="font-size:12px;margin-bottom:6px"></div>
+        <div class="tblwrap" style="max-height:300px"><table id="s5-mt"><thead><tr><th>время</th><th>залог ₽</th><th>позиций</th><th>пары</th></tr></thead><tbody></tbody></table></div>
+      </div>
+      <div class="card">
         <h2>Расширенная аналитика <span class="em">перебор параметра · большой объём</span></h2>
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
           <select id="s5-sw-pair" style="background:var(--panel-2);border:1px solid var(--line);border-radius:6px;color:var(--ink);padding:3px 6px"><option value="sber">Сбер</option><option value="sngr">Сургут</option><option value="tatn">Татнефть</option></select>
@@ -1567,7 +1578,7 @@ function s5Switch(strat){
   });
   $('tab-st4').hidden = strat!=='st4';
   $('tab-st5').hidden = strat!=='st5';
-  if(strat==='st5'){ s5Poll(); s5LoadWeekly(); s5LoadStrategies(); if(!_s5dailyLoaded){ _s5dailyLoaded=true; s5LoadDaily(); s5LoadGoInfo(); } }
+  if(strat==='st5'){ s5Poll(); s5LoadWeekly(); s5LoadStrategies(); if(!_s5dailyLoaded){ _s5dailyLoaded=true; s5LoadDaily(); s5LoadGoInfo(); s5LoadMarginTimeline(); } }
 }
 function s5Render(s){
   _s5snap=s;
@@ -1929,6 +1940,46 @@ function s5DrawDaily(rows){
     ctx.fillText(dow(r.date), cx, py1+13);
   });
 }
+// залог (ГО) по 10-минуткам за день + число позиций
+async function s5LoadMarginTimeline(){
+  const dt=$('s5-mt-date').value;
+  try{ const d=await s5api('/margin_timeline'+(dt?'?date='+dt:''));
+    const rows=d.rows||[];
+    $('s5-mt-sub').textContent=rows.length?`${d.date} · пик ${s5money(d.peak_rub)} · до ${d.peak_positions} поз.`:(d.date+' · нет позиций');
+    $('s5-mt-totals').innerHTML=rows.length?`<span style="color:var(--ink-faint)">go_factor ×${d.go_factor} · пик залога </span><b style="color:var(--warn)">${s5money(d.peak_rub)}</b><span style="color:var(--ink-faint)"> при ${d.peak_positions} поз., слот 10 мин</span>`:'<span style="color:var(--ink-faint)">в этот день позиций не было</span>';
+    const tb=$('s5-mt').querySelector('tbody');
+    tb.innerHTML=rows.length?rows.slice().reverse().map(r=>`<tr><td style="color:var(--ink-dim)">${r.time}</td><td style="color:var(--warn)">${s5money(r.go_rub)}</td><td>${r.positions}</td><td style="color:var(--ink-dim)">${(r.pairs||[]).join(', ')}</td></tr>`).join(''):'<tr><td colspan="4" class="empty">нет позиций в этот день</td></tr>';
+    s5DrawMarginTimeline(rows);
+  }catch(e){ $('s5-mt-totals').textContent='ошибка: '+e.message; }
+}
+function s5DrawMarginTimeline(rows){
+  const cv=$('s5-mt-chart'); if(!cv) return;
+  const r=cv.getBoundingClientRect(); if(r.width<5) return;
+  const dpr=devicePixelRatio||1; cv.width=r.width*dpr; cv.height=r.height*dpr;
+  const ctx=cv.getContext('2d'); ctx.setTransform(1,0,0,1,0,0); ctx.scale(dpr,dpr);
+  const W=r.width,H=r.height; ctx.clearRect(0,0,W,H);
+  if(!rows.length){ ctx.fillStyle=getCSS('--ink-faint'); ctx.font='11px monospace'; ctx.fillText('позиций в этот день не было',10,20); return; }
+  let hi=1; rows.forEach(r=>hi=Math.max(hi,r.go_rub)); hi*=1.15;   // запас сверху под цифры
+  const ML=48,MB=18,MT=8,MR=6, px0=ML,px1=W-MR,py0=MT,py1=H-MB;
+  const y=v=>py1-v/hi*(py1-py0);
+  const warn=getCSS('--warn')||'#e0a020', dim=getCSS('--ink-dim'), faint=getCSS('--ink-faint'), line=getCSS('--line');
+  // ось: пик и половина
+  ctx.strokeStyle=line; ctx.globalAlpha=.4; [hi,hi/2].forEach(v=>{const Y=y(v);ctx.beginPath();ctx.moveTo(px0,Y);ctx.lineTo(px1,Y);ctx.stroke();}); ctx.globalAlpha=1;
+  ctx.fillStyle=dim; ctx.font='9px monospace'; ctx.textAlign='right'; ctx.textBaseline='middle';
+  ctx.fillText(Math.round(hi).toLocaleString('ru'),px0-3,y(hi)); ctx.fillText(Math.round(hi/2).toLocaleString('ru'),px0-3,y(hi/2));
+  // автомасштаб по ширине + просветы
+  const n=rows.length, slot=(px1-px0)/n, gap=Math.min(Math.max(3,slot*0.25),slot*0.5), bw=Math.max(2,slot-gap);
+  const step=Math.max(1,Math.ceil(n/8));   // не чаще ~8 подписей времени
+  rows.forEach((r,i)=>{
+    const cx=px0+slot*(i+0.5), yb=y(r.go_rub);
+    ctx.fillStyle=warn; ctx.globalAlpha=.75; ctx.fillRect(cx-bw/2,yb,bw,py1-yb); ctx.globalAlpha=1;
+    // цифра — число позиций над баром
+    ctx.fillStyle=dim; ctx.font='9px monospace'; ctx.textAlign='center'; ctx.textBaseline='bottom';
+    ctx.fillText(r.positions, cx, yb-2);
+    // подпись времени (прореженная)
+    if(i%step===0||i===n-1){ ctx.fillStyle=faint; ctx.font='8px monospace'; ctx.textBaseline='top'; ctx.fillText(r.time,cx,py1+3); }
+  });
+}
 async function s5RenderBtHistory(){
   try{ const d=await s5api('/backtest_history'); const h=d.history||[];
     const tb=$('s5-bth').querySelector('tbody'); $('s5-bth-sub').textContent=h.length?h.length+' прогонов':'';
@@ -2101,6 +2152,7 @@ function s5Init(){
     $('s5-daily-range').querySelectorAll('.s5rbtn').forEach(x=>x.classList.toggle('on',x===b));
     s5LoadDaily();
   });
+  $('s5-mt-date').onchange=s5LoadMarginTimeline;
   $('s5-btn-params').onclick=async()=>{
     const body={ quantity_lots:+$('s5-p-lots').value, max_open_positions:+$('s5-p-maxpos').value };
     try{ await s5api('/config','POST',body); s5LoadGoInfo(); s5Poll(); }catch(e){ alert(e.message); }

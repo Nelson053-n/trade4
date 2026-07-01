@@ -1054,3 +1054,37 @@ def test_strategy_store_save_list_load(tmp_path, monkeypatch):
     assert rec["params"]["sber"]["z_exit_full"] == 0.5
     assert rec["backtest"]["sber"]["net"] == 8801
     assert rec["window"] == "90д ISS"
+
+
+def test_margin_timeline_reconstructs_go_and_positions(tmp_path, monkeypatch):
+    """GET /st5/margin_timeline: реконструирует залог по 10-минуткам из журнала сделок и
+    считает число одновременно открытых позиций (перекрытие интервалов)."""
+    import datetime as _dt
+    from fastapi.testclient import TestClient
+    from app.api import app, ST5
+    from app.st5.service import St5Portfolio
+    ST5._session_file = tmp_path / "s5.json"
+    for e in ST5.engines.values():
+        e.position = None                       # без «текущих» позиций — только журнал
+    # фиксированное ГО пары (не дёргать ISS в тесте)
+    monkeypatch.setattr(St5Portfolio, "pair_go_per_lot", classmethod(lambda cls, pid: 10_000.0))
+    ST5.portfolio.go_factor = 2.0
+    # день: две пары, tatn 10:00-10:30, sber 10:10-10:20 (перекрытие в слоте 10:10-10:20)
+    MSK = _dt.timezone(_dt.timedelta(hours=3))
+    base = int(_dt.datetime(2026, 7, 2, 10, 0, tzinfo=MSK).timestamp() * 1000)
+    ST5.trades = [
+        {"pair": "tatn", "entry_ts": base, "exit_ts": base + 30 * 60_000, "lots": 1},
+        {"pair": "sber", "entry_ts": base + 10 * 60_000, "exit_ts": base + 20 * 60_000, "lots": 1},
+    ]
+    c = TestClient(app)
+    r = c.get("/st5/margin_timeline?date=2026-07-02")
+    assert r.status_code == 200, r.text
+    d = r.json()
+    rows = {row["time"]: row for row in d["rows"]}
+    # 10:00 — только tatn: 1 поз, ГО = 10000×1×2.0 = 20000
+    assert rows["10:00"]["positions"] == 1 and rows["10:00"]["go_rub"] == 20_000
+    # 10:10 — tatn+sber: 2 поз, ГО = 40000 (пик)
+    assert rows["10:10"]["positions"] == 2 and rows["10:10"]["go_rub"] == 40_000
+    # 10:20 — снова только tatn (sber вышел)
+    assert rows["10:20"]["positions"] == 1
+    assert d["peak_positions"] == 2 and d["peak_rub"] == 40_000

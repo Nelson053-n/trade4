@@ -763,6 +763,71 @@ async def st5_daily(pair: str = "sber", days: int = 30):
     return _clean(await asyncio.to_thread(_run))
 
 
+@app.get("/st5/margin_timeline")
+async def st5_margin_timeline(date: str = ""):
+    """Залог (ГО) по 10-минутным слотам за день: сколько обеспечения требовалось в течение дня
+    и сколько позиций стояло в каждый момент. Реконструкция из журнала сделок (entry_ts…exit_ts)
+    + текущие открытые позиции движков (ещё не в журнале). ГО = pair_go_per_lot×lots×go_factor."""
+    from .st5.service import St5Portfolio
+    SLOT = 10 * 60 * 1000    # 10 минут в мс
+
+    def _run():
+        gf = ST5.portfolio.go_factor or 1.0
+        # день в МСК (по умолчанию — сегодня)
+        day = date or _dt.now(_MSK).strftime("%Y-%m-%d")
+        d0 = _dt.strptime(day, "%Y-%m-%d").replace(tzinfo=_MSK)
+        day_start = int(d0.timestamp() * 1000)
+        day_end = day_start + 24 * 3600 * 1000
+        # интервалы позиций за этот день: [(entry_ms, exit_ms|None, pair, lots), …]
+        intervals = []
+        for t in ST5.trades:
+            e, x = t.get("entry_ts"), t.get("exit_ts")
+            if not e or not x:
+                continue
+            if x <= day_start or e >= day_end:      # не пересекает день
+                continue
+            intervals.append((e, x, t.get("pair"), t.get("lots", 1)))
+        # текущие открытые позиции движков (ещё не закрыты → нет в trades), exit=None (по «сейчас»)
+        now_ms = int(_dt.now(_MSK).timestamp() * 1000)
+        for pid, eng in ST5.engines.items():
+            p = getattr(eng, "position", None)
+            if p is not None and getattr(p, "entry_ts", 0) and p.entry_ts < day_end:
+                intervals.append((p.entry_ts, None, pid, p.lots))
+        if not intervals:
+            return {"date": day, "rows": [], "peak_rub": 0, "peak_positions": 0}
+        # границы сетки слотов — от первого входа до последнего выхода (в пределах дня)
+        lo = max(day_start, min(iv[0] for iv in intervals))
+        hi = min(day_end, max((iv[1] or now_ms) for iv in intervals))
+        lo -= lo % SLOT                             # выровнять к сетке 10м
+        rows = []
+        peak_rub = 0.0
+        peak_pos = 0
+        t = lo
+        while t < hi:
+            s0, s1 = t, t + SLOT
+            go = 0.0
+            cnt = 0
+            open_pairs = []
+            for e, x, pair, lots in intervals:
+                xe = x if x is not None else now_ms
+                if e < s1 and xe > s0:              # позиция активна в слоте
+                    go += St5Portfolio.pair_go_per_lot(pair) * lots * gf
+                    cnt += 1
+                    open_pairs.append(pair)
+            if cnt:                                  # показываем только слоты с позициями
+                hhmm = _dt.fromtimestamp(s0 / 1000, _MSK).strftime("%H:%M")
+                rows.append({"time": hhmm, "ts": s0, "go_rub": round(go),
+                             "positions": cnt, "pairs": open_pairs})
+                peak_rub = max(peak_rub, go)
+                peak_pos = max(peak_pos, cnt)
+            t += SLOT
+        return {"date": day, "go_factor": round(gf, 3), "rows": rows,
+                "peak_rub": round(peak_rub), "peak_positions": peak_pos,
+                "slot_min": 10}
+
+    return _clean(await asyncio.to_thread(_run))
+
+
 @app.get("/st5/backtest_tbank")
 async def st5_backtest_tbank(pair: str = "sber"):
     """Бэктест ST5 на РЕАЛЬНЫХ котировках T-Bank (тот же источник, что sandbox-ордера; ~неделя)."""
