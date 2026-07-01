@@ -445,6 +445,34 @@ def test_calibrate_noop_when_flat_or_no_data():
     assert s.portfolio.go_factor == 3.0   # не сбросили в 1.0 на пустых данных
 
 
+def test_calibrate_ignores_artifact_below_half_iss():
+    """Артефакт blocked_margin (≈0) при открытых позициях НЕ должен схлопывать go_factor.
+    factor<0.5 физически невозможен (реальное ГО ≥ половины ISS) → калибровка пропускается."""
+    from app.st5.service import ST5_PAIRS, St5Portfolio, St5Session
+    from app.st5.models import St5Position, St5State
+    s = St5Session()
+    St5Portfolio._go_cache = {pid: 10_000.0 for pid in ST5_PAIRS}
+    s.portfolio.go_factor = 4.18   # ранее нормально откалибровано
+    s.engines["tatn"].position = St5Position(
+        pair="tatn", state=St5State.SHORT_SPREAD, entry_ts=0, entry_z=2.7, entry_spread=0.0,
+        entry_beta=1.0, lots=1, entry_lots=1, ord_entry=600.0, pref_entry=560.0, half_life=10)
+    # blocked вернул мусор 58₽ при ISS 10000 → factor 0.0058 < 0.5 → игнор
+    s.portfolio.calibrate_go_factor(58.0, s.engines, ST5_PAIRS)
+    assert s.portfolio.go_factor == 4.18   # не схлопнулся
+    s.engines["tatn"].position = None
+
+
+def test_load_session_rejects_collapsed_go_factor(tmp_path):
+    """load_session с битым go_factor (<0.5, напр. 0.0013 от прошлого артефакта) → дефолт 1.0."""
+    import json
+    from app.st5.service import St5Session
+    s = St5Session()
+    f = tmp_path / "s5.json"
+    f.write_text(json.dumps({"go_factor": 0.0012886, "capital_rub": 5_000_000}))
+    s._session_file = f
+    s.load_session()
+    assert s.portfolio.go_factor == 1.0
+
 def test_order_book_parses_levels(monkeypatch):
     """order_book парсит bids/asks T-Bank GetOrderBook в {price,qty} + last."""
     from app.st4 import tbank_sandbox as sb

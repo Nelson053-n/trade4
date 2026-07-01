@@ -1999,62 +1999,38 @@ async function s5LoadWeekly(){
     const anyTrades=pairs.some(p=>(p.total_trades||0)>0);
     if(!anyTrades){ wrap.innerHTML='<div class="empty" style="font-size:12px">пока нет зафиксированных сделок</div>'; return; }
     // ЕДИНЫЙ масштаб по всем дням всех инструментов (сопоставимость + «по большей доходности»):
-    // столбики — по |net|/|fee|, фоновая линия дневной net — по той же mx, с осью ноля посередине.
-    let mx=1; pairs.forEach(p=>(p.rows||[]).forEach(r=>{ mx=Math.max(mx, Math.abs(r.net), Math.abs(r.fee)); }));
+    // высота столбика = |net| / mx. mx — максимум по модулю среди всех дней всех пар.
+    let mx=1; pairs.forEach(p=>(p.rows||[]).forEach(r=>{ mx=Math.max(mx, Math.abs(r.net)); }));
     const day=s=>{ const t=new Date(s+'T00:00:00'); return t.toLocaleDateString('ru',{day:'2-digit',month:'2-digit'}); };
     const dow=s=>{ const t=new Date(s+'T00:00:00'); return t.toLocaleDateString('ru',{weekday:'short'}); };   // пн/вт/…
     const BH=70;        // высота области столбиков
-    const COLW=60+10;   // ширина «колонки» дня = min-width(60) + gap(10), как у flex-столбиков
-    // фоновая линия дневной net: ГЛАДКАЯ кривая (Catmull-Rom → Безье) по дневным точкам. Верхний
-    // отступ PAD оставляет место под цифры над столбиками (даже максимум не доходит до верха зоны).
-    // Единая mx → линии сопоставимы между инструментами.
-    const PAD=16;       // зарезервировано сверху под цифры (чтобы линия их не перекрывала)
-    const lineSvg=rows=>{
-      if(rows.length<1) return '';
-      const w=rows.length*COLW;
-      const y=v=>BH - Math.min(Math.abs(v)/mx*(BH-PAD), BH-PAD);   // 0..(BH-PAD) от низа
-      const P=rows.map((r,i)=>[i*COLW+COLW/2, y(r.net)]);
-      // гладкий путь: Catmull-Rom через точки, сконвертированный в кубические Безье
-      let d;
-      if(P.length===1){ d=`M${P[0][0].toFixed(1)},${P[0][1].toFixed(1)} l0.01,0`; }
-      else {
-        d=`M${P[0][0].toFixed(1)},${P[0][1].toFixed(1)}`;
-        for(let i=0;i<P.length-1;i++){
-          const p0=P[i-1]||P[i], p1=P[i], p2=P[i+1], p3=P[i+2]||P[i+1];
-          const c1x=p1[0]+(p2[0]-p0[0])/6, c1y=p1[1]+(p2[1]-p0[1])/6;
-          const c2x=p2[0]-(p3[0]-p1[0])/6, c2y=p2[1]-(p3[1]-p1[1])/6;
-          d+=` C${c1x.toFixed(1)},${c1y.toFixed(1)} ${c2x.toFixed(1)},${c2y.toFixed(1)} ${p2[0].toFixed(1)},${p2[1].toFixed(1)}`;
-        }
-      }
-      return `<svg width="${w}" height="${BH}" viewBox="0 0 ${w} ${BH}" preserveAspectRatio="none"
-        style="position:absolute;left:0;bottom:32px;pointer-events:none;overflow:visible;opacity:.4">
-        <path d="${d}" fill="none" stroke="var(--chart-line)" stroke-width="2"
-          stroke-linejoin="round" stroke-linecap="round"/>
-        ${P.map(p=>`<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="2" fill="var(--chart-line)"/>`).join('')}
-      </svg>`;
-    };
+    const MINBARS=7;    // минимум колонок в ряду (короткие ряды дополняются пустыми плейсхолдерами)
     wrap.innerHTML=pairs.map(p=>{
       const rows=p.rows||[];
+      // автомасштаб ширины: колонки делят ширину поровну (flex:1). Гарантируем ≥MINBARS колонок,
+      // добивая пустыми — тогда при 1-2 днях бары не растягиваются на весь ряд, а держат сетку.
+      const pad=Math.max(0,MINBARS-rows.length);
       const bars=rows.length? rows.map(r=>{
         const nh=Math.round(Math.abs(r.net)/mx*BH);
         const nc=r.net>=0?'var(--signal)':'var(--loss)';
-        return `<div style="display:flex;flex-direction:column;align-items:center;gap:4px;min-width:60px" title="${day(r.date)}: прибыль ${s5money(r.net)}, комиссия −${r.fee}₽, сделок ${r.trades}">
-          <div style="font-size:10px;color:${nc};font-weight:600;position:relative;z-index:1">${r.net>=0?'+':''}${r.net}</div>
+        return `<div style="flex:1 1 0;min-width:0;display:flex;flex-direction:column;align-items:center;gap:4px" title="${day(r.date)}: прибыль ${s5money(r.net)}, комиссия −${r.fee}₽, сделок ${r.trades}">
+          <div style="font-size:10px;color:${nc};font-weight:600;white-space:nowrap;overflow:hidden">${r.net>=0?'+':''}${r.net}</div>
           <div style="display:flex;align-items:flex-end;height:${BH}px">
-            <div style="width:18px;height:${Math.max(nh,2)}px;background:${nc};border-radius:3px 3px 0 0"></div>
+            <div style="width:60%;max-width:22px;min-width:6px;height:${Math.max(nh,2)}px;background:${nc};border-radius:3px 3px 0 0"></div>
           </div>
-          <div style="font-size:10px;color:var(--ink-dim);text-align:center;line-height:1.3">${day(r.date)}<br><span style="color:var(--ink-faint)">${dow(r.date)}</span></div>
+          <div style="font-size:10px;color:var(--ink-dim);text-align:center;line-height:1.3;white-space:nowrap">${day(r.date)}<br><span style="color:var(--ink-faint)">${dow(r.date)}</span></div>
         </div>`;
       }).join('') : '<div class="empty" style="font-size:12px">нет зафиксированных сделок</div>';
+      const fill=rows.length?Array(pad).fill('<div style="flex:1 1 0;min-width:0"></div>').join(''):'';
       const tc=p.total_net>=0?'var(--signal)':'var(--loss)';
       return `<div style="margin-bottom:18px;border:1px solid var(--line);border-radius:8px;padding:12px 14px">
         <div style="margin-bottom:10px">
           <div style="font-size:14px;font-weight:600;margin-bottom:3px">${p.label}</div>
           <span style="font-size:12px">прибыль <b style="color:${tc}">${s5money(p.total_net)}</b> · комиссия <b style="color:var(--ink-dim)">−${p.total_fee}₽</b> · ${p.total_trades} сделок</span>
         </div>
-        <div style="position:relative;display:flex;gap:10px;flex-wrap:nowrap;align-items:flex-end;overflow-x:auto">${rows.length?lineSvg(rows):''}${bars}</div>
+        <div style="display:flex;gap:4px;align-items:flex-end">${bars}${fill}</div>
       </div>`;
-    }).join('') + `<div style="font-size:10px;color:var(--ink-dim);margin-top:2px"><span style="display:inline-block;width:10px;height:10px;background:var(--signal);border-radius:2px;vertical-align:middle"></span> прибыль за день (зелёный +, красный −) &nbsp; <span style="display:inline-block;width:14px;height:0;border-top:2px solid var(--chart-line);vertical-align:middle"></span> дневная net (линия, единый масштаб)</div>`;
+    }).join('') + `<div style="font-size:10px;color:var(--ink-dim);margin-top:2px"><span style="display:inline-block;width:10px;height:10px;background:var(--signal);border-radius:2px;vertical-align:middle"></span> прибыль за день (зелёный +, красный −), единый масштаб по всем инструментам</div>`;
   }catch(e){ wrap.innerHTML='<div class="empty" style="font-size:12px">ошибка: '+s4esc(e.message)+'</div>'; }
 }
 function s5Init(){

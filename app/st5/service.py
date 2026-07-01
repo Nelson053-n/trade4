@@ -75,8 +75,14 @@ class St5Portfolio:
                        for pid, e in engines.items() if e.position is not None)
         if iss_open <= 0:
             return
+        factor = real_blocked_rub / iss_open
+        # ЗАЩИТА ОТ АРТЕФАКТА: реальное ГО не бывает меньше половины ISS-оценки (биржа не даёт
+        # хедж-скидку >50%). factor<0.5 ⇒ blocked_margin вернул мусор (счёт рассинхронен / блокировка
+        # ещё не отобразилась) — НЕ калибруем, иначе factor схлопывается в ~0 и риск-гейт слепнет.
+        if factor < 0.5:
+            return
         self.real_blocked_rub = real_blocked_rub
-        self.go_factor = real_blocked_rub / iss_open
+        self.go_factor = factor
 
     def open_count(self, engines: dict[str, ST5Engine], exclude: str | None = None) -> int:
         return sum(1 for pid, e in engines.items()
@@ -473,9 +479,10 @@ class St5Session:
             if time.strftime("%Y-%m-%d", time.gmtime(t.get("exit_ts", 0) / 1000 + 3 * 3600)) == today)
         self.portfolio.capital_rub = data.get("capital_rub", self.cfg.paper.start_balance_rub)
         # go_factor переживает рестарт (иначе первый вход при flat — по заниженному ISS-ГО).
-        # Защита: фактор должен быть >0; иначе дефолт 1.0 (битая запись не должна обнулить риск-гейт).
+        # Защита: фактор ≥0.5 (реальное ГО не бывает меньше половины ISS); битая/схлопнутая запись
+        # (напр. 0.0013 от артефакта blocked_margin) не должна обнулить риск-гейт → дефолт 1.0.
         gf = data.get("go_factor", 1.0)
-        self.portfolio.go_factor = gf if isinstance(gf, (int, float)) and gf > 0 else 1.0
+        self.portfolio.go_factor = gf if isinstance(gf, (int, float)) and gf >= 0.5 else 1.0
         # ₽-лимиты ГО, заданные оператором в UI (иначе рестарт вернул бы дефолт кода)
         for k in ("max_go_per_trade_rub", "max_go_portfolio_rub"):
             v = data.get(k)
