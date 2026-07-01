@@ -181,6 +181,9 @@ a{color:var(--accent-2);text-decoration:none}
 .modal-box .modal-actions{display:flex;gap:10px;justify-content:flex-end}
 .legend{display:flex;gap:16px;flex-wrap:wrap;margin-top:10px;font-family:var(--mono);font-size:10.5px;color:var(--ink-dim)}
 .legend i{display:inline-block;width:13px;height:0;border-top-width:2px;border-top-style:solid;vertical-align:middle;margin-right:6px}
+.s5rbtn{font-size:11px;background:var(--panel-2);border:1px solid var(--line);border-radius:6px;color:var(--ink-dim);padding:2px 7px;cursor:pointer;font-family:var(--mono)}
+.s5rbtn.on{background:var(--accent,var(--signal));border-color:transparent;color:#fff;font-weight:600}
+.s5rbtn:hover{color:var(--ink)}
 
 /* readouts + gauge */
 .readouts{display:grid;grid-template-columns:repeat(4,1fr);gap:11px;margin-top:14px}
@@ -586,6 +589,8 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
       </div>
       <div class="card">
         <h2>Доходность по дням <span class="em" id="s5-daily-sub">идеал vs с издержками vs реал</span>
+          <span id="s5-daily-range" style="float:right;font-size:11px;display:inline-flex;gap:4px;margin-left:8px">
+            <button data-d="1" class="s5rbtn">1д</button><button data-d="7" class="s5rbtn">7д</button><button data-d="14" class="s5rbtn">14д</button><button data-d="30" class="s5rbtn on">30д</button></span>
           <select id="s5-daily-pair" style="float:right;font-size:11px;background:var(--panel-2);border:1px solid var(--line);border-radius:6px;color:var(--ink);padding:2px 6px"><option value="sber">Сбер</option><option value="sngr">Сургут</option><option value="tatn">Татнефть</option></select></h2>
         <canvas id="s5-daily-chart" style="width:100%;height:170px;display:block;margin:6px 0"></canvas>
         <div class="legend" style="margin-bottom:6px">
@@ -1855,14 +1860,19 @@ async function s5LoadOrderBook(){
   }
 }
 let _s5dailyLoaded=false;
+let _s5dailyRange=30;   // выбранный фильтр периода (последние N торговых дней)
 async function s5LoadDaily(){
   const pair=$('s5-daily-pair').value;
   try{ const d=await s5api('/daily?pair='+pair+'&days=30');
     if(d.error){ $('s5-daily-totals').textContent=d.error; return; }
-    const rows=d.rows||[];
-    const nd=d.active_days||0;
+    // берём последние N ТОРГОВЫХ дней (real!=0) по фильтру периода
+    const traded=(d.rows||[]).filter(r=>r.real!==0);
+    const rows=_s5dailyRange<traded.length?traded.slice(-_s5dailyRange):traded;
+    const nd=rows.length;
+    const sReal=rows.reduce((s,r)=>s+r.real,0), sPlan=rows.reduce((s,r)=>s+r.with_costs,0), sIdeal=rows.reduce((s,r)=>s+r.ideal,0);
+    const missed=sPlan-sReal, cost=sIdeal-sPlan;
     $('s5-daily-sub').textContent=nd?`план vs факт · ${nd} торг. ${nd===1?'день':'дн.'}`:'план vs факт';
-    $('s5-daily-totals').innerHTML=`<span style="color:var(--ink-faint)">за ${nd} торг. дн.:</span> план <b style="color:var(--ink-dim)">${s5money(d.total_with_costs)}</b> · факт <b style="color:${d.total_real>=0?'var(--signal)':'var(--loss)'}">${s5money(d.total_real)}</b> · недобор <b style="color:var(--loss)">${s5money(-d.missed)}</b><br><span style="color:var(--ink-faint);font-size:11px">потолок стратегии ${s5money(d.total_ideal)} − стоимость исполнения ${s5money(d.cost_of_execution)} = план ${s5money(d.total_with_costs)}</span>`;
+    $('s5-daily-totals').innerHTML=`<span style="color:var(--ink-faint)">за ${nd} торг. дн.:</span> план <b style="color:var(--ink-dim)">${s5money(sPlan)}</b> · факт <b style="color:${sReal>=0?'var(--signal)':'var(--loss)'}">${s5money(sReal)}</b> · недобор <b style="color:var(--loss)">${s5money(-missed)}</b><br><span style="color:var(--ink-faint);font-size:11px">потолок стратегии ${s5money(sIdeal)} − стоимость исполнения ${s5money(cost)} = план ${s5money(sPlan)}</span>`;
     const tb=$('s5-daily').querySelector('tbody');
     tb.innerHTML=rows.length?rows.slice().reverse().map(r=>`<tr><td style="color:var(--ink-dim)">${r.date.slice(5)}</td><td style="color:var(--ink-dim)">${s5money(r.ideal)}</td><td>${s5money(r.with_costs)}</td><td style="color:${r.real>=0?'var(--signal)':'var(--loss)'}">${s5money(r.real)}</td></tr>`).join(''):'<tr><td colspan="4" class="empty">нет данных</td></tr>';
     s5DrawDaily(rows);
@@ -1890,8 +1900,11 @@ function s5DrawDaily(rows){
   ctx.fillStyle=dim; ctx.font='9px monospace'; ctx.textAlign='right'; ctx.textBaseline='middle';
   ctx.fillText(Math.round(hi).toLocaleString('ru'),px0-3,y(hi)+4);
   if(lo<0) ctx.fillText(Math.round(lo).toLocaleString('ru'),px0-3,y(lo)-4);
-  // геометрия столбиков
-  const n=D.length, slot=(px1-px0)/n, bw=Math.min(slot*0.62,26), plan_w=bw, fact_w=bw*0.56;
+  // геометрия столбиков: автомасштаб по ширине — слот = вся ширина / число дней.
+  // Бар занимает долю слота, оставляя ПРОСВЕТ (зазор ≥6px, но не съедающий больше половины слота).
+  const n=D.length, slot=(px1-px0)/n;
+  const gap=Math.min(Math.max(6,slot*0.28),slot*0.5);   // просвет между барами
+  const plan_w=Math.max(3,slot-gap), fact_w=plan_w*0.56;
   D.forEach((r,i)=>{
     const cx=px0+slot*(i+0.5);
     // ФОН: план (с издержками) — серый бар
@@ -2083,6 +2096,11 @@ function s5Init(){
     }catch(e){ $('s5-bt-res').textContent='ошибка: '+e.message; }
   };
   $('s5-daily-pair').onchange=s5LoadDaily;
+  $('s5-daily-range').querySelectorAll('.s5rbtn').forEach(b=>b.onclick=()=>{
+    _s5dailyRange=+b.dataset.d;
+    $('s5-daily-range').querySelectorAll('.s5rbtn').forEach(x=>x.classList.toggle('on',x===b));
+    s5LoadDaily();
+  });
   $('s5-btn-params').onclick=async()=>{
     const body={ quantity_lots:+$('s5-p-lots').value, max_open_positions:+$('s5-p-maxpos').value };
     try{ await s5api('/config','POST',body); s5LoadGoInfo(); s5Poll(); }catch(e){ alert(e.message); }
