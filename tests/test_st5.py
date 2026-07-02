@@ -1349,9 +1349,10 @@ def test_periodic_reconcile_logs_mismatch_once(monkeypatch):
 
 
 def test_periodic_reconcile_flat_foreign_legs_info(monkeypatch):
-    """Движок flat, на счёте чужие ноги (общий sandbox-счёт) → info-лог, без warn/действий."""
+    """ОБЩИЙ счёт (dedicated_account=False): чужие ноги при flat → info-лог, без действий."""
     import asyncio
     s = _session_with_fake_executor()
+    s.cfg.dedicated_account = False
     s._reconciled.add("sber")
     s._periodic_reconcile_every_s = 0
     s.engines["sber"].position = None
@@ -1361,6 +1362,27 @@ def test_periodic_reconcile_flat_foreign_legs_info(monkeypatch):
     asyncio.run(s._periodic_reconcile())
     infos = [e for e in s.events if "движок flat" in e["message"]]
     assert len(infos) == 1 and infos[0]["kind"] == "info"
+
+
+def test_periodic_reconcile_dedicated_closes_orphan_legs(monkeypatch):
+    """ВЫДЕЛЕННЫЙ счёт (дефолт): голая нога при flat-движке → автозакрытие маркетом + warn.
+    Регресс на инцидент 02.07 18:20 (сорванный unwind оставил SGU6 −6 на 5 часов)."""
+    import asyncio
+    s = _session_with_fake_executor()
+    assert s.cfg.dedicated_account is True            # дефолт после развода счетов
+    s._reconciled.add("sber")
+    s._periodic_reconcile_every_s = 0
+    s.engines["sber"].position = None
+    orders = []
+    s._fake_ex.broker_lots = lambda: (0, -6)          # голый шорт 6 префов
+    s._fake_ex._uids = lambda: ("uid_o", "uid_p")
+    s._fake_ex._post = lambda uid, lots, d, op, ref: orders.append((uid, lots, d, op))
+    monkeypatch.setattr(s, "_make_executor", lambda pid: s._fake_ex)
+    monkeypatch.setattr(s, "_ensure_uid_cache", lambda pid: pid == "sber")
+    asyncio.run(s._periodic_reconcile())
+    assert ("uid_p", 6, "BUY", "cleanup") in orders   # закрыли обратной стороной
+    assert any("ГОЛАЯ НОГА" in e["message"] and e["kind"] == "warn" for e in s.events)
+    assert any("голая нога закрыта" in e["message"] for e in s.events)
 
 
 # ============================ per-аккаунт токены (st4/st5 на разных токенах) ============================

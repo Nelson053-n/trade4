@@ -743,6 +743,14 @@ class St5Session:
         except Exception as e:  # noqa: BLE001
             self.log_event("warn", f"reconciliation {pid} пропущена: {e}")
 
+    @staticmethod
+    def _close_orphan_legs(ex, bal_ord: int, bal_pref: int) -> None:
+        """Закрыть осиротевшие ноги маркетом (знак баланса → обратная сторона)."""
+        uid_ord, uid_pref = ex._uids()
+        for uid, bal in ((uid_ord, bal_ord), (uid_pref, bal_pref)):
+            if bal:
+                ex._post(uid, abs(bal), "SELL" if bal > 0 else "BUY", "cleanup", 0.0)
+
     async def _periodic_reconcile(self) -> None:
         """Периодическая сверка ног движок↔счёт в live (стартовый reconcile ловит только рестарт).
 
@@ -782,8 +790,22 @@ class St5Session:
                 if self.cfg.notify.notify_reconcile:
                     self._notify(f"⚠️ <b>Сверка ног</b> · {tg.esc(ST5_PAIRS[pid][3])}\n{tg.esc(msg)}")
             elif p is None and (bal_ord or bal_pref):
-                self.log_event("info", f"reconcile {pid}: движок flat, на счёте ord={bal_ord} "
-                                       f"pref={bal_pref} (возможно чужой движок общего счёта)")
+                if self.cfg.dedicated_account:
+                    # выделенный счёт: чужих нет → это НАША голая нога (сорванный unwind,
+                    # регресс 02.07 18:20 SGU6 −6). Закрываем маркетом + тревога.
+                    msg = (f"reconcile {pid}: ГОЛАЯ НОГА на выделенном счёте "
+                           f"(ord={bal_ord} pref={bal_pref}) — автозакрытие")
+                    self.log_event("warn", msg)
+                    if self.cfg.notify.notify_reconcile:
+                        self._notify(f"🚨 <b>Голая нога</b> · {tg.esc(ST5_PAIRS[pid][3])}\n{tg.esc(msg)}")
+                    try:
+                        await asyncio.to_thread(self._close_orphan_legs, ex, bal_ord, bal_pref)
+                        self.log_event("info", f"reconcile {pid}: голая нога закрыта")
+                    except Exception as ce:  # noqa: BLE001
+                        self.log_event("warn", f"reconcile {pid}: автозакрытие не удалось: {ce}")
+                else:
+                    self.log_event("info", f"reconcile {pid}: движок flat, на счёте ord={bal_ord} "
+                                           f"pref={bal_pref} (возможно чужой движок общего счёта)")
 
     # ---------- главный live-цикл портфеля ----------
     async def run_live(self) -> None:

@@ -129,3 +129,7 @@ class St5Config(BaseModel):
     notify: St5NotifyConfig = St5NotifyConfig()
     auto_approve: bool = True                # statarb — авто-исполнение (ручной approve не нужен)
     poll_seconds: float = 15.0               # бар раз в 10 мин → частый опрос не нужен (+rate-limit)
+    # Счёт ВЫДЕЛЕН под st5 (после развода счетов 02.07): чужих движков на нём нет, значит
+    # ноги при flat-движке = НАШ обрыв (сорванный unwind и т.п.) → periodic reconcile
+    # АВТОЗАКРЫВАЕТ их маркетом + тревога. False — старое поведение (общий счёт, не трогать).
+    dedicated_account: bool = True
