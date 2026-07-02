@@ -989,18 +989,19 @@ def test_day_pnl_recomputed_from_journal_on_load(monkeypatch):
     assert s.portfolio.day_pnl_rub == 300      # 500 − 200, не 9999 и не +1000 вчерашних
 
 
-def test_pair_exit_full_calibrated_to_075():
-    """z_exit_full всех пар = 0.75 (калибровка 2026-07-02: свип на 3 сегментах март–июль,
-    валидация на нетронутом холдауте дек-2025–март по мартовской серии контрактов; кандидат
-    лучше прежней базы 0.5 во всех 12 ячейках пара×сегмент). Ранний выход остатка уходит из
-    β-дрейфа/time-stop'ов на копеечном хвосте движения. Меняли — пересними бэктест."""
+def test_pair_z_params_calibrated_honest_metric():
+    """z-параметры пар — калибровка 2026-07-02 на ЧЕСТНОЙ метрике (P&L по фактическим β-ногам
+    после фикса α-смещения; 4 сегмента дек-2025–июль-2026, робастность к издержкам 0.5–2пт).
+    Меняли — пересними бэктест ЧЕСТНЫМ движком (старые α-завышенные цифры не сравнимы)."""
     from app.st5.service import ST5_PAIRS, St5Session
-    for pid in ("sber", "sngr", "tatn"):
-        assert ST5_PAIRS[pid][4]["z_exit_full"] == 0.75, pid
-    # _pair_cfg должен реально применить оверрайд к движку
+    want = {"sber": (1.25, 0.25, 0.0), "sngr": (1.5, 0.5, 1.0), "tatn": (1.75, 0.25, 1.0)}
     s = St5Session()
-    for pid in ("sber", "sngr", "tatn"):
-        assert s.engines[pid].cfg.strategy.z_exit_full == 0.75, pid
+    for pid, (ze, zx, zp) in want.items():
+        ov = ST5_PAIRS[pid][4]
+        assert (ov["z_entry"], ov["z_exit_full"], ov["z_take_partial"]) == (ze, zx, zp), pid
+        # _pair_cfg должен реально применить оверрайд к движку
+        st = s.engines[pid].cfg.strategy
+        assert (st.z_entry, st.z_exit_full, st.z_take_partial) == (ze, zx, zp), pid
 
 
 # ============================ runtime per-pair оверрайды + хранилище стратегий ============================
@@ -1009,7 +1010,7 @@ def test_pair_overrides_take_priority_in_pair_cfg():
     """pair_overrides[pid] перекрывают ST5_PAIRS-оверрайды из кода в _pair_cfg."""
     from app.st5.service import St5Session
     s = St5Session()
-    assert s.engines["sber"].cfg.strategy.z_exit_full == 0.75    # из кода
+    assert s.engines["sber"].cfg.strategy.z_exit_full == 0.25    # из кода
     s.pair_overrides["sber"] = {"z_exit_full": 0.1}
     cfg = s._pair_cfg("sber")
     assert cfg.strategy.z_exit_full == 0.1                       # runtime перекрыл
@@ -1062,7 +1063,7 @@ def test_capture_current_snapshots_effective_params():
     s = St5Session()
     s.pair_overrides["sngr"] = {"z_exit_full": 0.1}
     snap = s.capture_current()
-    assert snap["sber"]["z_exit_full"] == 0.75     # из кода
+    assert snap["sber"]["z_exit_full"] == 0.25     # из кода
     assert snap["sngr"]["z_exit_full"] == 0.1      # runtime перекрыл
     assert "z_entry" in snap["sber"]               # снимаются все ключевые параметры
 
