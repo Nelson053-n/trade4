@@ -1422,3 +1422,20 @@ def test_st5_connector_sets_account_token(monkeypatch, tmp_path):
     assert r.status_code == 200, r.text
     assert sb._account_token("acc-new") == "t.ST5ONLY"
     assert saved_global == []                          # общий токен НЕ трогали
+
+
+def test_quantity_lots_survives_session_round_trip(tmp_path):
+    """quantity_lots (базовые юниты на вход) переживает save/load session — рестарт
+    не должен сбрасывать заданный оператором объём в дефолт кода (регресс 02.07)."""
+    from app.st5.service import St5Session
+    s = St5Session()
+    s._session_file = tmp_path / "s5.json"
+    s.cfg.execution.quantity_lots = 2
+    for eng in s.engines.values():
+        eng.base_lots = 2
+    s.save_session()
+    s2 = St5Session()
+    s2._session_file = tmp_path / "s5.json"
+    assert s2.load_session() is True
+    assert s2.cfg.execution.quantity_lots == 2
+    assert all(e.base_lots == 2 for e in s2.engines.values())

@@ -428,6 +428,8 @@ class St5Session:
                 # ₽-лимиты ГО персистим (меняются оператором в UI; иначе рестарт сбросит в дефолт)
                 "max_go_per_trade_rub": self.cfg.risk.max_go_per_trade_rub,
                 "max_go_portfolio_rub": self.cfg.risk.max_go_portfolio_rub,
+                # базовый объём (юнитов на вход) — оператор меняет в UI, рестарт не должен сбрасывать
+                "quantity_lots": self.cfg.execution.quantity_lots,
                 # открытые позиции по парам переживают рестарт (St5State — str-enum,
                 # json.dumps сериализует .state как строку). None → пара flat.
                 "positions": {pid: (asdict(eng.position) if eng.position else None)
@@ -519,6 +521,13 @@ class St5Session:
             v = data.get(k)
             if isinstance(v, (int, float)) and v >= 0:
                 setattr(self.cfg.risk, k, float(v))
+        # базовый объём (юнитов на вход) — оператор менял в UI, восстанавливаем в движки
+        ql = data.get("quantity_lots")
+        if isinstance(ql, (int, float)) and 1 <= ql <= 100:
+            self.cfg.execution.quantity_lots = int(ql)
+            for pid, eng in self.engines.items():
+                eng.base_lots = int(ql)
+                self.pair_cfgs[pid].execution.quantity_lots = int(ql)
         self.state["data_source"] = data.get("data_source", "synthetic")
         self.last_live_ts = data.get("last_live_ts", {pid: 0 for pid in ST5_PAIRS})
         en = data.get("enabled_pairs") or {}
