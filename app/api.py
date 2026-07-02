@@ -1241,7 +1241,11 @@ async def st5_strategies_backtest(payload: dict | None = None):
 
 @app.post("/st5/connector")
 def st5_connector(payload: dict):
-    """Режим исполнителя st5: paper | tbank_sandbox | tbank_real (+account_id для real)."""
+    """Режим исполнителя st5: paper | tbank_sandbox | tbank_real (+account_id для real).
+
+    account_token — токен ИМЕННО этого счёта (per-account, tbank_sandbox.set_account_token):
+    позволяет держать st5 на отдельном токене, не трогая общий (st4). Глобальный token
+    по-прежнему меняет токен всего процесса."""
     _st5_guard_no_position("смена коннектора")
     mode = payload.get("mode")
     if mode not in ("paper", "tbank_sandbox", "tbank_real"):
@@ -1252,6 +1256,9 @@ def st5_connector(payload: dict):
     ST5.cfg.connector.mode = mode
     if "account_id" in payload:
         ST5.cfg.connector.account_id = str(payload["account_id"]).strip()
+    if payload.get("account_token") and ST5.cfg.connector.account_id:
+        _sb.set_account_token(ST5.cfg.connector.account_id,
+                              str(payload["account_token"]).strip())
     if mode == "tbank_real" and not ST5.cfg.connector.account_id:
         raise HTTPException(400, "для tbank_real обязателен account_id")
     ST5.state["real_trading_armed"] = False   # смена режима снимает взвод

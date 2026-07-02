@@ -109,7 +109,47 @@ def _token() -> str:
     return tok
 
 
-def _call(service: str, method: str, body: dict, _retries: int = 3) -> dict:
+# ---------------------------------------------------------- per-аккаунт токены
+# Sandbox-счета живут в пространстве СВОЕГО токена. Чтобы st4 и st5 работали под разными
+# токенами в одном процессе, счёт может иметь собственный токен: account-scoped вызовы
+# берут его из этой мапы, остальные (market data, счета без записи) — общий _token().
+_ACCOUNT_TOKENS_FILE = Path(__file__).with_name(".tbank_account_tokens.json")
+_account_tokens: dict | None = None        # ленивый кэш {account_id: token}
+
+
+def _load_account_tokens() -> dict:
+    global _account_tokens
+    if _account_tokens is None:
+        try:
+            _account_tokens = json.loads(_ACCOUNT_TOKENS_FILE.read_text())
+        except Exception:  # noqa: BLE001  нет файла/битый — пустая мапа
+            _account_tokens = {}
+    return _account_tokens
+
+
+def set_account_token(account_id: str, token: str) -> None:
+    """Закрепить токен за счётом (переживает рестарт; файл 0600, в .gitignore).
+    Пустой token → снять привязку (счёт вернётся на общий токен)."""
+    m = _load_account_tokens()
+    token = (token or "").strip()
+    if token:
+        m[account_id] = token
+    else:
+        m.pop(account_id, None)
+    try:
+        _ACCOUNT_TOKENS_FILE.write_text(json.dumps(m))
+        _ACCOUNT_TOKENS_FILE.chmod(0o600)
+    except Exception:  # noqa: BLE001  не записали — токен хотя бы в памяти процесса
+        pass
+
+
+def _account_token(account_id: str) -> str | None:
+    """Токен счёта из мапы или None (→ общий _token())."""
+    return _load_account_tokens().get(account_id)
+
+
+def _call(service: str, method: str, body: dict, _retries: int = 3,
+          token: str | None = None) -> dict:
     """POST к REST-gateway T-Bank. Возвращает JSON-ответ. Токен из env, не печатается.
 
     Ретраи на транзиентных сетевых обрывах (IncompleteRead/timeout) — крупные ответы вроде
@@ -122,7 +162,7 @@ def _call(service: str, method: str, body: dict, _retries: int = 3) -> dict:
     last_err: Exception | None = None
     for attempt in range(_retries):
         req = urllib.request.Request(url, data=data, method="POST", headers={
-            "Authorization": f"Bearer {_token()}",
+            "Authorization": f"Bearer {token or _token()}",
             "Content-Type": "application/json",
             "Accept": "application/json",
         })
@@ -256,19 +296,19 @@ def is_tradable(instrument_id: str) -> bool:
 
 # ---------------------------------------------------------------- sandbox
 
-def open_account(name: str = "st4-spread-sandbox") -> str:
-    return _call(_SANDBOX, "OpenSandboxAccount", {"name": name})["accountId"]
+def open_account(name: str = "st4-spread-sandbox", token: str | None = None) -> str:
+    return _call(_SANDBOX, "OpenSandboxAccount", {"name": name}, token=token)["accountId"]
 
 
-def list_accounts() -> list[dict]:
-    return _call(_SANDBOX, "GetSandboxAccounts", {}).get("accounts", [])
+def list_accounts(token: str | None = None) -> list[dict]:
+    return _call(_SANDBOX, "GetSandboxAccounts", {}, token=token).get("accounts", [])
 
 
 def pay_in(account_id: str, rub: int) -> float:
     resp = _call(_SANDBOX, "SandboxPayIn", {
         "accountId": account_id,
         "amount": {"currency": "rub", "units": str(int(rub)), "nano": 0},
-    })
+    }, token=_account_token(account_id))
     return _q_to_float(resp.get("balance"))
 
 
@@ -286,15 +326,17 @@ def post_order(account_id: str, instrument_uid: str, lots: int, direction: str,
     }
     if price is not None:
         body["price"] = price
-    return _call(_SANDBOX, "PostSandboxOrder", body)
+    return _call(_SANDBOX, "PostSandboxOrder", body, token=_account_token(account_id))
 
 
 def portfolio(account_id: str) -> dict:
-    return _call(_SANDBOX, "GetSandboxPortfolio", {"accountId": account_id})
+    return _call(_SANDBOX, "GetSandboxPortfolio", {"accountId": account_id},
+                 token=_account_token(account_id))
 
 
 def positions(account_id: str) -> dict:
-    return _call(_SANDBOX, "GetSandboxPositions", {"accountId": account_id})
+    return _call(_SANDBOX, "GetSandboxPositions", {"accountId": account_id},
+                 token=_account_token(account_id))
 
 
 def blocked_margin(account_id: str) -> float:
@@ -306,8 +348,9 @@ def blocked_margin(account_id: str) -> float:
     Возвращает 0, если фьючерсных позиций нет. Точно только при ОТКРЫТЫХ позициях.
     """
     try:
-        pf = _call(_SANDBOX, "GetSandboxPortfolio", {"accountId": account_id})
-        pos = _call(_SANDBOX, "GetSandboxPositions", {"accountId": account_id})
+        tok = _account_token(account_id)
+        pf = _call(_SANDBOX, "GetSandboxPortfolio", {"accountId": account_id}, token=tok)
+        pos = _call(_SANDBOX, "GetSandboxPositions", {"accountId": account_id}, token=tok)
     except Exception:  # noqa: BLE001
         return 0.0
     has_fut = any(int(float(f.get("balance", 0))) != 0 for f in pos.get("futures", []))
@@ -324,7 +367,8 @@ def blocked_margin(account_id: str) -> float:
 
 
 def close_account(account_id: str) -> None:
-    _call(_SANDBOX, "CloseSandboxAccount", {"accountId": account_id})
+    _call(_SANDBOX, "CloseSandboxAccount", {"accountId": account_id},
+          token=_account_token(account_id))
 
 
 def last_entry_ts_for(account_id: str, instrument_uid: str, days: int = 7) -> int | None:

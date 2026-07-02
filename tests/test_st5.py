@@ -1361,3 +1361,64 @@ def test_periodic_reconcile_flat_foreign_legs_info(monkeypatch):
     asyncio.run(s._periodic_reconcile())
     infos = [e for e in s.events if "движок flat" in e["message"]]
     assert len(infos) == 1 and infos[0]["kind"] == "info"
+
+
+# ============================ per-аккаунт токены (st4/st5 на разных токенах) ============================
+
+def test_account_token_roundtrip(tmp_path, monkeypatch):
+    """set_account_token/_account_token: привязка переживает перезагрузку кэша, снятие работает."""
+    from app.st4 import tbank_sandbox as sb
+    monkeypatch.setattr(sb, "_ACCOUNT_TOKENS_FILE", tmp_path / "acct.json")
+    monkeypatch.setattr(sb, "_account_tokens", None)
+    sb.set_account_token("acc-5", "t.NEW")
+    assert sb._account_token("acc-5") == "t.NEW"
+    assert sb._account_token("acc-4") is None        # чужой счёт — общий токен
+    monkeypatch.setattr(sb, "_account_tokens", None)  # сброс кэша → перечитать файл
+    assert sb._account_token("acc-5") == "t.NEW"
+    sb.set_account_token("acc-5", "")                 # снятие привязки
+    assert sb._account_token("acc-5") is None
+
+
+def test_account_scoped_calls_use_account_token(tmp_path, monkeypatch):
+    """Вызовы со счётом (portfolio/positions/post_order/pay_in) идут с токеном СЧЁТА,
+    остальные — с общим. Гарантия разделения st4 (общий токен) и st5 (свой)."""
+    from app.st4 import tbank_sandbox as sb
+    monkeypatch.setattr(sb, "_ACCOUNT_TOKENS_FILE", tmp_path / "acct.json")
+    monkeypatch.setattr(sb, "_account_tokens", None)
+    sb.set_account_token("acc-st5", "t.ST5")
+    used = []
+
+    def fake_call(service, method, body, _retries=3, token=None):
+        used.append((method, token))
+        return {"accounts": [], "balance": None}
+    monkeypatch.setattr(sb, "_call", fake_call)
+    sb.portfolio("acc-st5")
+    sb.positions("acc-st5")
+    sb.post_order("acc-st5", "uid", 1, "ORDER_DIRECTION_BUY", "oid")
+    sb.portfolio("acc-st4")                           # счёт БЕЗ привязки
+    sb.list_accounts()
+    assert used[0] == ("GetSandboxPortfolio", "t.ST5")
+    assert used[1] == ("GetSandboxPositions", "t.ST5")
+    assert used[2] == ("PostSandboxOrder", "t.ST5")
+    assert used[3] == ("GetSandboxPortfolio", None)   # st4-счёт → общий токен
+    assert used[4] == ("GetSandboxAccounts", None)
+
+
+def test_st5_connector_sets_account_token(monkeypatch, tmp_path):
+    """/st5/connector с account_token закрепляет токен ЗА СЧЁТОМ st5, не меняя общий."""
+    from fastapi.testclient import TestClient
+    from app.api import app, ST5
+    from app.st4 import tbank_sandbox as sb
+    monkeypatch.setattr(sb, "_ACCOUNT_TOKENS_FILE", tmp_path / "acct.json")
+    monkeypatch.setattr(sb, "_account_tokens", None)
+    saved_global = []
+    monkeypatch.setattr(sb, "save_token", lambda t: saved_global.append(t))
+    for e in ST5.engines.values():
+        e.position = None
+    c = TestClient(app)
+    r = c.post("/st5/connector", json={"mode": "tbank_sandbox",
+                                       "account_id": "acc-new",
+                                       "account_token": "t.ST5ONLY"})
+    assert r.status_code == 200, r.text
+    assert sb._account_token("acc-new") == "t.ST5ONLY"
+    assert saved_global == []                          # общий токен НЕ трогали

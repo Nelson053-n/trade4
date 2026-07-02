@@ -16,6 +16,8 @@ session_state_5*.json
 # токен T-Bank (секрет, НИКОГДА не коммитить)
 .tbank_token
 app/st4/.tbank_token
+.tbank_account_tokens.json
+app/st4/.tbank_account_tokens.json
 
 # токен Telegram-бота (секрет, НИКОГДА не коммитить)
 .tg_bot_token
