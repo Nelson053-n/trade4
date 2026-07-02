@@ -64,6 +64,94 @@ class St6Session:
         if len(self.events) > EVENTS_LEN:
             del self.events[0]
 
+    # ---------- sandbox-исполнение (реальные ордера в песочнице T-Bank) ----------
+    def _make_executor(self, perp_secid: str, quart_secid: str):
+        """St5PairExecutor для пары st6: «ord» = вечный, «pref» = квартальник →
+        наш вход (шорт перп + лонг кварт) = long_spread (buy pref + sell ord).
+        None → paper-режим (исполнение по settle, без брокера)."""
+        if self.cfg.mode != "tbank_sandbox" or not self.cfg.account_id:
+            return None
+        from ..st5.executor import St5PairExecutor
+        return St5PairExecutor(self.cfg.account_id, perp_secid, quart_secid,
+                               real=False, audit_cb=lambda a: self.log_event(
+                                   "order", f"{a.get('op')} {a.get('direction')} "
+                                            f"{a.get('lots')}лот {str(a.get('uid'))[:8]} "
+                                            f"→ {a.get('status')}"))
+
+    def _exec_enter(self, pid: str, eng: St6Engine, snap: DaySnap, units: int) -> bool:
+        """Вход в брокере (sandbox). True — исполнено (или paper). False — отказ, входа нет."""
+        perp = ST6_PAIRS[pid][0]
+        ex = self._make_executor(perp, snap.quart_secid)
+        if ex is None:
+            return True
+        try:
+            ex.open_pair(True, units * eng.unit_perp, units * eng.unit_quart,
+                         snap.perp_settle, snap.quart_settle)
+            return True
+        except Exception as e:  # noqa: BLE001
+            self.log_event("warn", f"{pid}: вход в песочнице не удался: {e}")
+            return False
+
+    def _exec_exit(self, pid: str, eng: St6Engine, snap: DaySnap) -> bool:
+        perp = ST6_PAIRS[pid][0]
+        p = eng.position
+        ex = self._make_executor(perp, p.quart_secid)
+        if ex is None:
+            return True
+        try:
+            ex.close_pair(True, p.perp_lots, p.quart_lots, snap.perp_settle, snap.quart_settle)
+            return True
+        except Exception as e:  # noqa: BLE001
+            self.log_event("warn", f"{pid}: выход в песочнице не удался: {e}")
+            return False
+
+    def _exec_roll(self, pid: str, eng: St6Engine, snap: DaySnap,
+                   old_settle: float) -> bool:
+        """Ролл квартальной ноги: продать старую серию, купить новую (перп не трогаем)."""
+        p = eng.position
+        ex_old = self._make_executor(ST6_PAIRS[pid][0], p.quart_secid)
+        if ex_old is None:
+            return True
+        ex_new = self._make_executor(ST6_PAIRS[pid][0], snap.quart_secid)
+        try:
+            uid_old = ex_old._uids()[1]
+            ex_old._post(uid_old, p.quart_lots, "SELL", "roll", old_settle)
+            uid_new = ex_new._uids()[1]
+            ex_new._post(uid_new, p.quart_lots, "BUY", "roll", snap.quart_settle)
+            return True
+        except Exception as e:  # noqa: BLE001
+            self.log_event("warn", f"{pid}: ролл в песочнице не удался: {e}")
+            return False
+
+    _go_cache: dict = {}
+
+    def _unit_go(self, pid: str, perp_secid: str, quart_secid: str) -> float:
+        """ГО одного юнита пары (ISS INITIALMARGIN обеих ног, без хедж-скидки биржи)."""
+        key = (perp_secid, quart_secid)
+        if key not in self._go_cache:
+            try:
+                from ..st4 import data_feed as feed
+                eng = self._engine(pid)
+                self._go_cache[key] = (feed.leg_margin(perp_secid) * eng.unit_perp
+                                       + feed.leg_margin(quart_secid) * eng.unit_quart)
+            except Exception:  # noqa: BLE001
+                return 0.0
+        return self._go_cache[key]
+
+    def funding_history(self, days: int = 30) -> dict:
+        """История аннуализированного фандинга по парам (для графика вкладки)."""
+        out = {}
+        for pid, (perp, _qa, label, _pl, _ql) in ST6_PAIRS.items():
+            try:
+                hist = perp_history(perp, days=days)
+                out[pid] = {"label": label,
+                            "points": [{"date": h["date"],
+                                        "fund_ann_pp": round(h["swaprate"] / h["settle"] * 365 * 100, 2)}
+                                       for h in hist if h["settle"] > 0]}
+            except Exception as e:  # noqa: BLE001
+                out[pid] = {"label": label, "error": str(e)[:120]}
+        return out
+
     # ---------- дневной тик пары ----------
     def tick_pair(self, pid: str) -> dict:
         """Обработать пару: собрать снимок дня из ISS, шагнуть движок, исполнить действие.
@@ -92,6 +180,8 @@ class St6Session:
         view = {"pair": pid, "label": label, "date": day, "perp": perp, "quart": qsec,
                 "fund_ann_pp": round(fund_ann, 1), "basis_ann_pp": round(basis_ann, 1),
                 "edge_pp": round(fund_ann - basis_ann, 1), "d2e": d2e,
+                "unit_go_rub": round(self._unit_go(pid, perp, qsec)),
+                "swap_today_rub": round(hist[-1]["swaprate"] * eng.pv_perp * eng.unit_perp, 1),
                 "in_position": eng.position is not None}
         self.edge_view[pid] = view
         if self.last_day.get(pid) == day:
@@ -102,26 +192,29 @@ class St6Session:
         if action == "enter" and not (self.cfg.trading_enabled and self.enabled_pairs.get(pid, True)):
             action = "none"
         if action == "enter":
-            fee = eng.pair_fee(eng.unit_perp * st.units, eng.unit_quart * st.units) * 1
-            eng.confirm_enter(snap, perp_fill=perp_s, quart_fill=qs, fee_rub=fee)
-            eng.position.perp_secid = perp
-            self.log_event("position", f"{pid}: ВХОД carry edge={view['edge_pp']}пп "
-                                       f"(шорт {eng.position.perp_lots} {perp} + "
-                                       f"лонг {eng.position.quart_lots} {qsec})")
+            if self._exec_enter(pid, eng, snap, st.units):
+                fee = eng.pair_fee(eng.unit_perp * st.units, eng.unit_quart * st.units)
+                eng.confirm_enter(snap, perp_fill=perp_s, quart_fill=qs, fee_rub=fee)
+                eng.position.perp_secid = perp
+                self.log_event("position", f"{pid}: ВХОД carry edge={view['edge_pp']}пп "
+                                           f"(шорт {eng.position.perp_lots} {perp} + "
+                                           f"лонг {eng.position.quart_lots} {qsec})")
         elif action == "exit":
             p = eng.position
-            fee = eng.pair_fee(p.perp_lots, p.quart_lots)
-            tr = eng.confirm_exit(snap, perp_fill=perp_s, quart_fill=qs, fee_rub=fee)
-            self.trades.append(asdict(tr))
-            self.log_event("exit", f"{pid}: ВЫХОД edge={view['edge_pp']}пп net {tr.net_pnl_rub:+.0f}₽ "
-                                   f"(ноги {tr.legs_pnl_rub:+.0f} + фандинг {tr.funding_rub:+.0f} "
-                                   f"− комиссии {tr.fees_rub:.0f})")
+            if self._exec_exit(pid, eng, snap):
+                fee = eng.pair_fee(p.perp_lots, p.quart_lots)
+                tr = eng.confirm_exit(snap, perp_fill=perp_s, quart_fill=qs, fee_rub=fee)
+                self.trades.append(asdict(tr))
+                self.log_event("exit", f"{pid}: ВЫХОД edge={view['edge_pp']}пп net {tr.net_pnl_rub:+.0f}₽ "
+                                       f"(ноги {tr.legs_pnl_rub:+.0f} + фандинг {tr.funding_rub:+.0f} "
+                                       f"− комиссии {tr.fees_rub:.0f})")
         elif action == "roll":
             p = eng.position
             old_settle, _ = quart_settle(p.quart_secid)
-            fee = eng.pair_fee(0, p.quart_lots) * 2
-            eng.confirm_roll(snap, old_quart_fill=old_settle, new_quart_fill=qs, fee_rub=fee)
-            self.log_event("info", f"{pid}: ролл хеджа → {qsec}")
+            if self._exec_roll(pid, eng, snap, old_settle):
+                fee = eng.pair_fee(0, p.quart_lots) * 2
+                eng.confirm_roll(snap, old_quart_fill=old_settle, new_quart_fill=qs, fee_rub=fee)
+                self.log_event("info", f"{pid}: ролл хеджа → {qsec}")
         self.save_session()
         view["in_position"] = eng.position is not None
         return view
@@ -181,7 +274,9 @@ class St6Session:
                                   "unrealized_rub": round(eng.unrealized_rub())})
         net = sum(t.get("net_pnl_rub", 0) for t in self.trades)
         return {"live": self.state["live"], "mode": self.cfg.mode,
+                "account_id": self.cfg.account_id or None,
                 "trading_enabled": self.cfg.trading_enabled,
+                "enabled_pairs": self.enabled_pairs,
                 "edge": list(self.edge_view.values()),
                 "positions": positions, "trades": self.trades[-50:],
                 "net_pnl_rub": round(net), "events": self.events[-EVENTS_LEN:],

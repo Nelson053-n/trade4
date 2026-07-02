@@ -285,6 +285,7 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
 <div class="strat-tabs" style="display:flex;gap:6px;padding:10px 26px 0">
   <button class="strat-tab on" data-strat="st4" style="background:var(--chart-line);color:#fff;border:1px solid var(--chart-line);border-radius:8px 8px 0 0;padding:8px 18px;cursor:pointer;font:inherit;font-weight:600">ST4 · спред-арбитраж</button>
   <button class="strat-tab" data-strat="st5" style="background:var(--panel);color:var(--ink-dim);border:1px solid var(--line);border-bottom:none;border-radius:8px 8px 0 0;padding:8px 18px;cursor:pointer;font:inherit">ST5 · statarb (β/коинтеграция)</button>
+  <button class="strat-tab" data-strat="st6" style="background:var(--panel);color:var(--ink-dim);border:1px solid var(--line);border-bottom:none;border-radius:8px 8px 0 0;padding:8px 18px;cursor:pointer;font:inherit">ST6 · фандинг-арбитраж</button>
 </div>
 
 <div id="tab-st4">
@@ -755,6 +756,73 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
   </div>
   </div>
 </div><!-- /tab-st5 -->
+
+<div id="tab-st6" hidden>
+  <div class="sessbar" style="margin-top:8px">
+    <span class="sb-dot" id="s6-dot"></span>
+    <span class="sb-state" id="s6-state">ST6 остановлен</span>
+    <span class="sb-count" id="s6-mode"></span>
+    <span style="flex:1"></span>
+    <span class="sb-count" id="s6-net"></span>
+  </div>
+  <div class="wrap">
+  <div class="grid">
+    <div>
+      <div class="card">
+        <h2>Сигналы <span class="em">edge = фандинг − базис квартальника, пп годовых</span>
+          <button id="s6-refresh" style="float:right;font:inherit;font-size:11px;padding:3px 10px;cursor:pointer;background:var(--panel);color:var(--ink-dim);border:1px solid var(--line);border-radius:6px">обновить из ISS</button></h2>
+        <table id="s6-edge"><thead><tr><th>торг.</th><th>пара</th><th>фандинг</th><th>базис</th><th>EDGE</th><th>до эксп.</th><th>ГО юнита</th><th>фандинг ₽/д</th><th>позиция</th></tr></thead><tbody></tbody></table>
+        <div id="s6-go-total" style="margin-top:8px;font-size:12px;color:var(--ink-dim)"></div>
+      </div>
+      <div class="card">
+        <h2>Фандинг по дням <span class="em">аннуализированный, % годовых (30 дней)</span></h2>
+        <div class="chartwrap"><canvas id="s6chart" style="width:100%;height:300px;display:block"></canvas></div>
+        <div class="legend" style="margin-top:6px" id="s6-legend"></div>
+      </div>
+      <div class="card">
+        <h2>Открытые carry-позиции</h2>
+        <table id="s6-pos"><thead><tr><th>пара</th><th>ноги</th><th>вход</th><th>edge входа</th><th>фандинг накоплен</th><th>роллов</th><th>unrealized</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="card">
+        <h2>Журнал сделок</h2>
+        <table id="s6-trades"><thead><tr><th>период</th><th>пара</th><th>дней</th><th>edge in→out</th><th>ноги</th><th>фандинг</th><th>комиссии</th><th>net</th></tr></thead><tbody></tbody></table>
+      </div>
+    </div>
+    <div>
+      <div class="card">
+        <h2>Управление</h2>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+          <button id="s6-start" class="btn">▶ старт</button>
+          <button id="s6-stop" class="btn">⏸ стоп</button>
+          <button id="s6-trading" class="btn">торговля: ?</button>
+        </div>
+        <div class="fld"><label>режим</label>
+          <select id="s6-c-mode"><option value="paper">paper</option><option value="tbank_sandbox">tbank_sandbox</option></select></div>
+        <div class="fld"><label>account_id (sandbox)</label><input id="s6-c-acc" placeholder="пусто = не менять"></div>
+        <div class="fld"><label>account_token (перезапишет привязку счёта)</label><input id="s6-c-tok" type="password" placeholder="пусто = не менять"></div>
+        <button id="s6-c-save" class="btn" style="margin-top:6px">применить коннектор</button>
+        <div id="s6-c-msg" style="font-size:11px;color:var(--ink-dim);margin-top:6px"></div>
+      </div>
+      <div class="card">
+        <h2>Параметры стратегии</h2>
+        <div class="fld"><label>вход при edge &gt; (пп)</label><input id="s6-p-enter" type="number" step="0.5"></div>
+        <div class="fld"><label>выход при edge &lt; (пп)</label><input id="s6-p-exit" type="number" step="0.5"></div>
+        <div class="fld"><label>дивидендный фильтр |базис| &gt; (пп)</label><input id="s6-p-sane" type="number" step="1"></div>
+        <div class="fld"><label>трейл фандинга (дней)</label><input id="s6-p-trail" type="number" min="1" max="20"></div>
+        <div class="fld"><label>ролл за (дней до эксп.)</label><input id="s6-p-roll" type="number" min="1" max="10"></div>
+        <div class="fld"><label>юнитов на пару</label><input id="s6-p-units" type="number" min="1" max="20"></div>
+        <div class="fld"><label>комиссия ₽/лот</label><input id="s6-p-fee" type="number" step="0.5"></div>
+        <button id="s6-p-save" class="btn" style="margin-top:6px">сохранить параметры</button>
+        <div id="s6-p-msg" style="font-size:11px;color:var(--ink-dim);margin-top:6px"></div>
+      </div>
+      <div class="card">
+        <h2>События</h2>
+        <div id="s6-events" style="font-size:11px;font-family:var(--mono);max-height:280px;overflow-y:auto"></div>
+      </div>
+    </div>
+  </div>
+  </div>
+</div><!-- /tab-st6 -->
 
 <!-- модальное подтверждение «закрыть всё» (st5) -->
 <div class="modal-ov" id="s5-flat-modal">
@@ -1578,7 +1646,9 @@ function s5Switch(strat){
   });
   $('tab-st4').hidden = strat!=='st4';
   $('tab-st5').hidden = strat!=='st5';
+  $('tab-st6').hidden = strat!=='st6';
   if(strat==='st5'){ s5Poll(); s5LoadWeekly(); s5LoadStrategies(); if(!_s5dailyLoaded){ _s5dailyLoaded=true; s5LoadDaily(); s5LoadGoInfo(); s5LoadMarginTimeline(); } }
+  if(strat==='st6'){ s6Poll(); if(!_s6chartLoaded){ _s6chartLoaded=true; s6LoadChart(); } }
 }
 function s5Render(s){
   _s5snap=s;
@@ -2033,6 +2103,114 @@ async function s5LoadWeekly(){
     }).join('') + `<div style="font-size:10px;color:var(--ink-dim);margin-top:2px"><span style="display:inline-block;width:10px;height:10px;background:var(--signal);border-radius:2px;vertical-align:middle"></span> прибыль за день (зелёный +, красный −), единый масштаб по всем инструментам</div>`;
   }catch(e){ wrap.innerHTML='<div class="empty" style="font-size:12px">ошибка: '+s4esc(e.message)+'</div>'; }
 }
+// ==================== ST6 · фандинг-арбитраж вечных фьючерсов ====================
+let _s6chartLoaded=false, _s6snap=null;
+async function s6api(path, method='GET', body=null){
+  const opt={method, headers:{'Content-Type':'application/json'}, credentials:'same-origin'};
+  if(body!=null) opt.body=JSON.stringify(body);
+  const r=await fetch('/st6'+path, opt);
+  if(!r.ok){ const e=await r.json().catch(()=>({detail:r.statusText})); throw new Error(e.detail||r.statusText); }
+  return r.json();
+}
+function s6Render(s){
+  _s6snap=s;
+  document.querySelector('#tab-st6 .sessbar').className='sessbar'+(s.live?' live':'');
+  $('s6-state').textContent = s.live?'ST6 live (дневной цикл)':'ST6 остановлен';
+  $('s6-mode').textContent = s.mode + (s.account_id?(' · '+s.account_id.slice(0,8)):'') + (s.trading_enabled?'':' · входы ВЫКЛ');
+  $('s6-net').textContent = 'net '+s5money(s.net_pnl_rub);
+  $('s6-trading').textContent = 'торговля: '+(s.trading_enabled?'ВКЛ':'выкл');
+  // сигналы
+  const tb=$('s6-edge').querySelector('tbody'); tb.innerHTML='';
+  let goTotal=0;
+  (s.edge||[]).forEach(e=>{
+    const en=(s.enabled_pairs||{})[e.pair]!==false;
+    if(e.in_position) goTotal+=e.unit_go_rub||0;
+    const ec=e.edge_pp>=4?'var(--signal)':(e.edge_pp<0?'var(--loss)':'var(--ink)');
+    tb.insertAdjacentHTML('beforeend',
+      `<tr><td><input type="checkbox" data-pair="${e.pair}" class="s6-en" ${en?'checked':''}></td>`+
+      `<td><b>${e.label||e.pair}</b><br><span style="font-size:10px;color:var(--ink-dim)">${e.perp} / ${e.quart}</span></td>`+
+      `<td>${(e.fund_ann_pp>=0?'+':'')+e.fund_ann_pp}%</td><td>${(e.basis_ann_pp>=0?'+':'')+e.basis_ann_pp}%</td>`+
+      `<td style="color:${ec};font-weight:600">${(e.edge_pp>=0?'+':'')+e.edge_pp} пп</td>`+
+      `<td>${e.d2e} д</td><td>${(e.unit_go_rub||0).toLocaleString('ru')} ₽</td>`+
+      `<td>${(e.swap_today_rub>=0?'+':'')+(e.swap_today_rub||0)} ₽</td>`+
+      `<td>${e.in_position?'<span style="color:var(--signal)">в рынке</span>':'—'}</td></tr>`);
+  });
+  if(!(s.edge||[]).length) tb.innerHTML='<tr><td colspan="9" class="empty">нажми «обновить из ISS» или дождись дневного тика</td></tr>';
+  $('s6-go-total').textContent = goTotal?('суммарное ГО открытых юнитов (ISS, без хедж-скидки): '+goTotal.toLocaleString('ru')+' ₽'):'';
+  document.querySelectorAll('.s6-en').forEach(cb=>cb.onchange=async()=>{ try{ await s6api('/pair-enabled','POST',{pair:cb.dataset.pair, enabled:cb.checked}); }catch(e){ alert(e.message); } });
+  // позиции
+  const pb=$('s6-pos').querySelector('tbody'); pb.innerHTML='';
+  (s.positions||[]).forEach(p=>pb.insertAdjacentHTML('beforeend',
+    `<tr><td><b>${p.label||p.pair}</b></td><td>шорт ${p.perp_lots} перп + лонг ${p.quart_lots} ${p.quart_secid}</td>`+
+    `<td>${p.entry_date}</td><td>+${p.entry_edge_pp} пп</td><td style="color:var(--signal)">${s5money(p.funding_rub)}</td>`+
+    `<td>${p.rolled}</td><td style="color:${p.unrealized_rub>=0?'var(--signal)':'var(--loss)'}">${s5money(p.unrealized_rub)}</td></tr>`));
+  if(!(s.positions||[]).length) pb.innerHTML='<tr><td colspan="7" class="empty">нет позиций</td></tr>';
+  // сделки
+  const trb=$('s6-trades').querySelector('tbody'); trb.innerHTML='';
+  (s.trades||[]).slice().reverse().forEach(t=>trb.insertAdjacentHTML('beforeend',
+    `<tr><td style="white-space:nowrap">${t.entry_date} → ${t.exit_date}</td><td>${t.pair}</td><td>${t.days_held}</td>`+
+    `<td>${t.entry_edge_pp}→${t.exit_edge_pp}</td><td>${s5money(t.legs_pnl_rub)}</td><td style="color:var(--signal)">${s5money(t.funding_rub)}</td>`+
+    `<td style="color:var(--ink-dim)">−${Math.round(t.fees_rub)}₽</td><td style="color:${t.net_pnl_rub>=0?'var(--signal)':'var(--loss)'};font-weight:600">${s5money(t.net_pnl_rub)}</td></tr>`));
+  if(!(s.trades||[]).length) trb.innerHTML='<tr><td colspan="8" class="empty">сделок пока нет</td></tr>';
+  // события
+  $('s6-events').innerHTML=(s.events||[]).slice().reverse().map(e=>
+    `<div style="padding:2px 0;color:${e.kind==='warn'?'var(--warn)':'var(--ink-dim)'}">${new Date(e.ts).toLocaleTimeString('ru').slice(0,5)} ${s4esc(e.message)}</div>`).join('')||'<div class="empty">пока пусто</div>';
+  // параметры (не перетирать при фокусе)
+  const st=s.strategy||{};
+  [['s6-p-enter','edge_enter_pp'],['s6-p-exit','edge_exit_pp'],['s6-p-sane','basis_sane_pp'],
+   ['s6-p-trail','fund_trail_days'],['s6-p-roll','roll_days_before'],['s6-p-units','units'],['s6-p-fee','fee_per_lot']]
+   .forEach(([id,k])=>{ const el=$(id); if(el && document.activeElement!==el && st[k]!=null) el.value=st[k]; });
+  const mo=$('s6-c-mode'); if(document.activeElement!==mo) mo.value=s.mode||'paper';
+}
+async function s6Poll(){ if(_s5strat!=='st6') return; try{ s6Render(await s6api('/state')); }catch(e){} }
+async function s6LoadChart(){
+  try{
+    const d=await s6api('/funding_history?days=30');
+    const cv=$('s6chart'); const r=cv.getBoundingClientRect(); if(r.width<5) return;
+    const dpr=devicePixelRatio||1; cv.width=r.width*dpr; cv.height=r.height*dpr;
+    const ctx=cv.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0);
+    const W=r.width,H=r.height; ctx.clearRect(0,0,W,H);
+    const colors={imoexf:'#4f8ef7', sberf:'#2aa876', gazpf:'#e0a020'};
+    const series=Object.entries(d.pairs||{}).filter(([,v])=>v.points&&v.points.length);
+    let lo=0, hi=10;
+    series.forEach(([,v])=>v.points.forEach(p=>{ hi=Math.max(hi,p.fund_ann_pp); lo=Math.min(lo,p.fund_ann_pp); }));
+    hi*=1.1;
+    const ML=36,MB=16,MT=6,MR=6;
+    const n=Math.max(...series.map(([,v])=>v.points.length));
+    const x=i=>ML+(W-ML-MR)*i/Math.max(n-1,1);
+    const y=v=>(H-MB)-(v-lo)/(hi-lo)*(H-MB-MT);
+    ctx.strokeStyle=getCSS('--line'); ctx.globalAlpha=.4;
+    [0,10,20,30,40].filter(v=>v>lo&&v<hi).forEach(v=>{ctx.beginPath();ctx.moveTo(ML,y(v));ctx.lineTo(W-MR,y(v));ctx.stroke();
+      ctx.globalAlpha=1;ctx.fillStyle=getCSS('--ink-faint');ctx.font='9px monospace';ctx.fillText(v+'%',2,y(v)+3);ctx.globalAlpha=.4;});
+    ctx.globalAlpha=1;
+    series.forEach(([pid,v])=>{
+      ctx.strokeStyle=colors[pid]||'#888'; ctx.lineWidth=1.6; ctx.beginPath();
+      v.points.forEach((p,i)=>{ const X=x(i),Y=y(p.fund_ann_pp); i?ctx.lineTo(X,Y):ctx.moveTo(X,Y); });
+      ctx.stroke();
+    });
+    $('s6-legend').innerHTML=series.map(([pid,v])=>`<span><i style="border-color:${colors[pid]||'#888'}"></i>${v.label||pid}</span>`).join('');
+  }catch(e){ $('s6-legend').textContent='ошибка графика: '+e.message; }
+}
+function s6Init(){
+  $('s6-start').onclick=async()=>{ try{ await s6api('/control/start','POST'); s6Poll(); }catch(e){alert(e.message);} };
+  $('s6-stop').onclick=async()=>{ try{ await s6api('/control/stop','POST'); s6Poll(); }catch(e){alert(e.message);} };
+  $('s6-trading').onclick=async()=>{ try{ const on=!( _s6snap&&_s6snap.trading_enabled); await s6api('/control/trading?on='+on,'POST'); s6Poll(); }catch(e){alert(e.message);} };
+  $('s6-refresh').onclick=async()=>{ $('s6-refresh').textContent='…'; try{ await s6api('/edge'); await s6Poll(); }catch(e){alert(e.message);} $('s6-refresh').textContent='обновить из ISS'; };
+  $('s6-p-save').onclick=async()=>{ try{
+    const body={edge_enter_pp:+$('s6-p-enter').value, edge_exit_pp:+$('s6-p-exit').value,
+      basis_sane_pp:+$('s6-p-sane').value, fund_trail_days:+$('s6-p-trail').value,
+      roll_days_before:+$('s6-p-roll').value, units:+$('s6-p-units').value, fee_per_lot:+$('s6-p-fee').value};
+    await s6api('/config','POST',body); $('s6-p-msg').textContent='сохранено'; s6Poll();
+  }catch(e){ $('s6-p-msg').textContent='ошибка: '+e.message; } };
+  $('s6-c-save').onclick=async()=>{ try{
+    const body={mode:$('s6-c-mode').value};
+    if($('s6-c-acc').value.trim()) body.account_id=$('s6-c-acc').value.trim();
+    if($('s6-c-tok').value.trim()) body.account_token=$('s6-c-tok').value.trim();
+    await s6api('/connector','POST',body); $('s6-c-msg').textContent='применено'; $('s6-c-tok').value=''; s6Poll();
+  }catch(e){ $('s6-c-msg').textContent='ошибка: '+e.message; } };
+}
+setInterval(s6Poll, 5000);
+
 function s5Init(){
   document.querySelectorAll('.strat-tab').forEach(b=> b.onclick=()=>s5Switch(b.dataset.strat));
   $('s5-btn-start').onclick=async()=>{ try{ await s5api('/control/start','POST'); s5Poll(); }catch(e){alert(e.message);} };
@@ -2236,6 +2414,7 @@ async function s5ApplyStrategy(id,name){
   catch(e){ $('s5-strat-msg').textContent='ошибка: '+e.message; }
 }
 s5Init();
+s6Init();
 setInterval(s5Poll, 2500);
 </script>
 </body>

@@ -1281,6 +1281,71 @@ def st6_trading(on: bool = True):
     return {"ok": True, "trading_enabled": on}
 
 
+@app.get("/st6/funding_history")
+def st6_funding_history(days: int = 30):
+    """История аннуализированного фандинга по парам — данные графика вкладки ST6."""
+    return _clean({"days": days, "pairs": ST6.funding_history(min(days, 90))})
+
+
+@app.post("/st6/config")
+def st6_set_config(payload: dict):
+    """Параметры стратегии st6 (пороги edge, трейл, ролл, юниты). Гейт по открытым позициям."""
+    if any(e.position is not None for e in ST6.engines.values()):
+        raise HTTPException(409, "смена параметров: закрой позиции st6 (или дождись выхода)")
+    s = ST6.cfg.strategy
+
+    def _num(key, lo, hi, cur):
+        if key not in payload or payload[key] is None:
+            return cur
+        try:
+            v = float(payload[key])
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"{key}: не число")
+        if not (lo <= v <= hi):
+            raise HTTPException(400, f"{key}: вне [{lo}, {hi}]")
+        return v
+
+    s.edge_enter_pp = _num("edge_enter_pp", 0.0, 50.0, s.edge_enter_pp)
+    s.edge_exit_pp = _num("edge_exit_pp", -20.0, 20.0, s.edge_exit_pp)
+    s.basis_sane_pp = _num("basis_sane_pp", 5.0, 100.0, s.basis_sane_pp)
+    s.fund_trail_days = int(_num("fund_trail_days", 1, 20, s.fund_trail_days))
+    s.roll_days_before = int(_num("roll_days_before", 1, 10, s.roll_days_before))
+    s.units = int(_num("units", 1, 20, s.units))
+    s.fee_per_lot = _num("fee_per_lot", 0.0, 50.0, s.fee_per_lot)
+    ST6.save_session()
+    return {"ok": True, "strategy": s.model_dump()}
+
+
+@app.post("/st6/pair-enabled")
+def st6_pair_enabled(payload: dict):
+    """Вкл/выкл пары st6: {pair, enabled}. Выключение не трогает открытую позицию."""
+    pid = payload.get("pair")
+    if pid not in ST6_PAIRS:
+        raise HTTPException(400, "pair: " + " | ".join(ST6_PAIRS))
+    ST6.enabled_pairs[pid] = bool(payload.get("enabled", True))
+    ST6.save_session()
+    return {"ok": True, "enabled_pairs": ST6.enabled_pairs}
+
+
+@app.post("/st6/connector")
+def st6_connector(payload: dict):
+    """Режим исполнителя st6: paper | tbank_sandbox (+account_id, +account_token per-account).
+    Гейт по открытым позициям (смена счёта под позицией рвёт синхрон)."""
+    if any(e.position is not None for e in ST6.engines.values()):
+        raise HTTPException(409, "смена коннектора: закрой позиции st6")
+    mode = payload.get("mode")
+    if mode not in ("paper", "tbank_sandbox"):
+        raise HTTPException(400, "mode: paper | tbank_sandbox")
+    from .st4 import tbank_sandbox as _sb
+    ST6.cfg.mode = mode
+    if "account_id" in payload:
+        ST6.cfg.account_id = str(payload["account_id"]).strip()
+    if payload.get("account_token") and ST6.cfg.account_id:
+        _sb.set_account_token(ST6.cfg.account_id, str(payload["account_token"]).strip())
+    ST6.save_session()
+    return {"ok": True, "mode": mode, "account_id": ST6.cfg.account_id or None}
+
+
 @app.post("/st5/connector")
 def st5_connector(payload: dict):
     """Режим исполнителя st5: paper | tbank_sandbox | tbank_real (+account_id для real).

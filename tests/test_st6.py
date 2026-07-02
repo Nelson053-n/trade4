@@ -129,3 +129,52 @@ def test_dividend_trap_blocks_entry():
     e = _eng(edge_enter_pp=4.0, basis_sane_pp=25.0)
     assert e.daily_step(_snap(fund_ann=23, basis_ann=-37.8)) == "none"   # edge 60.8, базис аномален
     assert e.daily_step(_snap(fund_ann=25, basis_ann=15)) == "enter"     # нормальный базис
+
+
+def test_st6_api_config_and_connector(monkeypatch, tmp_path):
+    """/st6/config и /st6/connector: параметры применяются, account_token уходит в мапу,
+    гейт по открытой позиции возвращает 409."""
+    from fastapi.testclient import TestClient
+    from app.api import app, ST6
+    from app.st4 import tbank_sandbox as sb
+    monkeypatch.setattr(sb, "_ACCOUNT_TOKENS_FILE", tmp_path / "acct.json")
+    monkeypatch.setattr(sb, "_account_tokens", None)
+    ST6._session_file = tmp_path / "s6.json"
+    ST6.engines.clear()
+    c = TestClient(app)
+    r = c.post("/st6/config", json={"edge_enter_pp": 6.0, "units": 2})
+    assert r.status_code == 200 and r.json()["strategy"]["edge_enter_pp"] == 6.0
+    r = c.post("/st6/connector", json={"mode": "tbank_sandbox", "account_id": "acc-st6",
+                                       "account_token": "t.ST6"})
+    assert r.status_code == 200
+    assert sb._account_token("acc-st6") == "t.ST6"
+    # с открытой позицией — 409
+    eng = _eng()
+    eng.confirm_enter(_snap(), perp_fill=2344.0, quart_fill=236000.0, fee_rub=0.0)
+    ST6.engines["imoexf"] = eng
+    assert c.post("/st6/config", json={"units": 1}).status_code == 409
+    assert c.post("/st6/connector", json={"mode": "paper"}).status_code == 409
+    ST6.engines.clear()
+    ST6.cfg.mode = "paper"; ST6.cfg.strategy.units = 1; ST6.cfg.strategy.edge_enter_pp = 4.0
+
+
+def test_st6_sandbox_executor_wiring(monkeypatch):
+    """В режиме tbank_sandbox вход зовёт open_pair(long_spread=True: buy кварт + sell перп)
+    с лотами юнита; отказ брокера отменяет вход (позиции нет)."""
+    from app.st6.service import St6Session
+    s = St6Session()
+    s.cfg.mode = "tbank_sandbox"; s.cfg.account_id = "acc"
+    eng = _eng()
+    s.engines["imoexf"] = eng
+    calls = []
+    class FakeEx:
+        def open_pair(self, long_spread, lots_ord, lots_pref, ref_ord, ref_pref):
+            calls.append((long_spread, lots_ord, lots_pref)); return {"ok": True}
+    monkeypatch.setattr(s, "_make_executor", lambda perp, quart: FakeEx())
+    snap = _snap(fund_ann=30, basis_ann=10)
+    assert s._exec_enter("imoexf", eng, snap, units=1) is True
+    assert calls == [(True, 10, 1)]      # шорт 10 перпов (ord) + лонг 1 кварт (pref)
+    class FailEx:
+        def open_pair(self, *a): raise RuntimeError("нет денег")
+    monkeypatch.setattr(s, "_make_executor", lambda perp, quart: FailEx())
+    assert s._exec_enter("imoexf", eng, snap, units=1) is False
