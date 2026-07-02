@@ -255,6 +255,8 @@ class St5Session:
         self._uid_cache: dict[str, tuple] = {}   # pid -> (uid_ord, uid_pref): кэш против 429 T-Bank
         self._legs_cache: dict[str, tuple] = {}  # pid -> (spec_ord, spec_pref) от resolve_legs
         self._reconciled: set[str] = set()       # пары, по которым сверка со счётом уже сделана
+        self.missed: list[dict] = []             # журнал УПУЩЕННЫХ входов (сигнал был, входа нет)
+        self._missed_seen: dict[str, int] = {}   # pid -> ts последнего записанного пропуска (анти-спам)
         # периодическая сверка ног в live (в дополнение к стартовой): только наблюдение/лог
         self._periodic_reconcile_every_s = 600   # раз в 10 мин (≈ раз в торговый бар)
         self._last_periodic_reconcile = 0.0      # monotonic последней периодической сверки
@@ -311,6 +313,28 @@ class St5Session:
             st = self._pair_cfg(pid).strategy
             snap[pid] = {k: getattr(st, k) for k in self.OVERRIDE_KEYS}
         return snap
+
+    MISSED_LEN = 100
+
+    def log_missed(self, pid: str, ts: int, fired: str, reason: str) -> None:
+        """Записать упущенный вход: что сработало и почему не вошли. Анти-спам: один пропуск
+        на (пара, бар); соседние бары того же сигнала пишутся (z живёт, причина может меняться)."""
+        if self._missed_seen.get(pid) == ts:
+            return
+        self._missed_seen[pid] = ts
+        eng = self.engines.get(pid)
+        f = eng.filt if eng else None
+        self.missed.append({
+            "ts": ts, "pair": pid, "z": round(eng.last_z, 2) if eng and eng.last_z is not None else None,
+            "fired": fired, "reason": reason,
+            "adf_p": round(f.adf_p, 3) if f else None,
+            "hurst": round(f.hurst, 2) if f else None,
+            "rv": round(f.rv_ratio, 2) if f else None})
+        if len(self.missed) > self.MISSED_LEN:
+            del self.missed[0]
+        if self.cfg.notify.notify_missed:
+            self._notify(f"⏭ <b>Упущенный вход</b> · {tg.esc(ST5_PAIRS[pid][3])}\n"
+                         f"{tg.esc(fired)}\nПричина: {tg.esc(reason)}")
 
     # ---------- Telegram ----------
     def _notify(self, text: str) -> None:
@@ -385,7 +409,8 @@ class St5Session:
             "open_positions": len(positions),
             "max_open_positions": self.cfg.risk.max_open_positions,
             "positions": positions, "pairs": pairs_info,
-            "trades": self.trades[-100:], "events": self.events[-EVENTS_LEN:],
+            "trades": self.trades[-100:], "missed": self.missed[-50:],
+            "events": self.events[-EVENTS_LEN:],
             "history": self.history,
             "limits": {"per_trade_pct": self.cfg.risk.risk_per_trade_pct,
                        "per_pair_pct": self.cfg.risk.risk_per_pair_pct,
@@ -434,6 +459,7 @@ class St5Session:
                 # json.dumps сериализует .state как строку). None → пара flat.
                 "positions": {pid: (asdict(eng.position) if eng.position else None)
                               for pid, eng in self.engines.items()},
+                "missed": self.missed[-self.MISSED_LEN:],   # журнал упущенных входов
             }
             self._session_file.write_text(json.dumps(data, ensure_ascii=False, indent=2))
         except Exception:  # noqa: BLE001
@@ -502,6 +528,7 @@ class St5Session:
         except Exception:  # noqa: BLE001
             return False
         self.trades = data.get("trades", [])
+        self.missed = list(data.get("missed") or [])
         self.history = data.get("history", {pid: [] for pid in ST5_PAIRS})
         # day_pnl пересчитываем из журнала по СЕГОДНЯШНИМ сделкам (МСК), а не берём из файла:
         # копивший за всё время счётчик из старых версий совпадал с общим net (баг отображения).
@@ -752,7 +779,7 @@ class St5Session:
                        f"преф {p.lots}/обычка {p.ord_lots or p.lots}, счёт ord={bal_ord} "
                        f"pref={bal_pref} (чужой движок на общем счёте или недолив) — наблюдаю")
                 self.log_event("warn", msg)
-                if self.cfg.notify.notify_errors:
+                if self.cfg.notify.notify_reconcile:
                     self._notify(f"⚠️ <b>Сверка ног</b> · {tg.esc(ST5_PAIRS[pid][3])}\n{tg.esc(msg)}")
             elif p is None and (bal_ord or bal_pref):
                 self.log_event("info", f"reconcile {pid}: движок flat, на счёте ord={bal_ord} "
@@ -948,6 +975,11 @@ class St5Session:
             # движок ОТКРЫЛ позицию на этом живом баре → портфельный гейт + реальный ордер
             if (not pos_before) and eng.position is not None and eng.position.bars_held == 0:
                 self._on_engine_opened(pid, eng, float(row["price_a"]), float(row["price_b"]))
+            elif (not pos_before) and eng.position is None:
+                # сигнал был (|z|>порог), но движок не вошёл — журнал упущенных с причиной
+                blk = eng.entry_block_reason()
+                if blk is not None:
+                    self.log_missed(pid, ts, blk[0], blk[1])
             if tr is not None:
                 self._on_engine_trade(pid, eng, tr, float(row["price_a"]), float(row["price_b"]))
 
@@ -960,8 +992,10 @@ class St5Session:
         risk = self.portfolio._pos_risk(pid, eng)   # риск = ГО фактических ног (не нотионал)
         ok, reason = self.portfolio.can_open(pid, issuer, risk, self.engines, _P)
         if not ok:
+            fired = f"|z|={abs(p.entry_z):.2f}, вход {p.state.value} разрешён движком"
             eng.position = None   # вход запрещён портфелем → откат
             self.log_event("info", f"{pid}: вход отклонён ({reason})")
+            self.log_missed(pid, p.entry_ts, fired, f"портфельный гейт: {reason}")
             return
         ex = self._make_executor(pid)
         if ex is not None:
@@ -971,6 +1005,8 @@ class St5Session:
                 ex.open_pair(long_spread, ord_lots, p.lots, ord_px, pref_px)
                 self.portfolio.on_success()
             except Exception as e:  # noqa: BLE001
+                self.log_missed(pid, p.entry_ts, f"|z|={abs(p.entry_z):.2f}, гейты пройдены",
+                                f"брокер: вход не исполнен ({str(e)[:120]})")
                 eng.position = None
                 self.portfolio.on_error()
                 self.portfolio.halt_pair(pid, f"вход не исполнен: {e}")

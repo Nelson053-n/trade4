@@ -127,7 +127,7 @@ def test_dividend_trap_blocks_entry():
     """Аномальный |базис| (дивидендная бэквордация) блокирует вход, даже при жирном edge —
     дисконт квартальника не конвергирует в прибыль (регресс: живой sberf edge=+60.8пп 02.07)."""
     e = _eng(edge_enter_pp=4.0, basis_sane_pp=25.0)
-    assert e.daily_step(_snap(fund_ann=23, basis_ann=-37.8)) == "none"   # edge 60.8, базис аномален
+    assert e.daily_step(_snap(fund_ann=23, basis_ann=-37.8)) == "trap"   # edge 60.8, базис аномален
     assert e.daily_step(_snap(fund_ann=25, basis_ann=15)) == "enter"     # нормальный базис
 
 
@@ -178,3 +178,14 @@ def test_st6_sandbox_executor_wiring(monkeypatch):
         def open_pair(self, *a): raise RuntimeError("нет денег")
     monkeypatch.setattr(s, "_make_executor", lambda perp, quart: FailEx())
     assert s._exec_enter("imoexf", eng, snap, units=1) is False
+
+
+def test_st6_missed_dividend_trap_logged():
+    """Дивидендная ловушка попадает в журнал упущенных st6 с причиной (один на пару/день)."""
+    from app.st6.service import St6Session
+    s = St6Session()
+    s.log_missed("sberf", "2026-07-02", "edge +60.8пп", "дивидендная ловушка: |базис|=37.8пп")
+    s.log_missed("sberf", "2026-07-02", "edge +60.8пп", "дубль дня")
+    s.log_missed("sberf", "2026-07-03", "edge +55пп", "новый день")
+    assert len(s.missed) == 2
+    assert s.snapshot()["missed"][0]["reason"].startswith("дивидендная ловушка")

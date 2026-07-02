@@ -483,6 +483,7 @@ class St4Session:
                 "session_started": self.state["session_started"],
                 "balance_rub": self.engine.balance_rub,
                 "trades": [self._trade_json(t) for t in self.engine.trades],
+                "missed": self.engine.missed[-100:],   # журнал упущенных входов (аналитика)
                 "history": self.history,
                 "config": self.cfg.model_dump(),
                 "spec_ord": asdict(self.spec_ord), "spec_pref": asdict(self.spec_pref),
@@ -553,6 +554,7 @@ class St4Session:
             self.engine.risk.day_pnl_rub = data.get("day_pnl_rub", 0.0)
             self.engine.risk._day = data.get("day_key", "")
             self.engine.trades = [self._trade_from_json(t) for t in data.get("trades", [])]
+            self.engine.missed = list(data.get("missed") or [])
             pos = data.get("position")
             if pos:
                 self.engine.position = self._position_from_json(pos)
@@ -881,6 +883,7 @@ class St4Session:
             "summary": eng.summary(),
             "history": self.history,
             "trades": [self._trade_json(t) for t in eng.trades],
+            "missed": eng.missed[-50:],            # упущенные входы (сигнал был, входа нет)
             "last_event": self.state["last_event"],
             "events": [{k: v for k, v in e.items() if k != "_sig"}
                        for e in self.events[-20:]],  # журнал (без служебного _sig)

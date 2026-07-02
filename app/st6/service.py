@@ -34,6 +34,7 @@ class St6Session:
         self.cfg = St6Config()
         self.engines: dict[str, St6Engine] = {}
         self.trades: list[dict] = []
+        self.missed: list[dict] = []              # журнал упущенных входов (аналитика)
         self.events: list[dict] = []
         self.enabled_pairs = {pid: True for pid in ST6_PAIRS}
         self.last_day: dict[str, str] = {}       # pid -> последний обработанный день ISS
@@ -63,6 +64,15 @@ class St6Session:
         self.events.append({"ts": int(time.time() * 1000), "kind": kind, "message": message})
         if len(self.events) > EVENTS_LEN:
             del self.events[0]
+
+    def log_missed(self, pid: str, day: str, fired: str, reason: str) -> None:
+        """Журнал упущенных входов: сигнал был (fired), входа нет (reason). Один на пару/день."""
+        if any(m["pair"] == pid and m["date"] == day for m in self.missed):
+            return
+        self.missed.append({"ts": int(time.time() * 1000), "date": day, "pair": pid,
+                            "fired": fired, "reason": reason})
+        if len(self.missed) > 100:
+            del self.missed[0]
 
     # ---------- sandbox-исполнение (реальные ордера в песочнице T-Bank) ----------
     def _make_executor(self, perp_secid: str, quart_secid: str):
@@ -188,11 +198,22 @@ class St6Session:
             return view                            # день уже обработан — только обновили вид
         action = eng.daily_step(snap)
         self.last_day[pid] = day
+        fired = (f"edge {view['edge_pp']:+.1f}пп > порог {st.edge_enter_pp} "
+                 f"(фандинг {view['fund_ann_pp']:+.1f}% − базис {view['basis_ann_pp']:+.1f}%)")
+        if action == "trap":
+            self.log_missed(pid, day, fired,
+                            f"дивидендная ловушка: |базис|={abs(view['basis_ann_pp']):.1f}пп "
+                            f"> {st.basis_sane_pp} (дисконт не конвергирует в прибыль)")
+            action = "none"
         # trading_enabled гейтит ТОЛЬКО вход (как в st4/st5): выходы/роллы работают всегда
         if action == "enter" and not (self.cfg.trading_enabled and self.enabled_pairs.get(pid, True)):
+            self.log_missed(pid, day, fired,
+                            "торговля выключена" if not self.cfg.trading_enabled else "пара выключена")
             action = "none"
         if action == "enter":
-            if self._exec_enter(pid, eng, snap, st.units):
+            if not self._exec_enter(pid, eng, snap, st.units):
+                self.log_missed(pid, day, fired, "брокер: вход не исполнен (см. события)")
+            else:
                 fee = eng.pair_fee(eng.unit_perp * st.units, eng.unit_quart * st.units)
                 eng.confirm_enter(snap, perp_fill=perp_s, quart_fill=qs, fee_rub=fee)
                 eng.position.perp_secid = perp
@@ -279,6 +300,7 @@ class St6Session:
                 "enabled_pairs": self.enabled_pairs,
                 "edge": list(self.edge_view.values()),
                 "positions": positions, "trades": self.trades[-50:],
+                "missed": self.missed[-50:],
                 "net_pnl_rub": round(net), "events": self.events[-EVENTS_LEN:],
                 "strategy": self.cfg.strategy.model_dump()}
 
@@ -286,6 +308,7 @@ class St6Session:
     def save_session(self) -> None:
         try:
             data = {"config": self.cfg.model_dump(), "trades": self.trades,
+                    "missed": self.missed[-100:],
                     "last_day": self.last_day, "enabled_pairs": self.enabled_pairs,
                     "live_intent": self.state.get("live_intent", False),
                     "positions": {pid: (asdict(e.position) if e.position else None)
@@ -302,6 +325,7 @@ class St6Session:
         except Exception:  # noqa: BLE001
             return False
         self.trades = data.get("trades", [])
+        self.missed = list(data.get("missed") or [])
         self.last_day = data.get("last_day", {})
         en = data.get("enabled_pairs") or {}
         self.enabled_pairs = {pid: bool(en.get(pid, True)) for pid in ST6_PAIRS}

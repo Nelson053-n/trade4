@@ -113,6 +113,8 @@ class St5NotifyConfig(BaseModel):
     notify_before_open: bool = True          # напоминание за before_open_min до открытия биржи
     before_open_min: int = 10
     daily_summary: bool = True               # дневная сводка при закрытии вечерней сессии
+    notify_reconcile: bool = True            # расхождение ног движок↔счёт (периодическая сверка)
+    notify_missed: bool = False              # упущенные входы (сигнал был, вход отклонён) — шумно
 
 
 class St5Config(BaseModel):

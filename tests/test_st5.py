@@ -1439,3 +1439,44 @@ def test_quantity_lots_survives_session_round_trip(tmp_path):
     assert s2.load_session() is True
     assert s2.cfg.execution.quantity_lots == 2
     assert all(e.base_lots == 2 for e in s2.engines.values())
+
+
+# ============================ журнал упущенных входов ============================
+
+def test_entry_block_reason_explains_filters():
+    """entry_block_reason: |z|>порога, но фильтры не пускают — возвращает (что сработало, почему)."""
+    from app.st5.config import St5Config
+    from app.st5.engine import ST5Engine
+    eng = ST5Engine("t", St5Config(), base_lots=1)
+    eng.cfg.strategy.z_entry = 1.25
+    eng.cfg.strategy.size_tiers = [(1.25, 4.0, 1.0)]   # тиры покрывают z (иначе свой блок)
+    eng.last_z = 2.0
+    eng.filt.cointegrated = False
+    eng.filt.mean_reverting = True
+    eng.filt.calm_regime = True
+    eng.filt.adf_p = 0.3
+    blk = eng.entry_block_reason()
+    assert blk is not None
+    fired, reason = blk
+    assert "2.00" in fired and "SHORT" in fired
+    assert "коинтеграции" in reason and "0.300" in reason
+    # сигнала нет → None
+    eng.last_z = 0.5
+    assert eng.entry_block_reason() is None
+    # все фильтры зелёные и z в тирах → None (вход бы состоялся, пропуска нет)
+    eng.last_z = 2.0
+    eng.filt.cointegrated = True
+    assert eng.entry_block_reason() is None
+
+
+def test_log_missed_antispam_and_snapshot():
+    """log_missed: один пропуск на (пара, бар); попадает в snapshot и session."""
+    from app.st5.service import St5Session
+    s = St5Session()
+    s.log_missed("sber", 1700000000000, "|z|=2.0", "портфельный гейт: лимит ГО")
+    s.log_missed("sber", 1700000000000, "|z|=2.0", "дубль того же бара")
+    s.log_missed("sber", 1700000600000, "|z|=2.1", "следующий бар — пишется")
+    assert len(s.missed) == 2
+    snap = s.snapshot()
+    assert len(snap["missed"]) == 2
+    assert snap["missed"][0]["reason"].startswith("портфельный гейт")

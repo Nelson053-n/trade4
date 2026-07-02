@@ -94,7 +94,7 @@ class St6Engine:
             return "hold"
         if edge > self.strat.edge_enter_pp:
             if abs(snap.basis_ann_pp) > self.strat.basis_sane_pp:
-                return "none"          # дивидендная ловушка: аномальный базис → сигнал фиктивен
+                return "trap"          # дивидендная ловушка: аномальный базис → сигнал фиктивен
             return "enter"
         return "none"
 

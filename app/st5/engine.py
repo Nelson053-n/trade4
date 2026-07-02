@@ -174,6 +174,38 @@ class ST5Engine:
                 return False
         return True
 
+    def entry_block_reason(self, ts_local_min: int | None = None) -> tuple[str, str] | None:
+        """Диагностика пропущенного входа на ПОСЛЕДНЕМ баре: |z| пробил порог, но входа нет.
+
+        Возвращает (что сработало, почему не вошли) или None (сигнала не было / уже в позиции).
+        Для журнала «упущенных входов» — вызывается сервисом после step() на живом баре."""
+        s = self.cfg.strategy
+        z = self.last_z
+        if z is None or self.position is not None or abs(z) <= s.z_entry:
+            return None
+        az = abs(z)
+        fired = (f"|z|={az:.2f} > порог входа {s.z_entry} "
+                 f"({'SHORT' if z > 0 else 'LONG'} спреда)")
+        f = self.filt
+        reasons = []
+        if not f.cointegrated:
+            reasons.append(f"нет коинтеграции (ADF p={f.adf_p:.3f} ≥ {s.adf_p_enter})")
+        if not f.mean_reverting:
+            reasons.append(f"Hurst {f.hurst:.2f} вне ({s.hurst_min}–{s.hurst_max})")
+        if not f.calm_regime:
+            reasons.append(f"волатильный режим (RV {f.rv_ratio:.2f} ≥ {s.rv_ratio_max})")
+        if self._in_no_entry_window(ts_local_min):
+            reasons.append("временное окно (открытие/клиринг/закрытие)")
+        if az > s.z_no_entry:
+            reasons.append(f"|z| > z_no_entry {s.z_no_entry} (слишком далеко, риск разрыва)")
+        elif size_multiplier(az, s) is None:
+            reasons.append(f"|z|={az:.2f} вне тиров сайзинга")
+        if s.require_dz_confirm:
+            reasons.append("ждёт Δz-подтверждения разворота")
+        if not reasons:
+            return None
+        return fired, "; ".join(reasons)
+
     def _in_no_entry_window(self, m: int | None) -> bool:
         """Временные ограничения (минута в дне). Упрощённо для FORTS: основная 10:00–18:50,
         клиринг 14:00–14:05, вечерняя до 23:50. None → фильтр выключен (бэктест без TZ)."""

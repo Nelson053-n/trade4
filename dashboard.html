@@ -351,6 +351,13 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
     </div>
 
     <div class="card">
+      <h2>упущенные входы <span class="em" id="s4-missed-sub">сигнал был — входа нет, с причиной</span></h2>
+      <div class="tblwrap" style="max-height:220px">
+        <table id="s4-missed"><thead><tr><th>дата (МСК)</th><th>что сработало</th><th>почему не вошли</th></tr></thead><tbody></tbody></table>
+      </div>
+    </div>
+
+    <div class="card">
       <h2>доходность по дням <span class="em" id="s4-daily-sub"></span></h2>
       <canvas id="s4-daily-chart"></canvas>
       <div class="tblwrap" style="max-height:200px">
@@ -589,6 +596,12 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
         </div>
       </div>
       <div class="card">
+        <h2>Упущенные входы <span class="em" id="s5-missed-sub">сигнал был — входа нет, с причиной</span></h2>
+        <div class="tblwrap" style="max-height:220px">
+          <table id="s5-missed"><thead><tr><th>время</th><th>пара</th><th>z</th><th>что сработало</th><th>почему не вошли</th><th>ADF p / Hurst / RV</th></tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+      <div class="card">
         <h2>Доходность по дням <span class="em" id="s5-daily-sub">идеал vs с издержками vs реал</span>
           <span id="s5-daily-range" style="float:right;font-size:11px;display:inline-flex;gap:4px;margin-left:8px">
             <button data-d="1" class="s5rbtn">1д</button><button data-d="7" class="s5rbtn">7д</button><button data-d="14" class="s5rbtn">14д</button><button data-d="30" class="s5rbtn on">30д</button></span>
@@ -742,7 +755,10 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
           <label style="display:flex;align-items:center;gap:6px;font-size:13px"><input type="checkbox" id="s5-tg-exit"> выходы (с P&L)</label>
           <label style="display:flex;align-items:center;gap:6px;font-size:13px"><input type="checkbox" id="s5-tg-errors"> ошибки исполнения</label>
           <label style="display:flex;align-items:center;gap:6px;font-size:13px"><input type="checkbox" id="s5-tg-open"> напоминание до открытия биржи</label>
+          <div class="fld"><label>за сколько минут напоминать</label><input id="s5-tg-openmin" type="number" min="1" max="60"></div>
           <label style="display:flex;align-items:center;gap:6px;font-size:13px"><input type="checkbox" id="s5-tg-summary"> дневная сводка при закрытии</label>
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px"><input type="checkbox" id="s5-tg-reconcile"> сверка ног (расхождения движок↔счёт)</label>
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px"><input type="checkbox" id="s5-tg-missed"> упущенные входы (шумно)</label>
         </div>
         <button class="btn primary" id="s5-btn-tg">сохранить</button>
         <button class="btn" id="s5-btn-tg-test">тест</button>
@@ -786,6 +802,10 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
       <div class="card">
         <h2>Журнал сделок</h2>
         <table id="s6-trades"><thead><tr><th>период</th><th>пара</th><th>дней</th><th>edge in→out</th><th>ноги</th><th>фандинг</th><th>комиссии</th><th>net</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="card">
+        <h2>Упущенные входы <span class="em">сигнал был — входа нет, с причиной</span></h2>
+        <table id="s6-missed"><thead><tr><th>день</th><th>пара</th><th>что сработало</th><th>почему не вошли</th></tr></thead><tbody></tbody></table>
       </div>
     </div>
     <div>
@@ -1064,6 +1084,17 @@ function s4RenderBtHistory(hist){
       `<td style="color:${h.net_pnl_rub>=0?'var(--signal)':'var(--loss)'};font-weight:600">${s4money(h.net_pnl_rub)}</td>`+
       `<td>${fmt(h.return_pct,2)}</td><td>${h.max_drawdown_pct}</td>`;
     body.appendChild(tr);
+  });
+}
+function s4RenderMissed(missed){
+  const tb=$('s4-missed').querySelector('tbody'); if(!tb) return;
+  tb.innerHTML='';
+  $('s4-missed-sub').textContent = (missed&&missed.length)? missed.length+' пропусков (последние 50)' : 'сигнал был — входа нет, с причиной';
+  if(!missed||!missed.length){ tb.innerHTML='<tr><td colspan="3" class="empty">пропусков нет — все сигналы исполнялись</td></tr>'; return; }
+  missed.slice().reverse().forEach(m=>{
+    tb.insertAdjacentHTML('beforeend',
+      `<tr><td style="color:var(--ink-dim);white-space:nowrap">${s4dateMsk(m.ts)}</td>`+
+      `<td>${s4esc(m.fired||'')}</td><td style="color:var(--warn)">${s4esc(m.reason||'')}</td></tr>`);
   });
 }
 function s4RenderTrades(trades){
@@ -1360,6 +1391,7 @@ function s4Render(s){
   window._s4tradeStart = s.trade_start_ts || null;
   s4DrawChart(s.history, s.trades, s.position);
   s4RenderTrades(s.trades);
+  s4RenderMissed(s.missed);
   s4RenderDaily(s.trades);
 }
 
@@ -1720,6 +1752,18 @@ function s5Render(s){
     }
     trb.insertAdjacentHTML('beforeend', rowHtml(t));
   });
+  // упущенные входы (сигнал был — входа нет)
+  const mb=$('s5-missed'); if(mb){
+    const mtb=mb.querySelector('tbody'); mtb.innerHTML='';
+    const ms=(s.missed||[]).slice().reverse();
+    $('s5-missed-sub').textContent = ms.length? ms.length+' пропусков (последние 50)' : 'сигнал был — входа нет, с причиной';
+    if(!ms.length) mtb.innerHTML='<tr><td colspan="6" class="empty">пропусков нет — все сигналы исполнялись</td></tr>';
+    ms.forEach(m=>mtb.insertAdjacentHTML('beforeend',
+      `<tr><td style="color:var(--ink-dim);white-space:nowrap">${s4dateMsk(m.ts)}</td><td>${m.pair}</td>`+
+      `<td>${m.z!=null?(m.z>=0?'+':'')+m.z:'—'}</td><td>${s4esc(m.fired||'')}</td>`+
+      `<td style="color:var(--warn)">${s4esc(m.reason||'')}</td>`+
+      `<td style="color:var(--ink-dim);font-size:10px">${m.adf_p!=null?m.adf_p:'—'} / ${m.hurst!=null?m.hurst:'—'} / ${m.rv!=null?m.rv:'—'}</td></tr>`));
+  }
   // управление
   if(document.activeElement!==$('s5-trading')) $('s5-trading').checked=s.trading_enabled;
   // риск-лимиты ГО (₽): заполняем поля из снапшота, не перетирая при вводе; обновляем калькулятор
@@ -1737,6 +1781,8 @@ function s5Render(s){
     setChk('s5-tg-enabled',n.enabled); setChk('s5-tg-entry',n.notify_entry);
     setChk('s5-tg-exit',n.notify_exit); setChk('s5-tg-errors',n.notify_errors);
     setChk('s5-tg-open',n.notify_before_open); setChk('s5-tg-summary',n.daily_summary);
+    setChk('s5-tg-reconcile',n.notify_reconcile); setChk('s5-tg-missed',n.notify_missed);
+    if(document.activeElement!==$('s5-tg-openmin') && n.before_open_min!=null) $('s5-tg-openmin').value=n.before_open_min;
     if(document.activeElement!==$('s5-tg-chat')) $('s5-tg-chat').value=n.chat_id||'';
     $('s5-tg-token').placeholder = s.tg_set ? 'токен установлен (ввести заново для замены)' : '123456:ABC... (BotFather)';
     $('s5-tg-sub').textContent = (s.tg_set?'токен ✓':'токен не задан') + (n.enabled?' · вкл':' · выкл');
@@ -2152,6 +2198,13 @@ function s6Render(s){
     `<td>${t.entry_edge_pp}→${t.exit_edge_pp}</td><td>${s5money(t.legs_pnl_rub)}</td><td style="color:var(--signal)">${s5money(t.funding_rub)}</td>`+
     `<td style="color:var(--ink-dim)">−${Math.round(t.fees_rub)}₽</td><td style="color:${t.net_pnl_rub>=0?'var(--signal)':'var(--loss)'};font-weight:600">${s5money(t.net_pnl_rub)}</td></tr>`));
   if(!(s.trades||[]).length) trb.innerHTML='<tr><td colspan="8" class="empty">сделок пока нет</td></tr>';
+  // упущенные входы
+  const s6mb=$('s6-missed').querySelector('tbody'); s6mb.innerHTML='';
+  const s6ms=(s.missed||[]).slice().reverse();
+  if(!s6ms.length) s6mb.innerHTML='<tr><td colspan="4" class="empty">пропусков нет</td></tr>';
+  s6ms.forEach(m=>s6mb.insertAdjacentHTML('beforeend',
+    `<tr><td style="color:var(--ink-dim)">${m.date}</td><td>${m.pair}</td>`+
+    `<td>${s4esc(m.fired||'')}</td><td style="color:var(--warn)">${s4esc(m.reason||'')}</td></tr>`));
   // события
   $('s6-events').innerHTML=(s.events||[]).slice().reverse().map(e=>
     `<div style="padding:2px 0;color:${e.kind==='warn'?'var(--warn)':'var(--ink-dim)'}">${new Date(e.ts).toLocaleTimeString('ru').slice(0,5)} ${s4esc(e.message)}</div>`).join('')||'<div class="empty">пока пусто</div>';
@@ -2268,6 +2321,8 @@ function s5Init(){
       enabled:$('s5-tg-enabled').checked, notify_entry:$('s5-tg-entry').checked,
       notify_exit:$('s5-tg-exit').checked, notify_errors:$('s5-tg-errors').checked,
       notify_before_open:$('s5-tg-open').checked, daily_summary:$('s5-tg-summary').checked,
+      notify_reconcile:$('s5-tg-reconcile').checked, notify_missed:$('s5-tg-missed').checked,
+      before_open_min:+($('s5-tg-openmin').value||10),
       chat_id:$('s5-tg-chat').value.trim() };
     const tok=$('s5-tg-token').value.trim(); if(tok) body.token=tok;
     try{ const d=await s5api('/telegram','POST',body); $('s5-tg-token').value='';

@@ -76,6 +76,7 @@ class TradingEngine:
         self.state = BotState.FLAT
         self.position: Optional[Position] = None
         self.trades: list[Trade] = []
+        self.missed: list[dict] = []            # журнал УПУЩЕННЫХ входов: сигнал был, входа нет
         self.balance_rub = cfg.paper.start_balance_rub
         self._prev: Optional[BandReading] = None
         self._bars_held = 0
@@ -167,6 +168,19 @@ class TradingEngine:
         return (time.time() * 1000 - bar.ts) <= lag_max * 60_000
 
     # ---------- основной шаг FSM ----------
+    def _log_missed(self, bar: SpreadBar, sig: Signal, band, reason: str) -> None:
+        """Журнал упущенных входов (для аналитики): что сработало и почему не вошли."""
+        dev = (bar.spread - band.sma) / band.sigma if band.sigma > 0 else 0.0
+        self.missed.append({
+            "ts": bar.ts, "signal": sig.value,
+            "fired": f"пробой {'верхней' if sig == Signal.SELL else 'нижней'} полосы, "
+                     f"отклонение {dev:+.2f}σ",
+            "reason": reason,
+            "spread": round(bar.spread, 2), "sma": round(band.sma, 2),
+            "sigma": round(band.sigma, 2)})
+        if len(self.missed) > 100:
+            del self.missed[0]
+
     def step(self, bar: SpreadBar) -> StepResult:
         self._last_spread_bar = bar
         band = self.bb.update(bar.ts, bar.spread)
@@ -265,23 +279,30 @@ class TradingEngine:
                 if d2e is not None and d2e < no_entry:
                     events.append(EngineEvent(bar.ts, "warn",
                                   f"сигнал пропущен: до экспирации {d2e} дн (< {no_entry})", {}))
+                    self._log_missed(bar, sig, band, f"окно роллировера: до экспирации {d2e} дн")
                 elif in_clearing_window(exec_ts, self.cfg.session):
                     events.append(EngineEvent(bar.ts, "warn",
                                   "сигнал в клиринговом окне — пропуск", {}))
+                    self._log_missed(bar, sig, band, "клиринговое окно")
                 elif not self._volume_ok(bar):
                     events.append(EngineEvent(bar.ts, "warn",
                                   f"сигнал пропущен: объём {bar.volume:.0f} < "
                                   f"{self.cfg.strategy.volume_filter_mult:g}·SMA("
                                   f"{self._vol_sma:.0f})", {}))
+                    self._log_missed(bar, sig, band,
+                                     f"объёмный фильтр: {bar.volume:.0f} < "
+                                     f"{self.cfg.strategy.volume_filter_mult:g}·SMA({self._vol_sma:.0f})")
                 elif not self._data_fresh(bar):
                     lag = (time.time() * 1000 - bar.ts) / 60_000
                     events.append(EngineEvent(bar.ts, "warn",
                                   f"сигнал пропущен: данные устарели ({lag:.0f} мин > "
                                   f"{self.cfg.strategy.max_data_lag_min:g})", {}))
+                    self._log_missed(bar, sig, band, f"устаревшие данные (лаг {lag:.0f} мин)")
                 else:
                     ok, why = self.risk.can_enter(bar.ts, 1 if self.position else 0)
                     if not ok:
                         events.append(EngineEvent(bar.ts, "warn", f"вход запрещён: {why}", {}))
+                        self._log_missed(bar, sig, band, f"риск-гейт: {why}")
                     elif self.cfg.auto_approve:
                         res = self._open_position(sig, band, bar, events)
                         self._prev = band
@@ -356,6 +377,7 @@ class TradingEngine:
             self.risk.on_error()
             self.state = BotState.HALTED if self.risk.halted else BotState.FLAT
             events.append(EngineEvent(bar.ts, "warn", r.reason, {}))
+            self._log_missed(bar, sig, band, f"исполнение: {r.reason}")
             return StepResult(state=self.state, band=band, signal=sig, events=events)
 
         self.risk.on_success()

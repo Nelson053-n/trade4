@@ -548,7 +548,7 @@ def st5_telegram(payload: dict):
     if "token" in payload:                      # секрет — отдельно, в файл/env, не в config
         _tg.save_bot_token(str(payload["token"]).strip())
     for k in ("enabled", "notify_entry", "notify_exit", "notify_errors",
-              "notify_before_open", "daily_summary"):
+              "notify_before_open", "daily_summary", "notify_reconcile", "notify_missed"):
         if k in payload:
             setattr(n, k, bool(payload[k]))
     if "chat_id" in payload:
@@ -747,8 +747,13 @@ async def st5_daily(pair: str = "sber", days: int = 30):
             if t.get("pair") == pair and t.get("exit_ts"):
                 d = _dtmod.datetime.fromtimestamp(t["exit_ts"] / 1000, _MSK).strftime("%Y-%m-%d")
                 real[d] += t.get("net_pnl_rub", 0)
-        # последние N дней с любой активностью
-        all_days = sorted(set(ideal) | set(with_costs) | set(real))[-days:]
+        # ряды начинаются с ПЕРВОГО дня честного журнала: после архивации старых сделок
+        # (02.07, α-баг) дни без факта на фоне «плана» выглядели фиктивным недобором
+        first_real = min(real.keys(), default=None)
+        all_days = sorted(set(ideal) | set(with_costs) | set(real))
+        if first_real:
+            all_days = [d for d in all_days if d >= first_real]
+        all_days = all_days[-days:]
         rows = [{"date": d, "ideal": round(ideal.get(d, 0)), "with_costs": round(with_costs.get(d, 0)),
                  "real": round(real.get(d, 0))} for d in all_days]
         # ИТОГИ — только по дням, где бот РЕАЛЬНО торговал (real!=0). Иначе total_ideal суммирует
