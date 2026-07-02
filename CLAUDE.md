@@ -4,11 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Что это
 
-trade4 — самостоятельный сервис торговой стратегии **st4**: статистический арбитраж спреда
-фьючерсов FORTS на обыкновенные и привилегированные акции одного эмитента (SBRF/SBPR и др.).
-Данные — публичный MOEX ISS (без ключей). Backend на FastAPI + одностраничный canvas-дашборд.
-Выделен из общего проекта `trade` в отдельный сервис (домен trade4.bananagen.ru, порт 8001),
-**не конфликтует** с `trade.service` (порт 8000).
+trade4 — сервис ЧЕТЫРЁХ торговых стратегий на фьючерсах FORTS (данные — публичный MOEX ISS,
+исполнение — T-Bank API). Backend на FastAPI + одностраничный canvas-дашборд (вкладки ST4-ST7).
+Выделен из общего проекта `trade` в отдельный сервис (домен trade4.bananagen.ru, порт 8001;
+на проде 8004), **не конфликтует** с `trade.service`.
+
+- **st4** — BB-спред-арбитраж обычка/преф одного эмитента (SBRF/SBPR…), FSM-движок.
+- **st5** — statarb с Kalman-β/коинтеграцией, портфель до 3 пар, β-юниты ног,
+  ЧЕСТНЫЙ P&L по фактическим ногам (α-баг учёта исправлен 02.07 — старые цифры несравнимы).
+- **st6** — фандинг-арбитраж вечных фьючерсов: шорт перпа + лонг квартальника, дневная
+  гранулярность, сигнал edge = фандинг − базис (SWAPRATE из ISS history).
+- **st7** — «фандинг-давление»: полухедж-шорт перпа (2×+1×) при перегретом фандинге (>35пп).
 
 Фаза проекта: paper / T-Bank sandbox + опциональный боевой контур `tbank_real` под гейтом
 взвода (`tbank_real`+`real_trading_armed`; вход дополнительно гейтится `trading_enabled` — см. «Критичные инварианты»).
@@ -18,8 +24,8 @@ trade4 — самостоятельный сервис торговой стра
 ```bash
 pip install -r requirements.txt              # зависимости (в .venv)
 uvicorn app.api:app --reload --port 8001     # backend + панель на http://127.0.0.1:8001
-pytest -q                                     # все тесты движка
-pytest tests/test_st4.py::test_<name> -q      # один тест
+pytest -q                                     # все тесты (test_st4/st5/st6/st7 + auth)
+pytest tests/test_st5.py::test_<name> -q      # один тест
 ```
 
 Прод-деплой (systemd + nginx) и DNS описаны в `README.md`; конфиги — в `infra/`.
@@ -85,9 +91,19 @@ pytest tests/test_st4.py::test_<name> -q      # один тест
   нельзя). Т.е. реальный гейт ордера ДВОЙНОЙ (`tbank_real`+`armed`); `trading_enabled` — третье
   условие лишь для открытия.
 - **Токен T-Bank** — только в окружении процесса (`TBANK_TOKEN`) или файле `app/st4/.tbank_token`.
-  Никогда в git/snapshot: наружу отдаётся лишь булев `token_set`.
+  Никогда в git/snapshot: наружу отдаётся лишь булев `token_set`. **Per-аккаунт токены**
+  (st5/st6 на своих sandbox-токенах/счетах): мапа `app/st4/.tbank_account_tokens.json` —
+  account-scoped вызовы `tbank_sandbox` берут токен счёта, env-токен — общий (приоритет env>файл).
+- **P&L st5 — по ФАКТИЧЕСКИМ ногам** (β-юниты, `engine._legs_pnl`): пункт-стоимость каждой
+  ноги, round-trip комиссии, half_spread в live-журнале. НЕ возвращать P&L «по спреду»:
+  entry_spread — инновация Кальмана (с вычетом α), exit без α — α-баг завышал каждую сделку
+  (см. память st5-alpha-bias-pnl-bug). Цифры журналов до 02.07.2026 несравнимы.
+- **Голые ноги**: executor сверяет executed_lots (частичный филл → unwind реально налитого);
+  на выделенном счёте (`dedicated_account=True`) periodic reconcile автозакрывает осиротевшие
+  ноги. Pre-trade гейт: свободные деньги счёта против нотионала ордера (sandbox отклоняет
+  по нотионалу!) с авто-даунсайзом юнитов.
 - Sandbox/real исполнение активно **только в live** (MOEX ISS). На синтетике (player) — всегда paper.
-- `session_state_4*.json`, `.tbank_token`, `out/` — рантайм/секреты, в `.gitignore`, не коммитить.
+- `session_state_*.json`, `.tbank_token*`, `out/` — рантайм/секреты, в `.gitignore`, не коммитить.
 
 ## Стиль
 
