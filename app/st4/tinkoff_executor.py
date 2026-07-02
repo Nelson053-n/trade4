@@ -182,6 +182,11 @@ class TinkoffSandboxExecutor:
         if f_ord is None or f_pref is None:
             # одна нога не закрылась — голая позиция недопустима
             raise UnwindError("не удалось закрыть ногу в sandbox при выходе (голая позиция)")
+        # сверка недолива: executed < запрошенных → остаток на счёте. Обратных ордеров НЕ шлём
+        # (закрытие = снижение риска, откат поднял бы его обратно) — ошибка наверх, разбор руками.
+        if f_ord.lots != lots or f_pref.lots != lots:
+            raise UnwindError(f"закрытие недолилось: SBRF {f_ord.lots}/{lots}, "
+                              f"SBPR {f_pref.lots}/{lots} — остаток на счёте, нужен разбор")
         slip = abs(f_ord.slippage_ticks) + abs(f_pref.slippage_ticks)
         return PairCloseResult(exit_ord=f_ord.avg_price, exit_pref=f_pref.avg_price,
                                slippage_ticks=slip)

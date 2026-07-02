@@ -1050,3 +1050,23 @@ def test_live_executor_close_works_unarmed():
     res = ex.close_pair(pos, 32000, 32100)
     assert res.exit_ord > 0 and res.exit_pref > 0
     assert len(sb.orders) == 2    # закрытие прошло, несмотря на не-взведённость
+
+
+def test_tinkoff_close_pair_underfill_raises(monkeypatch):
+    """Недолив ЗАКРЫВАЮЩЕГО ордера (executed < запрошенных) → UnwindError, без обратных
+    ордеров (закрытие = снижение риска). Остаток на счёте — ручной разбор."""
+    from app.st4.models import Fill
+    ex, sb = _tinkoff_exec()
+    pos = Position(
+        state=BotState.SHORT_SPREAD,
+        leg_ord=LegPosition("SRM6", Role.ORDINARY, "buy", 10, 32000),
+        leg_pref=LegPosition("SPM6", Role.PREFERRED, "sell", 10, 32100),
+        entry_ts=0, entry_spread=100, entry_beta=1.0, sma_at_entry=0.0)
+
+    def underfilled(role, side, lots, ref):
+        got = 6 if role == Role.ORDINARY else lots      # SBRF закрылся 6/10
+        return Fill(code="X", role=role, side=side, lots=got,
+                    avg_price=ref, reference_price=ref, slippage_ticks=0.0)
+    monkeypatch.setattr(ex, "_retry_leg", underfilled)
+    with pytest.raises(UnwindError, match="6/10"):
+        ex.close_pair(pos, 32000, 32100)
