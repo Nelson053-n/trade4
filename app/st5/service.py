@@ -31,17 +31,25 @@ ST5_PAIRS: dict[str, tuple] = {
     # разная — глобальные параметры ломают часть пар. Поэтому per-pair, как в st4.
     # z_entry=1.25 (аудит 2026-06-26: OOS-проверено, +50-60% net в ОБЕИХ половинах всех пар,
     # maxDD не вырос). Тиры сайзинга сдвинуты под z_entry (иначе вход разрешён, но size=None).
-    # z_exit_full=0.5 (калибровка 2026-06-29: split-half бэктест 90д ISS — 0.5 > прежних 0.1/0.35
-    # по net И win-rate в ОБЕИХ половинах всех пар; ранний выход остатка уходит из β-дрейфа/
-    # time-stop'ов на копеечном хвосте схождения). Прежде: sber/tatn 0.1, sngr 0.35.
+    # Калибровка 2026-07-02 (свип на 3 сегментах март–июль по июньской/сентябрьской сериям,
+    # валидация на нетронутом холдауте дек-2025–март по мартовской серии; кандидат лучше базы
+    # во всех 12 ячейках пара×сегмент, суммарно ~+20% net):
+    #   z_exit_full 0.5→0.75, z_take_partial →1.0 (ранний выход остатка уходит с копеечного
+    #   хвоста схождения), z_stop 4.25→3.5, rv_ratio_max 1.7→2.2 (все пары);
+    #   hurst_max 0.60→0.70 ТОЛЬКО sngr (R/S завышает Hurst — фильтр резал прибыльный поток,
+    #   net текущего режима ×3.4; страховка от тренда: adf_p_break + z_stop + time-stop).
+    #   Нечувствительны (оставлены): kalman_delta, z_ema_span, adf_p_enter, half_life_stop_mult.
     "sber": ("SBRF", "SBPR", "SBER", "Сбербанк",
-             {"z_entry": 1.25, "z_take_partial": 1.5, "z_exit_full": 0.5,
+             {"z_entry": 1.25, "z_take_partial": 1.0, "z_exit_full": 0.75,
+              "z_stop": 3.5, "rv_ratio_max": 2.2,
               "size_tiers": [(1.25, 1.75, 1.0), (1.75, 2.25, 1.5), (2.25, 4.0, 2.0)]}),
     "sngr": ("SNGR", "SNGP", "SNGR", "Сургутнефтегаз",
-             {"z_entry": 1.25, "z_take_partial": 1.5, "z_exit_full": 0.5,
+             {"z_entry": 1.25, "z_take_partial": 1.0, "z_exit_full": 0.75,
+              "z_stop": 3.5, "rv_ratio_max": 2.2, "hurst_max": 0.70,
               "size_tiers": [(1.25, 1.75, 1.0), (1.75, 2.25, 1.5), (2.25, 4.0, 2.0)]}),
     "tatn": ("TATN", "TATP", "TATN", "Татнефть",
-             {"z_entry": 1.25, "z_take_partial": 1.25, "z_exit_full": 0.5,
+             {"z_entry": 1.25, "z_take_partial": 1.0, "z_exit_full": 0.75,
+              "z_stop": 3.5, "rv_ratio_max": 2.2,
               "size_tiers": [(1.25, 1.75, 1.0), (1.75, 2.25, 1.5), (2.25, 4.0, 2.0)]}),
 }
 
@@ -241,7 +249,8 @@ class St5Session:
 
     # ключевые параметры стратегии, которыми оперирует версионирование/калибровка
     OVERRIDE_KEYS = ("z_entry", "z_exit_full", "z_take_partial", "z_no_entry",
-                     "z_stop", "half_life_stop_mult", "size_tiers")
+                     "z_stop", "half_life_stop_mult", "size_tiers",
+                     "rv_ratio_max", "hurst_max")
 
     def _pair_cfg(self, pid: str) -> St5Config:
         """Конфиг пары = базовый ST5 + per-pair оверрайды из ST5_PAIRS[pid][4] (код) +
