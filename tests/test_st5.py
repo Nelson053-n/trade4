@@ -1094,8 +1094,9 @@ def test_margin_timeline_reconstructs_go_and_positions(tmp_path, monkeypatch):
     ST5._session_file = tmp_path / "s5.json"
     for e in ST5.engines.values():
         e.position = None                       # без «текущих» позиций — только журнал
-    # фиксированное ГО пары (не дёргать ISS в тесте)
-    monkeypatch.setattr(St5Portfolio, "pair_go_per_lot", classmethod(lambda cls, pid: 10_000.0))
+    # фиксированное ГО ног пары (не дёргать ISS в тесте): 5к+5к = 10к за пару 1+1
+    monkeypatch.setattr(St5Portfolio, "pair_leg_margins",
+                        classmethod(lambda cls, pid: (5_000.0, 5_000.0)))
     ST5.portfolio.go_factor = 2.0
     # день: две пары, tatn 10:00-10:30, sber 10:10-10:20 (перекрытие в слоте 10:10-10:20)
     MSK = _dt.timezone(_dt.timedelta(hours=3))
@@ -1116,3 +1117,135 @@ def test_margin_timeline_reconstructs_go_and_positions(tmp_path, monkeypatch):
     # 10:20 — снова только tatn (sber вышел)
     assert rows["10:20"]["positions"] == 1
     assert d["peak_positions"] == 2 and d["peak_rub"] == 40_000
+
+
+# ============================ этап 2: β-сайзинг ног + P&L по фактическим ногам ============================
+
+def test_hedge_unit_beta_ratios():
+    """β-юнит ног: unit_ord/unit_pref ≈ β. sber β≈1 → (1,1); sngr β≈2.5 → (5,2);
+    tatn β≈0.095 → (1,10). Вырожденный β → защитный (1,1)."""
+    from app.st5.engine import hedge_unit
+    assert hedge_unit(0.997) == (1, 1)
+    assert hedge_unit(2.525) == (5, 2)
+    assert hedge_unit(0.095) == (1, 10)
+    assert hedge_unit(0.0) == (1, 1)
+
+
+def test_legs_pnl_not_beta_model():
+    """P&L сделки = экономика ФАКТИЧЕСКИХ ног (цены исполнения × лоты ног), а не β-модель
+    спреда. long_spread: buy pref + sell ord → P&L = Δpref·pref_lots − Δord·ord_lots."""
+    from app.st5.config import St5Config
+    from app.st5.engine import ST5Engine
+    from app.st5.models import St5Position, St5State
+    eng = ST5Engine("t", St5Config(), base_lots=1, fee_per_lot=2.0)
+    eng.position = St5Position(
+        pair="t", state=St5State.LONG_SPREAD, entry_ts=1, entry_z=-2.0, entry_spread=0.0,
+        entry_beta=0.1, lots=10, entry_lots=10, ord_entry=100.0, pref_entry=50.0,
+        half_life=float("inf"), ord_lots=1, units=1, unit_ord=1, unit_pref=10)
+    tr = eng._close(2, 0.0, 0.0, 101.0, 51.0, "exit")
+    # ноги: преф +1·10 лотов = +10; обычка (шорт) −1·1 лот = −1 → gross 9
+    assert tr.gross_pnl_rub == 9.0
+    # комиссия round-trip обеих ног: 2·(1+10)·2₽ = 44
+    assert tr.fees_rub == 44.0
+    assert tr.net_pnl_rub == 9.0 - 44.0
+    assert tr.ord_lots == 1 and tr.lots == 10
+
+
+def test_take_partial_closes_whole_units():
+    """Частичная фиксация закрывает ЦЕЛЫЕ юниты (обе ноги пропорционально β), не половину префа."""
+    from app.st5.config import St5Config
+    from app.st5.engine import ST5Engine
+    from app.st5.models import St5Position, St5State
+    eng = ST5Engine("t", St5Config(), base_lots=1, fee_per_lot=2.0)
+    eng.position = St5Position(
+        pair="t", state=St5State.SHORT_SPREAD, entry_ts=1, entry_z=2.0, entry_spread=0.0,
+        entry_beta=2.5, lots=4, entry_lots=4, ord_entry=100.0, pref_entry=250.0,
+        half_life=float("inf"), ord_lots=10, units=2, unit_ord=5, unit_pref=2)
+    tr = eng._take_partial(2, 0.5, 0.0, 100.0, 250.0)
+    assert tr.lots == 2 and tr.ord_lots == 5          # закрыт 1 юнит: 2 префа + 5 обычек
+    p = eng.position
+    assert p.units == 1 and p.lots == 2 and p.ord_lots == 5   # остался 1 юнит
+    assert p.partial_done is True
+
+
+def test_open_uses_beta_units_and_max_units_cap():
+    """_open сайзит ноги β-юнитом от текущего β и капит юниты max_units (ликвидность ноги)."""
+    from app.st5.config import St5Config
+    from app.st5.engine import ST5Engine
+    c = St5Config()
+    c.strategy.max_units = 1
+    eng = ST5Engine("t", c, base_lots=3)              # base 3 юнита, кап → 1
+    eng.filt.half_life = 20.0
+    eng._open(1, -2.5, 0.0, 0.095, 49000.0, 4700.0)   # β≈0.095 → юнит (1 обычка, 10 префов)
+    p = eng.position
+    assert p.units == 1
+    assert p.unit_ord == 1 and p.unit_pref == 10
+    assert p.lots == 10 and p.ord_lots == 1
+
+
+def test_adopt_unequal_legs_from_account():
+    """Усыновление β-ног: обычка +1 / преф −10 → SHORT_SPREAD, ноги фактические, юнит неделим."""
+    from app.st5.models import St5State
+    s = _session_with_fake_executor()
+    assert s._adopt_position_from_account("sber", bal_ord=1, bal_pref=-10, executor=s._fake_ex)
+    p = s.engines["sber"].position
+    assert p.state == St5State.SHORT_SPREAD
+    assert p.lots == 10 and p.ord_lots == 1
+    assert p.units == 1                                # частичной фиксации не будет
+
+def test_position_matches_lots_beta_legs():
+    """Сверка со счётом сравнивает ФАКТИЧЕСКИЕ ноги (ord_lots ≠ lots), а не равные."""
+    from app.st5.models import St5Position, St5State
+    s = _session_with_fake_executor()
+    eng = s.engines["sber"]
+    eng.position = St5Position(
+        pair="sber", state=St5State.LONG_SPREAD, entry_ts=1, entry_z=-2.0, entry_spread=0.0,
+        entry_beta=0.1, lots=10, entry_lots=10, ord_entry=100.0, pref_entry=50.0,
+        half_life=float("inf"), ord_lots=1, units=1, unit_ord=1, unit_pref=10)
+    assert s._position_matches_lots(eng, bal_ord=-1, bal_pref=10) is True
+    assert s._position_matches_lots(eng, bal_ord=-10, bal_pref=10) is False
+
+
+def test_position_from_json_legacy_equal_legs():
+    """Legacy session-файл без полей β-ног → равные ноги (прежнее поведение исполнителя)."""
+    from app.st5.service import St5Session
+    from app.st5.models import St5State
+    d = {"pair": "sber", "state": "long_spread", "entry_ts": 1, "entry_z": -2.0,
+         "entry_spread": 0.0, "entry_beta": 1.0, "lots": 3, "entry_lots": 3,
+         "ord_entry": 100.0, "pref_entry": 101.0, "half_life": 20.0}
+    p = St5Session._position_from_json(d)
+    assert p.state == St5State.LONG_SPREAD
+    assert p.ord_lots == 3 and p.units == 3 and p.unit_ord == 1 and p.unit_pref == 1
+
+
+def test_executor_posts_different_leg_lots():
+    """open_pair/close_pair шлют РАЗНЫЕ лоты ног (β-сайзинг): преф первым, лоты не перепутаны."""
+    from app.st5.executor import St5PairExecutor
+    ex = St5PairExecutor("acc", "TATN", "TATP", real=False)
+    ex._uid_ord, ex._uid_pref = "uid_o", "uid_p"
+    calls = []
+    ex._post = lambda uid, lots, direction, op, ref: calls.append((uid, lots, direction, op)) or {}
+    ex.open_pair(True, 1, 10, 49000.0, 4700.0)         # long: buy pref ×10, sell ord ×1
+    assert calls[0] == ("uid_p", 10, "BUY", "entry")   # преф первым
+    assert calls[1] == ("uid_o", 1, "SELL", "entry")
+    calls.clear()
+    ex.close_pair(True, 1, 10, 49000.0, 4700.0)
+    assert calls[0] == ("uid_p", 10, "SELL", "flat")
+    assert calls[1] == ("uid_o", 1, "BUY", "flat")
+
+
+def test_pos_risk_by_actual_legs():
+    """Риск позиции (ГО) = Σ leg_margin × ФАКТИЧЕСКИЕ лоты ноги (β-ноги, не lots×2)."""
+    from app.st5.config import St5Config
+    from app.st5.engine import ST5Engine
+    from app.st5.models import St5Position, St5State
+    from app.st5.service import ST5_PAIRS, St5Portfolio
+    St5Portfolio._go_cache = {"tatn": (6000.0, 600.0)}   # (обычка, преф) ₽/лот
+    eng = ST5Engine("tatn", St5Config(), base_lots=1)
+    eng.position = St5Position(
+        pair="tatn", state=St5State.LONG_SPREAD, entry_ts=1, entry_z=-2.0, entry_spread=0.0,
+        entry_beta=0.1, lots=10, entry_lots=10, ord_entry=49000.0, pref_entry=4700.0,
+        half_life=float("inf"), ord_lots=1, units=1, unit_ord=1, unit_pref=10)
+    risk = St5Portfolio._pos_risk("tatn", eng)
+    assert risk == 6000.0 * 1 + 600.0 * 10               # 12000, а не (6000+600)×10
+    St5Portfolio._go_cache = {}

@@ -767,7 +767,8 @@ async def st5_daily(pair: str = "sber", days: int = 30):
 async def st5_margin_timeline(date: str = ""):
     """Залог (ГО) по 10-минутным слотам за день: сколько обеспечения требовалось в течение дня
     и сколько позиций стояло в каждый момент. Реконструкция из журнала сделок (entry_ts…exit_ts)
-    + текущие открытые позиции движков (ещё не в журнале). ГО = pair_go_per_lot×lots×go_factor."""
+    + текущие открытые позиции движков (ещё не в журнале). ГО = Σ leg_margin×лоты ноги×go_factor
+    (β-ноги: лоты обычки ≠ лотам префа; legacy-записи без ord_lots → равные ноги)."""
     from .st5.service import St5Portfolio
     SLOT = 10 * 60 * 1000    # 10 минут в мс
 
@@ -778,7 +779,7 @@ async def st5_margin_timeline(date: str = ""):
         d0 = _dt.strptime(day, "%Y-%m-%d").replace(tzinfo=_MSK)
         day_start = int(d0.timestamp() * 1000)
         day_end = day_start + 24 * 3600 * 1000
-        # интервалы позиций за этот день: [(entry_ms, exit_ms|None, pair, lots), …]
+        # интервалы позиций за этот день: [(entry_ms, exit_ms|None, pair, pref_lots, ord_lots), …]
         intervals = []
         for t in ST5.trades:
             e, x = t.get("entry_ts"), t.get("exit_ts")
@@ -786,13 +787,15 @@ async def st5_margin_timeline(date: str = ""):
                 continue
             if x <= day_start or e >= day_end:      # не пересекает день
                 continue
-            intervals.append((e, x, t.get("pair"), t.get("lots", 1)))
+            lots = t.get("lots", 1)
+            intervals.append((e, x, t.get("pair"), lots, t.get("ord_lots") or lots))
         # текущие открытые позиции движков (ещё не закрыты → нет в trades), exit=None (по «сейчас»)
         now_ms = int(_dt.now(_MSK).timestamp() * 1000)
         for pid, eng in ST5.engines.items():
             p = getattr(eng, "position", None)
             if p is not None and getattr(p, "entry_ts", 0) and p.entry_ts < day_end:
-                intervals.append((p.entry_ts, None, pid, p.lots))
+                intervals.append((p.entry_ts, None, pid, p.lots,
+                                  getattr(p, "ord_lots", 0) or p.lots))
         if not intervals:
             return {"date": day, "rows": [], "peak_rub": 0, "peak_positions": 0}
         # границы сетки слотов — от первого входа до последнего выхода (в пределах дня)
@@ -808,10 +811,11 @@ async def st5_margin_timeline(date: str = ""):
             go = 0.0
             cnt = 0
             open_pairs = []
-            for e, x, pair, lots in intervals:
+            for e, x, pair, pref_lots, ord_lots in intervals:
                 xe = x if x is not None else now_ms
                 if e < s1 and xe > s0:              # позиция активна в слоте
-                    go += St5Portfolio.pair_go_per_lot(pair) * lots * gf
+                    m_ord, m_pref = St5Portfolio.pair_leg_margins(pair)
+                    go += (m_ord * ord_lots + m_pref * pref_lots) * gf
                     cnt += 1
                     open_pairs.append(pair)
             if cnt:                                  # показываем только слоты с позициями

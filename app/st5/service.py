@@ -47,9 +47,11 @@ ST5_PAIRS: dict[str, tuple] = {
              {"z_entry": 1.25, "z_take_partial": 1.0, "z_exit_full": 0.75,
               "z_stop": 3.5, "rv_ratio_max": 2.2, "hurst_max": 0.70,
               "size_tiers": [(1.25, 1.75, 1.0), (1.75, 2.25, 1.5), (2.25, 4.0, 2.0)]}),
+    # tatn: max_units=1 — β-юнит ≈ (1 обычка + 10 префов), тиры ×2 дали бы 20 префов TPU6
+    # при медиане объёма 23 конт/10м-бар (маркет-ордер съел бы стакан).
     "tatn": ("TATN", "TATP", "TATN", "Татнефть",
              {"z_entry": 1.25, "z_take_partial": 1.0, "z_exit_full": 0.75,
-              "z_stop": 3.5, "rv_ratio_max": 2.2,
+              "z_stop": 3.5, "rv_ratio_max": 2.2, "max_units": 1,
               "size_tiers": [(1.25, 1.75, 1.0), (1.75, 2.25, 1.5), (2.25, 4.0, 2.0)]}),
 }
 
@@ -79,7 +81,7 @@ class St5Portfolio:
         при real_blocked<=0 — НЕ трогаем (нет данных для калибровки, прежний factor сохраняется)."""
         if real_blocked_rub <= 0:
             return
-        iss_open = sum(self.pair_go_per_lot(pid) * e.position.lots
+        iss_open = sum(self._pos_risk(pid, e)
                        for pid, e in engines.items() if e.position is not None)
         if iss_open <= 0:
             return
@@ -144,35 +146,46 @@ class St5Portfolio:
             return False, "дневной лимит убытка"
         return True, ""
 
-    # кэш ГО пары (leg_margin обеих ног, ₽ за 1 лот) — меняется редко, биржа раз в день
+    # кэш ГО ног пары (leg_margin, ₽ за 1 лот КАЖДОЙ ноги) — меняется редко, биржа раз в день
     _go_cache: dict = {}
 
     @classmethod
-    def pair_go_per_lot(cls, pid: str) -> float:
-        """ГО пары на 1 лот (обе ноги) из ISS leg_margin. Это РИСК на сделку для фьючерсов
-        (заблокированное обеспечение), а НЕ нотионал. Кэшируется."""
+    def pair_leg_margins(cls, pid: str) -> tuple[float, float]:
+        """(ГО обычки, ГО префа) за 1 лот из ISS leg_margin. Кэшируется. (0,0) — недоступно."""
         if pid in cls._go_cache:
-            return cls._go_cache[pid]
+            cached = cls._go_cache[pid]
+            if isinstance(cached, (int, float)):   # legacy-кэш суммой «за пару» — делим пополам
+                return cached / 2, cached / 2
+            return cached
         try:
             from ..st4 import data_feed as _feed
             from ..st4.config import St4Config as _C4
             from .service import ST5_PAIRS as _P
             c = _C4(); c.instruments.asset_ordinary = _P[pid][0]; c.instruments.asset_preferred = _P[pid][1]
             so, sp = _feed.resolve_legs(c)
-            go = _feed.leg_margin(so.code) + _feed.leg_margin(sp.code)
+            m = (_feed.leg_margin(so.code), _feed.leg_margin(sp.code))
         except Exception:  # noqa: BLE001
-            go = 0.0
-        if go > 0:
-            cls._go_cache[pid] = go
-        return go
+            m = (0.0, 0.0)
+        if m[0] > 0 or m[1] > 0:
+            cls._go_cache[pid] = m
+        return m
+
+    @classmethod
+    def pair_go_per_lot(cls, pid: str) -> float:
+        """ГО пары «1+1 лот» (обе ноги) — для legacy-оценок по журналу без ord_lots."""
+        m_ord, m_pref = cls.pair_leg_margins(pid)
+        return m_ord + m_pref
 
     @classmethod
     def _pos_risk(cls, pid: str, eng: ST5Engine) -> float:
-        """РИСК открытой позиции = ГО (обе ноги) × текущие лоты."""
+        """РИСК открытой позиции = ГО ФАКТИЧЕСКИХ ног (β-сайзинг: лоты ног разные).
+        Это заблокированное обеспечение, а НЕ нотионал."""
         p = eng.position
         if p is None:
             return 0.0
-        return cls.pair_go_per_lot(pid) * p.lots
+        m_ord, m_pref = cls.pair_leg_margins(pid)
+        ord_lots = p.ord_lots if p.ord_lots > 0 else p.lots   # legacy: равные ноги
+        return m_ord * ord_lots + m_pref * p.lots
 
     def on_trade(self, net_pnl_rub: float, ts_ms: int | None = None) -> None:
         """Учесть закрытую сделку в дневном P&L. При смене дня (МСК) day_pnl обнуляется —
@@ -250,7 +263,7 @@ class St5Session:
     # ключевые параметры стратегии, которыми оперирует версионирование/калибровка
     OVERRIDE_KEYS = ("z_entry", "z_exit_full", "z_take_partial", "z_no_entry",
                      "z_stop", "half_life_stop_mult", "size_tiers",
-                     "rv_ratio_max", "hurst_max")
+                     "rv_ratio_max", "hurst_max", "max_units")
 
     def _pair_cfg(self, pid: str) -> St5Config:
         """Конфиг пары = базовый ST5 + per-pair оверрайды из ST5_PAIRS[pid][4] (код) +
@@ -330,6 +343,7 @@ class St5Session:
                 positions.append({
                     "pair": pid, "label": ST5_PAIRS[pid][3], "state": p.state.value,
                     "entry_z": round(p.entry_z, 2), "lots": p.lots, "entry_lots": p.entry_lots,
+                    "ord_lots": p.ord_lots or p.lots,   # β-ноги: лоты обычки ≠ лотам префа
                     "bars_held": p.bars_held, "partial_done": p.partial_done,
                     "unrealized_rub": round(eng.unrealized_rub(), 0),
                     "cur_z": round(eng.last_z, 2) if eng.last_z is not None else None})
@@ -545,9 +559,15 @@ class St5Session:
 
     @staticmethod
     def _position_from_json(d: dict) -> St5Position:
-        """Десериализация St5Position из session-файла (state → St5State, остальное as-is)."""
+        """Десериализация St5Position из session-файла (state → St5State, остальное as-is).
+        Legacy-файлы без полей β-ног → равные ноги (прежнее поведение исполнителя)."""
         d = dict(d)
         d["state"] = St5State(d["state"])
+        lots = int(d.get("lots", 0))
+        d.setdefault("ord_lots", lots)
+        d.setdefault("units", lots)
+        d.setdefault("unit_ord", 1)
+        d.setdefault("unit_pref", 1)
         return St5Position(**d)
 
     # ---------- исполнители пар (sandbox/real) ----------
@@ -597,6 +617,7 @@ class St5Session:
             entry_ts = self.last_live_ts.get(pid) or int(time.time() * 1000)
         beta = eng.last_beta or 1.0
         lots = abs(bal_pref)
+        ord_lots = abs(bal_ord)
         eng.position = St5Position(
             pair=pid, state=state, entry_ts=entry_ts,
             entry_z=eng.last_z if eng.last_z is not None else 0.0,
@@ -606,6 +627,8 @@ class St5Session:
             # bars_held=1 (НЕ 0): откат прогревочных входов в _step_pair снимает позиции с
             # bars_held==0 — усыновлённую со счёта это снесло бы (она реальна, не прогрев).
             bars_held=1,
+            # ноги — фактические лоты счёта; юнит один и неделимый (частичной фиксации не будет)
+            ord_lots=ord_lots, units=1, unit_ord=ord_lots, unit_pref=lots,
             adopted=True)   # пометка: entry_z/spread/bars_held — с момента усыновления, не входа
         return True
 
@@ -615,8 +638,9 @@ class St5Session:
         p = eng.position
         if p is None:
             return False
+        ord_l = p.ord_lots if p.ord_lots > 0 else p.lots   # legacy: равные ноги
         want_pref = p.lots if p.state == St5State.LONG_SPREAD else -p.lots
-        want_ord = -p.lots if p.state == St5State.LONG_SPREAD else p.lots
+        want_ord = -ord_l if p.state == St5State.LONG_SPREAD else ord_l
         return bal_pref == want_pref and bal_ord == want_ord
 
     def _ensure_uid_cache(self, pid: str) -> bool:
@@ -873,7 +897,7 @@ class St5Session:
         from .service import ST5_PAIRS as _P
         issuer = _P[pid][2]
         p = eng.position
-        risk = self.portfolio.pair_go_per_lot(pid) * p.lots   # риск = ГО позиции (не нотионал)
+        risk = self.portfolio._pos_risk(pid, eng)   # риск = ГО фактических ног (не нотионал)
         ok, reason = self.portfolio.can_open(pid, issuer, risk, self.engines, _P)
         if not ok:
             eng.position = None   # вход запрещён портфелем → откат
@@ -883,7 +907,8 @@ class St5Session:
         if ex is not None:
             try:
                 long_spread = (p.state == St5State.LONG_SPREAD)
-                ex.open_pair(long_spread, p.lots, ord_px, pref_px)
+                ord_lots = p.ord_lots if p.ord_lots > 0 else p.lots
+                ex.open_pair(long_spread, ord_lots, p.lots, ord_px, pref_px)
                 self.portfolio.on_success()
             except Exception as e:  # noqa: BLE001
                 eng.position = None
@@ -893,12 +918,14 @@ class St5Session:
                 if self.cfg.notify.notify_errors:
                     self._notify(f"⚠️ <b>Вход не исполнен</b> · {tg.esc(_P[pid][3])}\n{tg.esc(e)}")
                 return
-        self.log_event("position", f"{pid}: вход {p.state.value} z={p.entry_z:+.2f} lots={p.lots}")
+        self.log_event("position", f"{pid}: вход {p.state.value} z={p.entry_z:+.2f} "
+                                   f"ноги преф {p.lots} / обычка {p.ord_lots or p.lots}")
         if self.cfg.notify.notify_entry:
             label = _P[pid][3]
             dir_txt = "LONG спред" if p.state == St5State.LONG_SPREAD else "SHORT спред"
             self._notify(f"⚪ <b>Вход</b> · {tg.esc(label)}\n{dir_txt} · z={p.entry_z:+.2f} · "
-                         f"{p.lots} лот · {tg.esc(self.cfg.connector.mode)}")
+                         f"преф {p.lots} + обычка {p.ord_lots or p.lots} лот · "
+                         f"{tg.esc(self.cfg.connector.mode)}")
         self.save_session()   # немедленный персист: рестарт между открытием и концом прохода НЕ потеряет позицию
 
     def _on_engine_trade(self, pid: str, eng, tr, ord_px: float, pref_px: float) -> None:
@@ -908,7 +935,8 @@ class St5Session:
             try:
                 long_spread = (tr.state == St5State.LONG_SPREAD)
                 op = "take50" if tr.reason == "take_partial" else "flat"
-                ex.close_pair(long_spread, tr.lots, ord_px, pref_px, op=op)
+                ord_lots = tr.ord_lots if tr.ord_lots > 0 else tr.lots
+                ex.close_pair(long_spread, ord_lots, tr.lots, ord_px, pref_px, op=op)
                 self.portfolio.on_success()
             except Exception as e:  # noqa: BLE001
                 self.portfolio.on_error()
@@ -919,7 +947,7 @@ class St5Session:
                     self._notify(f"⚠️ <b>Выход не исполнен</b> · {tg.esc(_P[pid][3])}\n{tg.esc(e)}")
         self.portfolio.on_trade(tr.net_pnl_rub, tr.exit_ts)
         rec = {"pair": pid, "state": tr.state.value, "entry_ts": tr.entry_ts, "exit_ts": tr.exit_ts,
-               "entry_z": tr.entry_z, "exit_z": tr.exit_z, "lots": tr.lots,
+               "entry_z": tr.entry_z, "exit_z": tr.exit_z, "lots": tr.lots, "ord_lots": tr.ord_lots,
                "gross_pnl_rub": tr.gross_pnl_rub, "fees_rub": tr.fees_rub,
                "net_pnl_rub": tr.net_pnl_rub, "reason": tr.reason, "bars_held": tr.bars_held,
                "adopted": tr.adopted}

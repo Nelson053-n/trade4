@@ -35,6 +35,13 @@ class St5Position:
     realized_rub: float = 0.0        # реализованный P&L от частичных фиксаций
     adopted: bool = False            # усыновлена со счёта при reconcile: entry_z/spread/bars_held
                                      # с момента усыновления, НЕ реального входа → метрики искажены
+    # β-сайзинг ног: позиция = units юнитов по (unit_ord обычки + unit_pref префа),
+    # unit_ord/unit_pref ≈ β (engine.hedge_unit). lots (выше) = ТЕКУЩИЕ лоты префа
+    # (units·unit_pref) — канонический размер для UI/журнала/совместимости.
+    ord_lots: int = 0                # ТЕКУЩИЕ лоты обычки (units·unit_ord); 0 → legacy равные ноги
+    units: int = 0                   # текущие юниты (частичная фиксация закрывает юниты целиком)
+    unit_ord: int = 1                # лотов обычки в юните
+    unit_pref: int = 1               # лотов префа в юните
 
     def notional(self) -> float:
         """Грубый нотионал позиции в пунктах (для %-лимитов): |pref| + |β·ord|."""
@@ -60,6 +67,7 @@ class St5Trade:
     bars_held: int = 0
     entry_beta: float = 1.0
     adopted: bool = False            # сделка из усыновлённой позиции → entry-метрики искажены
+    ord_lots: int = 0                # закрытые лоты обычки (β-ноги); 0 → legacy равные ноги
 
 
 @dataclass

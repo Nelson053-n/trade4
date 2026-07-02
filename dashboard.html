@@ -1623,7 +1623,7 @@ function s5Render(s){
   if(!(s.positions||[]).length) pb.innerHTML='<tr><td colspan="7" class="empty">нет открытых позиций</td></tr>';
   (s.positions||[]).forEach(p=>{
     const dir=p.state==='long_spread'?'<span style="color:var(--signal)">лонг</span>':'<span style="color:var(--short)">шорт</span>';
-    pb.insertAdjacentHTML('beforeend', `<tr><td>${p.label}</td><td>${dir}</td><td>${p.entry_z>=0?'+':''}${p.entry_z.toFixed(2)}→${p.cur_z!=null?(p.cur_z>=0?'+':'')+p.cur_z.toFixed(2):'?'}</td><td>${p.lots}/${p.entry_lots}</td><td>${p.bars_held}</td><td>${p.partial_done?'✓':''}</td><td style="color:${p.unrealized_rub>=0?'var(--signal)':'var(--loss)'}">${s5money(p.unrealized_rub)}</td></tr>`);
+    pb.insertAdjacentHTML('beforeend', `<tr><td>${p.label}</td><td>${dir}</td><td>${p.entry_z>=0?'+':''}${p.entry_z.toFixed(2)}→${p.cur_z!=null?(p.cur_z>=0?'+':'')+p.cur_z.toFixed(2):'?'}</td><td>${p.lots}${p.ord_lots!=null&&p.ord_lots!==p.lots?'п+'+p.ord_lots+'о':''}/${p.entry_lots}</td><td>${p.bars_held}</td><td>${p.partial_done?'✓':''}</td><td style="color:${p.unrealized_rub>=0?'var(--signal)':'var(--loss)'}">${s5money(p.unrealized_rub)}</td></tr>`);
   });
   // сделки: сегодняшние (по МСК) сверху, остальные — ниже под скроллом, с разделителем «ранее»
   const trb=$('s5-trades').querySelector('tbody'); trb.innerHTML='';
@@ -1638,7 +1638,7 @@ function s5Render(s){
     const fee = t.fees_rub!=null ? '−'+Math.round(t.fees_rub)+' ₽' : '—';
     // время закрытия сделки (по МСК); усыновлённые помечаем значком (entry-метрики искажены)
     const when = s4dateMsk(t.exit_ts) + (t.adopted ? ' <span title="усыновлена со счёта — z/время входа неточны" style="color:var(--warn)">⇪</span>' : '');
-    return `<tr><td style="color:var(--ink-dim);white-space:nowrap">${when}</td><td>${t.pair}</td><td>${dir}</td><td>${t.entry_z>=0?'+':''}${t.entry_z.toFixed(1)}→${t.exit_z>=0?'+':''}${t.exit_z.toFixed(1)}</td><td>${t.lots}</td><td style="color:var(--ink-dim)">${fee}</td><td style="color:${t.net_pnl_rub>=0?'var(--signal)':'var(--loss)'}">${s5money(t.net_pnl_rub)}</td><td style="color:var(--ink-dim)">${reason}</td></tr>`;
+    return `<tr><td style="color:var(--ink-dim);white-space:nowrap">${when}</td><td>${t.pair}</td><td>${dir}</td><td>${t.entry_z>=0?'+':''}${t.entry_z.toFixed(1)}→${t.exit_z>=0?'+':''}${t.exit_z.toFixed(1)}</td><td>${t.lots}${t.ord_lots&&t.ord_lots!==t.lots?'п+'+t.ord_lots+'о':''}</td><td style="color:var(--ink-dim)">${fee}</td><td style="color:${t.net_pnl_rub>=0?'var(--signal)':'var(--loss)'}">${s5money(t.net_pnl_rub)}</td><td style="color:var(--ink-dim)">${reason}</td></tr>`;
   };
   let dividerDone=false;
   trs.forEach(t=>{

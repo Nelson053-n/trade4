@@ -111,8 +111,10 @@ class St5PairExecutor:
             self.audit_cb(audit)
         return resp
 
-    def open_pair(self, long_spread: bool, lots: int, ref_ord: float, ref_pref: float) -> dict:
+    def open_pair(self, long_spread: bool, lots_ord: int, lots_pref: int,
+                  ref_ord: float, ref_pref: float) -> dict:
         """Открыть пару атомарно. long_spread: buy pref + sell ord; иначе наоборот.
+        Лоты ног РАЗНЫЕ (β-сайзинг: lots_ord/lots_pref ≈ β).
 
         Менее ликвидную ногу (pref) первой; при отказе второй — unwind первой.
         """
@@ -120,27 +122,27 @@ class St5PairExecutor:
         pref_dir = "BUY" if long_spread else "SELL"
         ord_dir = "SELL" if long_spread else "BUY"
         # 1) первая нога — pref (менее ликвидная)
-        self._post(uid_pref, lots, pref_dir, "entry", ref_pref)
+        self._post(uid_pref, lots_pref, pref_dir, "entry", ref_pref)
         # 2) вторая нога — ord; при отказе откатываем первую
         try:
-            self._post(uid_ord, lots, ord_dir, "entry", ref_ord)
+            self._post(uid_ord, lots_ord, ord_dir, "entry", ref_ord)
         except Exception as e:  # noqa: BLE001
             unwind_dir = "SELL" if pref_dir == "BUY" else "BUY"
             try:
-                self._post(uid_pref, lots, unwind_dir, "unwind", ref_pref)
+                self._post(uid_pref, lots_pref, unwind_dir, "unwind", ref_pref)
             except Exception as ue:  # noqa: BLE001
                 raise St5ExecError(f"вход сорван И unwind не удался: {e} / {ue}") from e
             raise St5ExecError(f"вторая нога не залилась, первая откачена: {e}") from e
         return {"ok": True}
 
-    def close_pair(self, long_spread: bool, lots: int, ref_ord: float, ref_pref: float,
-                   op: str = "flat") -> dict:
-        """Закрыть пару (полностью или частично — lots). Обратные стороны входа."""
+    def close_pair(self, long_spread: bool, lots_ord: int, lots_pref: int,
+                   ref_ord: float, ref_pref: float, op: str = "flat") -> dict:
+        """Закрыть пару (полностью или частично). Обратные стороны входа, лоты ног разные."""
         uid_ord, uid_pref = self._uids()
         pref_dir = "SELL" if long_spread else "BUY"   # закрытие префа
         ord_dir = "BUY" if long_spread else "SELL"
-        self._post(uid_pref, lots, pref_dir, op, ref_pref)
-        self._post(uid_ord, lots, ord_dir, op, ref_ord)
+        self._post(uid_pref, lots_pref, pref_dir, op, ref_pref)
+        self._post(uid_ord, lots_ord, ord_dir, op, ref_ord)
         return {"ok": True}
 
     # ---------- reconciliation: реальные лоты ног на счёте ----------
