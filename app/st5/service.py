@@ -1079,14 +1079,30 @@ class St5Session:
             except Exception:  # noqa: BLE001  не смогли узнать — не блокируем (старое поведение)
                 free = None
             if free is not None and free < need:
-                fired = f"|z|={abs(p.entry_z):.2f}, гейты пройдены"
-                eng.position = None
-                self.log_missed(pid, p.entry_ts, fired,
-                                f"нет свободных средств у брокера (нужно ~{need:,.0f}₽, "
-                                f"свободно {free:,.0f}₽)")
-                self.log_event("info", f"{pid}: вход отклонён pre-trade (свободно {free:,.0f}₽ "
-                                       f"< нотионал {need:,.0f}₽)")
-                return
+                # АВТО-ДАУНСАЙЗ: входим тем числом юнитов, на которое средств хватает —
+                # лучше меньший размер, чем пропуск сигнала (механика по решению 03.07)
+                unit_notional = (ord_px * p.unit_ord + pref_px * p.unit_pref) * 1.05
+                fit = int(free // unit_notional) if unit_notional > 0 and p.units > 0 else 0
+                if fit >= 1:
+                    old_units = p.units
+                    p.units = fit
+                    p.lots = fit * p.unit_pref
+                    p.ord_lots = fit * p.unit_ord
+                    p.entry_lots = p.lots
+                    p.fees_rub = eng._legs_fee(p.ord_lots, p.lots)
+                    ord_lots = p.ord_lots
+                    need = (ord_px * ord_lots + pref_px * p.lots) * 1.05
+                    self.log_event("info", f"{pid}: вход урезан по свободным средствам "
+                                           f"{old_units}→{fit} юнитов (свободно {free:,.0f}₽)")
+                else:
+                    fired = f"|z|={abs(p.entry_z):.2f}, гейты пройдены"
+                    eng.position = None
+                    self.log_missed(pid, p.entry_ts, fired,
+                                    f"нет свободных средств у брокера даже на 1 юнит "
+                                    f"(юнит ~{unit_notional:,.0f}₽, свободно {free:,.0f}₽)")
+                    self.log_event("info", f"{pid}: вход отклонён pre-trade "
+                                           f"(свободно {free:,.0f}₽ < юнит {unit_notional:,.0f}₽)")
+                    return
             try:
                 long_spread = (p.state == St5State.LONG_SPREAD)
                 ex.open_pair(long_spread, ord_lots, p.lots, ord_px, pref_px)

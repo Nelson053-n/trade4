@@ -1541,3 +1541,28 @@ def test_pretrade_free_money_gate(monkeypatch):
     assert orders == []                               # ни одного ордера не ушло
     assert any("нет свободных средств" in m["reason"] for m in s.missed)
     St5Portfolio._go_cache = {}
+
+
+def test_pretrade_downsize_enters_with_fitting_units(monkeypatch):
+    """Средств не хватает на полный размер, но хватает на часть → вход УМЕНЬШЕННЫМ числом
+    юнитов (механика 03.07: входить пока денег хватает), а не отказ."""
+    from app.st5.service import ST5_PAIRS, St5Portfolio, St5Session
+    from app.st4 import tbank_sandbox as sb
+    s = _session_with_fake_executor()
+    St5Portfolio._go_cache = {pid: (1000.0, 1000.0) for pid in ST5_PAIRS}
+    eng = s.engines["sber"]
+    eng.base_lots = 2
+    eng._open(1700000000000, -3.0, 0.0, 1.0, 28000.0, 28100.0)   # высокий |z| → макс. тир
+    p = eng.position
+    assert p is not None and p.units >= 2                        # полный размер ≥2 юнитов
+    # юнит sber ≈ (28000+28100)×1.05 ≈ 58.9к; свободно 70к → влезает ровно 1 юнит
+    orders = []
+    s._fake_ex.open_pair = lambda ls, lo, lp, ro, rp: orders.append((lo, lp))
+    monkeypatch.setattr(s, "_make_executor", lambda pid: s._fake_ex)
+    monkeypatch.setattr(sb, "free_money_rub", lambda acc: 70_000.0)
+    s._on_engine_opened("sber", eng, 28000.0, 28100.0)
+    assert eng.position is not None
+    assert eng.position.units == 1                               # урезано до вмещающегося
+    assert orders == [(1, 1)]                                    # ордера ушли на 1+1 лот
+    assert any("урезан по свободным средствам" in e["message"] for e in s.events)
+    St5Portfolio._go_cache = {}
