@@ -154,7 +154,9 @@ class St5Portfolio:
 
     @classmethod
     def pair_leg_margins(cls, pid: str) -> tuple[float, float]:
-        """(ГО обычки, ГО префа) за 1 лот из ISS leg_margin. Кэшируется. (0,0) — недоступно."""
+        """(ГО обычки, ГО префа) за 1 лот — ТОЧНОЕ брокерское (GetFuturesMargin,
+        max(dlong,dshort) — сторона ноги на входе неизвестна, разница <4%), fallback ISS.
+        Кэшируется. (0,0) — недоступно."""
         if pid in cls._go_cache:
             cached = cls._go_cache[pid]
             if isinstance(cached, (int, float)):   # legacy-кэш суммой «за пару» — делим пополам
@@ -166,7 +168,17 @@ class St5Portfolio:
             from .service import ST5_PAIRS as _P
             c = _C4(); c.instruments.asset_ordinary = _P[pid][0]; c.instruments.asset_preferred = _P[pid][1]
             so, sp = _feed.resolve_legs(c)
-            m = (_feed.leg_margin(so.code), _feed.leg_margin(sp.code))
+            m = None
+            try:
+                from ..st4 import tbank_sandbox as _sb
+                if _sb.has_token():
+                    mo = _sb.futures_margin(_sb.find_future(so.code)["uid"])
+                    mp = _sb.futures_margin(_sb.find_future(sp.code)["uid"])
+                    m = (max(mo), max(mp))
+            except Exception:  # noqa: BLE001  брокер недоступен — ISS ниже
+                m = None
+            if m is None:
+                m = (_feed.leg_margin(so.code), _feed.leg_margin(sp.code))
         except Exception:  # noqa: BLE001
             m = (0.0, 0.0)
         if m[0] > 0 or m[1] > 0:
@@ -238,7 +250,8 @@ class St5Session:
         for pid, spec in ST5_PAIRS.items():
             pcfg = self._pair_cfg(pid)
             self.pair_cfgs[pid] = pcfg
-            self.engines[pid] = ST5Engine(pid, pcfg, base_lots=pcfg.execution.quantity_lots)
+            self.engines[pid] = ST5Engine(pid, pcfg, base_lots=pcfg.execution.quantity_lots,
+                                          half_spread_pts=pcfg.strategy.half_spread_pts)
         self.trades: list[dict] = []             # общий журнал портфеля (json-записи)
         self.history: dict[str, list] = {pid: [] for pid in ST5_PAIRS}   # история спреда по парам
         self.events: list[dict] = []
@@ -257,6 +270,10 @@ class St5Session:
         self._reconciled: set[str] = set()       # пары, по которым сверка со счётом уже сделана
         self.missed: list[dict] = []             # журнал УПУЩЕННЫХ входов (сигнал был, входа нет)
         self._missed_seen: dict[str, int] = {}   # pid -> ts последнего записанного пропуска (анти-спам)
+        # якорь сверки «журнал vs счёт»: {account_id, capital, net} на момент установки.
+        # gap = (капитал − anchor.capital) − (журнальный net + unrealized − anchor.net):
+        # отрицательный gap = скрытая стоимость исполнения (спред/слиппедж/чужие списания)
+        self.exec_anchor: dict | None = None
         # периодическая сверка ног в live (в дополнение к стартовой): только наблюдение/лог
         self._periodic_reconcile_every_s = 600   # раз в 10 мин (≈ раз в торговый бар)
         self._last_periodic_reconcile = 0.0      # monotonic последней периодической сверки
@@ -272,7 +289,7 @@ class St5Session:
     # ключевые параметры стратегии, которыми оперирует версионирование/калибровка
     OVERRIDE_KEYS = ("z_entry", "z_exit_full", "z_take_partial", "z_no_entry",
                      "z_stop", "half_life_stop_mult", "size_tiers",
-                     "rv_ratio_max", "hurst_max", "max_units")
+                     "rv_ratio_max", "hurst_max", "max_units", "half_spread_pts")
 
     def _pair_cfg(self, pid: str) -> St5Config:
         """Конфиг пары = базовый ST5 + per-pair оверрайды из ST5_PAIRS[pid][4] (код) +
@@ -302,6 +319,7 @@ class St5Session:
             pcfg = self._pair_cfg(pid)
             self.pair_cfgs[pid] = pcfg
             self.engines[pid].cfg = pcfg          # движок читает cfg.strategy каждый бар
+            self.engines[pid].half_spread = pcfg.strategy.half_spread_pts
         self.save_session()
         self.log_event("info", f"параметры стратегии применены: {targets}")
         return True, "ok"
@@ -365,6 +383,21 @@ class St5Session:
         if len(self.history[pid]) > HISTORY_LEN:
             del self.history[pid][0]
 
+    def _execution_gap(self) -> float | None:
+        """Разница «факт счёта − модельный журнал» с момента якоря (₽). Отрицательная =
+        скрытая стоимость исполнения (спред/слиппедж/внежурнальные филлы). None — нет якоря
+        или не sandbox/real (в paper капитал не с реального счёта, сверять нечего)."""
+        a = self.exec_anchor
+        if a is None or not self.state.get("sandbox_active"):
+            return None
+        if a.get("account_id") != self.cfg.connector.account_id:
+            return None
+        net = sum(t.get("net_pnl_rub", 0) for t in self.trades)
+        unreal = sum(e.unrealized_rub() for e in self.engines.values())
+        model_delta = (net + unreal) - a.get("net", 0.0)
+        fact_delta = self.portfolio.capital_rub - a.get("capital", 0.0)
+        return round(fact_delta - model_delta)
+
     # ---------- снимок для UI ----------
     def snapshot(self) -> dict:
         positions = []
@@ -401,6 +434,8 @@ class St5Session:
             "connector_mode": self.cfg.connector.mode,
             "account_id": self.cfg.connector.account_id or None,
             "capital_rub": round(self.portfolio.capital_rub, 0),
+            # сверка «журнал vs счёт»: сколько реально стоило исполнение с момента якоря
+            "execution_gap_rub": self._execution_gap(),
             "day_pnl_rub": round(self.portfolio.day_pnl_rub, 0),
             "net_pnl_rub": round(net, 0),
             "halted": self.portfolio.halted, "halt_reason": self.portfolio.halt_reason,
@@ -460,6 +495,7 @@ class St5Session:
                 "positions": {pid: (asdict(eng.position) if eng.position else None)
                               for pid, eng in self.engines.items()},
                 "missed": self.missed[-self.MISSED_LEN:],   # журнал упущенных входов
+                "exec_anchor": self.exec_anchor,            # якорь сверки журнал↔счёт
             }
             self._session_file.write_text(json.dumps(data, ensure_ascii=False, indent=2))
         except Exception:  # noqa: BLE001
@@ -508,6 +544,12 @@ class St5Session:
                 total = _q_to_float(total)
             if total and float(total) > 0:
                 self.portfolio.capital_rub = float(total)
+                # якорь сверки: новый счёт (или ещё не установлен) → фиксируем отправную точку
+                if (self.exec_anchor is None
+                        or self.exec_anchor.get("account_id") != acc):
+                    net = sum(t.get("net_pnl_rub", 0) for t in self.trades)
+                    self.exec_anchor = {"account_id": acc,
+                                        "capital": float(total), "net": net}
             # калибровка go_factor по РЕАЛЬНО заблокированному ГО (с хедж-скидкой биржи):
             # ISS INITIALMARGIN сильно занижает реальное ГО → риск-гейт считал бы заниженно.
             # src = _live (tbank_real) либо _sb (sandbox) — у обоих есть blocked_margin.
@@ -529,6 +571,7 @@ class St5Session:
             return False
         self.trades = data.get("trades", [])
         self.missed = list(data.get("missed") or [])
+        self.exec_anchor = data.get("exec_anchor") or None
         self.history = data.get("history", {pid: [] for pid in ST5_PAIRS})
         # day_pnl пересчитываем из журнала по СЕГОДНЯШНИМ сделкам (МСК), а не берём из файла:
         # копивший за всё время счётчик из старых версий совпадал с общим net (баг отображения).
@@ -988,10 +1031,14 @@ class St5Session:
         if sandbox and pid not in self._reconciled:
             self._reconcile_pair(pid, eng)
             self._reconciled.add(pid)
-        # ШАГ 3: живые бары (ts > last_ts) — реальное исполнение
+        # ШАГ 3: живые бары (ts > last_ts) — реальное исполнение. ts_local_min активирует
+        # временные no-entry окна (открытие/клиринг/у закрытия) — раньше в live они были
+        # инертны (вход 02.07 23:40 отбился биржей «not available» за 10 мин до закрытия);
+        # финальные бэктесты калиброваны С окнами — live теперь им соответствует.
         for ts, row in live_rows:
             pos_before = eng.position is not None
-            tr = eng.step(ts, float(row["price_a"]), float(row["price_b"]))
+            tlm = sched.msk_minute_dow(ts / 1000)[0]
+            tr = eng.step(ts, float(row["price_a"]), float(row["price_b"]), ts_local_min=tlm)
             self.last_live_ts[pid] = ts
             self.push_history(pid, ts)
             # движок ОТКРЫЛ позицию на этом живом баре → портфельный гейт + реальный ордер
@@ -1021,9 +1068,27 @@ class St5Session:
             return
         ex = self._make_executor(pid)
         if ex is not None:
+            # PRE-TRADE проверка свободных средств у брокера: sandbox отклоняет ордера
+            # по свободным деньгам ≈ ПОЛНОМУ НОТИОНАЛУ (инцидент 02.07 «Not enough balance»
+            # с обрывом ноги). Лучше чистый отказ ДО ордеров, чем сорванный unwind.
+            ord_lots = p.ord_lots if p.ord_lots > 0 else p.lots
+            need = (ord_px * ord_lots + pref_px * p.lots) * 1.05
+            try:
+                from ..st4 import tbank_sandbox as _sb
+                free = _sb.free_money_rub(self.cfg.connector.account_id)
+            except Exception:  # noqa: BLE001  не смогли узнать — не блокируем (старое поведение)
+                free = None
+            if free is not None and free < need:
+                fired = f"|z|={abs(p.entry_z):.2f}, гейты пройдены"
+                eng.position = None
+                self.log_missed(pid, p.entry_ts, fired,
+                                f"нет свободных средств у брокера (нужно ~{need:,.0f}₽, "
+                                f"свободно {free:,.0f}₽)")
+                self.log_event("info", f"{pid}: вход отклонён pre-trade (свободно {free:,.0f}₽ "
+                                       f"< нотионал {need:,.0f}₽)")
+                return
             try:
                 long_spread = (p.state == St5State.LONG_SPREAD)
-                ord_lots = p.ord_lots if p.ord_lots > 0 else p.lots
                 ex.open_pair(long_spread, ord_lots, p.lots, ord_px, pref_px)
                 self.portfolio.on_success()
             except Exception as e:  # noqa: BLE001

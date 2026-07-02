@@ -570,6 +570,7 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
           <div class="ro"><label>P&L день</label><div class="v" id="s5-ro-daypnl">—</div></div>
           <div class="ro"><label>позиций</label><div class="v" id="s5-ro-positions">0 / 3</div></div>
           <div class="ro"><label>net P&L</label><div class="v" id="s5-ro-net">—</div></div>
+          <div class="ro" title="факт счёта минус модельный журнал с якоря: минус = скрытая стоимость исполнения (спред/слиппедж/внежурнальные филлы)"><label>исполнение ±</label><div class="v" id="s5-ro-execgap">—</div></div>
         </div>
       </div>
       <div class="card">
@@ -1773,6 +1774,7 @@ function s5Render(s){
   $('s5-ro-daypnl').textContent = s5money(s.day_pnl_rub); $('s5-ro-daypnl').style.color=s.day_pnl_rub>=0?'var(--signal)':'var(--loss)';
   $('s5-ro-positions').textContent = `${s.open_positions} / ${s.max_open_positions}`;
   $('s5-ro-net').textContent = s5money(s.net_pnl_rub);
+  const eg=$('s5-ro-execgap'); if(eg){ eg.textContent = s.execution_gap_rub!=null ? s5money(s.execution_gap_rub) : '—'; eg.style.color = (s.execution_gap_rub??0) < -500 ? 'var(--loss)' : 'var(--ink)'; }
   // пары + фильтры
   const tb=$('s5-pairs').querySelector('tbody'); tb.innerHTML='';
   (s.pairs||[]).forEach(p=>{

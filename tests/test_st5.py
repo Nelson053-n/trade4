@@ -1502,3 +1502,42 @@ def test_log_missed_antispam_and_snapshot():
     snap = s.snapshot()
     assert len(snap["missed"]) == 2
     assert snap["missed"][0]["reason"].startswith("портфельный гейт")
+
+
+# ============================ сверка «журнал vs счёт» + pre-trade средства ============================
+
+def test_execution_gap_math():
+    """gap = (Δкапитала счёта) − (Δмодельного net+unrealized) от якоря; None без якоря/в paper."""
+    from app.st5.service import St5Session
+    s = St5Session()
+    assert s._execution_gap() is None                 # нет якоря
+    s.state["sandbox_active"] = True
+    s.cfg.connector.account_id = "acc"
+    s.exec_anchor = {"account_id": "acc", "capital": 1_000_000.0, "net": 0.0}
+    s.portfolio.capital_rub = 999_448.0
+    s.trades = [{"net_pnl_rub": 584.0}]
+    # модель +584, факт −552 → gap = −1136 (стоимость исполнения)
+    assert s._execution_gap() == -1136
+    s.cfg.connector.account_id = "other"              # смена счёта → якорь невалиден
+    assert s._execution_gap() is None
+
+
+def test_pretrade_free_money_gate(monkeypatch):
+    """Недостаток свободных средств у брокера → чистый отказ ДО ордеров (missed), без обрыва
+    ноги (регресс: инцидент 02.07 «Not enough balance» с голой ногой SGU6)."""
+    from app.st5.service import ST5_PAIRS, St5Portfolio, St5Session
+    from app.st4 import tbank_sandbox as sb
+    s = _session_with_fake_executor()
+    St5Portfolio._go_cache = {pid: (1000.0, 1000.0) for pid in ST5_PAIRS}
+    eng = s.engines["sber"]
+    eng._open(1700000000000, -2.0, 0.0, 1.0, 28000.0, 28100.0)   # движок открыл кандидата
+    assert eng.position is not None
+    orders = []
+    s._fake_ex.open_pair = lambda *a: orders.append(a)
+    monkeypatch.setattr(s, "_make_executor", lambda pid: s._fake_ex)
+    monkeypatch.setattr(sb, "free_money_rub", lambda acc: 10_000.0)   # свободно мало
+    s._on_engine_opened("sber", eng, 28000.0, 28100.0)
+    assert eng.position is None                       # вход откачен ЧИСТО
+    assert orders == []                               # ни одного ордера не ушло
+    assert any("нет свободных средств" in m["reason"] for m in s.missed)
+    St5Portfolio._go_cache = {}

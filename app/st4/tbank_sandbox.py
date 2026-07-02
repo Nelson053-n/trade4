@@ -366,6 +366,22 @@ def blocked_margin(account_id: str) -> float:
     return max(0.0, blocked)
 
 
+def futures_margin(instrument_uid: str) -> tuple[float, float]:
+    """(ГО на покупку, ГО на продажу) фьючерса — ТОЧНЫЕ брокерские dlong/dshort
+    (InstrumentsService.GetFuturesMargin), а не ISS-оценка."""
+    m = _call(_INSTRUMENTS, "GetFuturesMargin", {"instrumentId": instrument_uid})
+    return _q_to_float(m.get("initialMarginOnBuy")), _q_to_float(m.get("initialMarginOnSell"))
+
+
+def free_money_rub(account_id: str) -> float:
+    """Свободные (незаблокированные) рубли на счёте — для pre-trade проверки входа."""
+    pos = positions(account_id)
+    for m in pos.get("money", []):
+        if m.get("currency") == "rub":
+            return _q_to_float(m)
+    return 0.0
+
+
 def close_account(account_id: str) -> None:
     _call(_SANDBOX, "CloseSandboxAccount", {"accountId": account_id},
           token=_account_token(account_id))
