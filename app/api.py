@@ -93,6 +93,10 @@ ST4S: dict[str, St4Session] = {p: St4Session(p) for p in ST4_PAIRS}
 # ST5 — ОДНА портфельная сессия на весь портфель (до 3 позиций на разные пары)
 ST5 = St5Session()
 
+# ST6 — фандинг-арбитраж вечных фьючерсов (дневная гранулярность, paper)
+from .st6.service import ST6_PAIRS, St6Session  # noqa: E402
+ST6 = St6Session()
+
 _server_started = 0.0
 
 
@@ -235,6 +239,9 @@ async def lifespan(app: FastAPI):
     ST5.load_session()                                  # портфельная сессия st5
     if ST5.state.pop("resume_live", False):
         asyncio.create_task(_st5_autoresume())          # автостарт: ST5 live шёл до рестарта
+    ST6.load_session()                                  # st6 — фандинг-арбитраж (дневной)
+    if ST6.state.get("live_intent"):
+        ST6.start_live()
     _watchdog_task = asyncio.create_task(ST5.watchdog_loop())  # самовосстановление зависшего live-цикла
     _auto_bt_task = asyncio.create_task(_auto_backtest_loop())
     yield
@@ -1237,6 +1244,41 @@ async def st5_strategies_backtest(payload: dict | None = None):
     params = (payload or {}).get("params") or ST5.capture_current()
     bt = await asyncio.to_thread(_st5_backtest_overrides, params, (payload or {}).get("days", 90))
     return _clean({"params": params, "backtest": bt})
+
+
+# ============================================================================
+# st6 — фандинг-арбитраж вечных фьючерсов (шорт перп + лонг квартальник, дневной)
+# ============================================================================
+
+@app.get("/st6/state")
+def st6_state():
+    return _clean(ST6.snapshot())
+
+
+@app.get("/st6/edge")
+def st6_edge():
+    """Текущий сигнал по парам: фандинг/базис/edge (обновляет из ISS, ~2-3 сек на пару)."""
+    return _clean({"pairs": ST6.tick_all()})
+
+
+@app.post("/st6/control/start")
+def st6_start():
+    ST6.start_live()
+    return {"ok": True, "live": ST6.state["live"]}
+
+
+@app.post("/st6/control/stop")
+def st6_stop():
+    ST6.stop_live()
+    return {"ok": True}
+
+
+@app.post("/st6/control/trading")
+def st6_trading(on: bool = True):
+    """Гейт НОВЫХ входов st6 (выходы/роллы работают всегда)."""
+    ST6.cfg.trading_enabled = on
+    ST6.save_session()
+    return {"ok": True, "trading_enabled": on}
 
 
 @app.post("/st5/connector")
