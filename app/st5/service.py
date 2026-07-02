@@ -38,10 +38,12 @@ ST5_PAIRS: dict[str, tuple] = {
     # Тиры сайзинга ОСТАВЛЕНЫ от 1.25 (для sngr/tatn нижние тиры покрывают вход от их z_entry) —
     # так победило в свипе; z_stop=3.5 и rv_ratio_max=2.2 подтверждены и на честной метрике.
     # Нечувствительны: kalman_delta, z_ema_span(150), adf_p_enter, half_life_stop_mult.
+    # sber: тиры 1/2/3 (свип тиров 02.07: монотонно лучше 1/1.5/2 на +21% при том же
+    # худшем сегменте и maxDD≤0.1%; спред sber без хвостов — агрессия на дальних z окупается).
     "sber": ("SBRF", "SBPR", "SBER", "Сбербанк",
              {"z_entry": 1.25, "z_take_partial": 0.0, "z_exit_full": 0.25,
               "z_stop": 3.5, "rv_ratio_max": 2.2,
-              "size_tiers": [(1.25, 1.75, 1.0), (1.75, 2.25, 1.5), (2.25, 4.0, 2.0)]}),
+              "size_tiers": [(1.25, 1.75, 1.0), (1.75, 2.25, 2.0), (2.25, 4.0, 3.0)]}),
     "sngr": ("SNGR", "SNGP", "SNGR", "Сургутнефтегаз",
              {"z_entry": 1.5, "z_take_partial": 1.0, "z_exit_full": 0.5,
               "z_stop": 3.5, "rv_ratio_max": 2.2, "hurst_max": 0.70,
