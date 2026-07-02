@@ -251,6 +251,10 @@ class St5Session:
         self._uid_cache: dict[str, tuple] = {}   # pid -> (uid_ord, uid_pref): кэш против 429 T-Bank
         self._legs_cache: dict[str, tuple] = {}  # pid -> (spec_ord, spec_pref) от resolve_legs
         self._reconciled: set[str] = set()       # пары, по которым сверка со счётом уже сделана
+        # периодическая сверка ног в live (в дополнение к стартовой): только наблюдение/лог
+        self._periodic_reconcile_every_s = 600   # раз в 10 мин (≈ раз в торговый бар)
+        self._last_periodic_reconcile = 0.0      # monotonic последней периодической сверки
+        self._reconcile_sig: dict[str, tuple] = {}   # pid -> подпись последней сверки (анти-спам)
         # Telegram-уведомления (только исходящие). Конфиг читается лениво из cfg.notify.
         self.notifier = tg.TelegramNotifier(
             cfg_cb=lambda: self.cfg.notify,
@@ -698,6 +702,48 @@ class St5Session:
         except Exception as e:  # noqa: BLE001
             self.log_event("warn", f"reconciliation {pid} пропущена: {e}")
 
+    async def _periodic_reconcile(self) -> None:
+        """Периодическая сверка ног движок↔счёт в live (стартовый reconcile ловит только рестарт).
+
+        ТОЛЬКО наблюдение: логируем расхождения (частичный филл, внешнее вмешательство), счёт
+        НЕ трогаем и пару НЕ халтим — на общем sandbox-счёте живут чужие движки с теми же
+        инструментами, их лоты дают легитимные «расхождения» (см. память по счёту 2fd74141).
+        Анти-спам: сигнатура (ноги счёта + позиция движка) — лог только при её изменении."""
+        if not self.state.get("sandbox_active"):
+            return
+        now = time.monotonic()
+        if now - self._last_periodic_reconcile < self._periodic_reconcile_every_s:
+            return
+        self._last_periodic_reconcile = now
+        for pid, eng in self.engines.items():
+            if not self.enabled_pairs.get(pid, True) or pid not in self._reconciled:
+                continue   # до стартовой сверки периодическую не делаем (движок ещё не прогрет)
+            try:
+                if not self._ensure_uid_cache(pid):
+                    continue
+                ex = self._make_executor(pid)
+                if ex is None:
+                    continue
+                bal_ord, bal_pref = await asyncio.to_thread(ex.broker_lots)
+            except Exception:  # noqa: BLE001  сверка не должна ронять live
+                continue
+            p = eng.position
+            sig = (bal_ord, bal_pref,
+                   (p.state.value, p.lots, p.ord_lots) if p is not None else None)
+            if self._reconcile_sig.get(pid) == sig:
+                continue
+            self._reconcile_sig[pid] = sig
+            if p is not None and not self._position_matches_lots(eng, bal_ord, bal_pref):
+                msg = (f"reconcile {pid}: ноги разошлись — движок {p.state.value} "
+                       f"преф {p.lots}/обычка {p.ord_lots or p.lots}, счёт ord={bal_ord} "
+                       f"pref={bal_pref} (чужой движок на общем счёте или недолив) — наблюдаю")
+                self.log_event("warn", msg)
+                if self.cfg.notify.notify_errors:
+                    self._notify(f"⚠️ <b>Сверка ног</b> · {tg.esc(ST5_PAIRS[pid][3])}\n{tg.esc(msg)}")
+            elif p is None and (bal_ord or bal_pref):
+                self.log_event("info", f"reconcile {pid}: движок flat, на счёте ord={bal_ord} "
+                                       f"pref={bal_pref} (возможно чужой движок общего счёта)")
+
     # ---------- главный live-цикл портфеля ----------
     async def run_live(self) -> None:
         """Live-цикл: тянет свечи по всем парам, прогоняет движки, гейтит входы портфельным
@@ -723,6 +769,7 @@ class St5Session:
                         await self._step_pair(pid, eng, warmup_limit, replayed)
                         await asyncio.sleep(1.0)   # throttle между парами — против 429 T-Bank
                 replayed = True
+                await self._periodic_reconcile()   # сверка ног движок↔счёт (наблюдение, раз в N мин)
                 self.save_session()
                 self._live_hb = time.monotonic()   # проход успешно завершён → watchdog спокоен
             except Exception as e:  # noqa: BLE001

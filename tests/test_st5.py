@@ -1250,3 +1250,114 @@ def test_pos_risk_by_actual_legs():
     risk = St5Portfolio._pos_risk("tatn", eng)
     assert risk == 6000.0 * 1 + 600.0 * 10               # 12000, а не (6000+600)×10
     St5Portfolio._go_cache = {}
+
+
+# ============================ этап 3: сверка executed_lots + периодический reconcile ============================
+
+def _ex_with_fills(fills):
+    """Исполнитель с моком _post: fills — очередь ответов {'lotsExecuted': N} либо Exception.
+    Возвращает (executor, calls) — calls накапливает (uid, lots, direction, op)."""
+    from app.st5.executor import St5PairExecutor
+    ex = St5PairExecutor("acc", "SBRF", "SBPR", real=False)
+    ex._uid_ord, ex._uid_pref = "uid_o", "uid_p"
+    calls = []
+    queue = list(fills)
+
+    def _post(uid, lots, direction, op, ref):
+        calls.append((uid, lots, direction, op))
+        r = queue.pop(0) if queue else {}
+        if isinstance(r, Exception):
+            raise r
+        return r
+    ex._post = _post
+    return ex, calls
+
+
+def test_partial_fill_first_leg_unwinds_executed():
+    """Частичный филл ПЕРВОЙ ноги (преф): откатываем РЕАЛЬНО налитое (7, не 10), вход отменён."""
+    from app.st5.executor import St5ExecError
+    ex, calls = _ex_with_fills([{"lotsExecuted": 7}, {}])
+    try:
+        ex.open_pair(True, 1, 10, 49000.0, 4700.0)
+        assert False, "должен был поднять St5ExecError"
+    except St5ExecError as e:
+        assert "7/10" in str(e)
+    assert calls[0] == ("uid_p", 10, "BUY", "entry")
+    assert calls[1] == ("uid_p", 7, "SELL", "unwind")   # откат именно 7 налитых
+    assert len(calls) == 2                              # до обычки не дошли
+
+
+def test_partial_fill_second_leg_unwinds_both():
+    """Частичный филл ВТОРОЙ ноги (обычка): откатываем налитую обычку И весь преф."""
+    from app.st5.executor import St5ExecError
+    ex, calls = _ex_with_fills([{"lotsExecuted": 10}, {"lotsExecuted": 2}, {}, {}])
+    try:
+        ex.open_pair(True, 5, 10, 49000.0, 4700.0)
+        assert False
+    except St5ExecError as e:
+        assert "2/5" in str(e)
+    ops = [(c[0], c[1], c[3]) for c in calls]
+    assert ("uid_o", 2, "unwind") in ops                # откат 2 налитых обычек
+    assert ("uid_p", 10, "unwind") in ops               # откат всего префа
+
+
+def test_full_fill_and_missing_field_ok():
+    """Полный филл и ответ БЕЗ поля executed (совместимость) → вход проходит без отката."""
+    ex, calls = _ex_with_fills([{"lotsExecuted": 10}, {}])   # второй ответ без поля
+    assert ex.open_pair(True, 1, 10, 49000.0, 4700.0) == {"ok": True}
+    assert len(calls) == 2 and all(c[3] == "entry" for c in calls)
+
+
+def test_close_pair_underfill_raises_no_unwind():
+    """Недолив ЗАКРЫВАЮЩЕГО ордера: ошибку поднимаем (пара захалтится), но обратных ордеров
+    НЕ шлём (закрытие = снижение риска, откат поднял бы риск обратно)."""
+    from app.st5.executor import St5ExecError
+    ex, calls = _ex_with_fills([{"lotsExecuted": 6}, {"lotsExecuted": 1}])
+    try:
+        ex.close_pair(True, 1, 10, 49000.0, 4700.0)
+        assert False
+    except St5ExecError as e:
+        assert "6/10" in str(e)
+    assert len(calls) == 2                              # оба закрывающих, никаких unwind
+    assert all(c[3] == "flat" for c in calls)
+
+
+def test_periodic_reconcile_logs_mismatch_once(monkeypatch):
+    """Периодическая сверка: расхождение ног логируется ОДИН раз на сигнатуру (анти-спам),
+    счёт не трогаем, позицию движка не сносим."""
+    import asyncio
+    from app.st5.models import St5Position, St5State
+    s = _session_with_fake_executor()
+    s._reconciled.add("sber")
+    s._periodic_reconcile_every_s = 0                    # без ожидания в тесте
+    eng = s.engines["sber"]
+    eng.position = St5Position(
+        pair="sber", state=St5State.LONG_SPREAD, entry_ts=1, entry_z=-2.0, entry_spread=0.0,
+        entry_beta=1.0, lots=1, entry_lots=1, ord_entry=100.0, pref_entry=101.0,
+        half_life=float("inf"), ord_lots=1, units=1)
+    s._fake_ex.broker_lots = lambda: (0, 0)              # счёт пуст, движок держит позицию
+    monkeypatch.setattr(s, "_make_executor", lambda pid: s._fake_ex)
+    monkeypatch.setattr(s, "_ensure_uid_cache", lambda pid: pid == "sber")
+    asyncio.run(s._periodic_reconcile())
+    warns = [e for e in s.events if "ноги разошлись" in e["message"]]
+    assert len(warns) == 1
+    assert eng.position is not None                      # позицию не тронули
+    s._last_periodic_reconcile = 0.0
+    asyncio.run(s._periodic_reconcile())                 # та же сигнатура → без дубля
+    warns = [e for e in s.events if "ноги разошлись" in e["message"]]
+    assert len(warns) == 1
+
+
+def test_periodic_reconcile_flat_foreign_legs_info(monkeypatch):
+    """Движок flat, на счёте чужие ноги (общий sandbox-счёт) → info-лог, без warn/действий."""
+    import asyncio
+    s = _session_with_fake_executor()
+    s._reconciled.add("sber")
+    s._periodic_reconcile_every_s = 0
+    s.engines["sber"].position = None
+    s._fake_ex.broker_lots = lambda: (3, -3)
+    monkeypatch.setattr(s, "_make_executor", lambda pid: s._fake_ex)
+    monkeypatch.setattr(s, "_ensure_uid_cache", lambda pid: pid == "sber")
+    asyncio.run(s._periodic_reconcile())
+    infos = [e for e in s.events if "движок flat" in e["message"]]
+    assert len(infos) == 1 and infos[0]["kind"] == "info"

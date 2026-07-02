@@ -111,38 +111,87 @@ class St5PairExecutor:
             self.audit_cb(audit)
         return resp
 
+    @staticmethod
+    def _filled(resp: dict, requested: int) -> int:
+        """Фактически исполненные лоты из ответа брокера. Нет поля (paper/старый формат) →
+        считаем полный филл (совместимость): маркет-ордер без ответа о лотах не проверить."""
+        v = resp.get("lotsExecuted") or resp.get("executedLots")
+        if v is None:
+            return requested
+        try:
+            return int(float(v))
+        except (TypeError, ValueError):
+            return requested
+
     def open_pair(self, long_spread: bool, lots_ord: int, lots_pref: int,
                   ref_ord: float, ref_pref: float) -> dict:
         """Открыть пару атомарно. long_spread: buy pref + sell ord; иначе наоборот.
         Лоты ног РАЗНЫЕ (β-сайзинг: lots_ord/lots_pref ≈ β).
 
-        Менее ликвидную ногу (pref) первой; при отказе второй — unwind первой.
+        Менее ликвидную ногу (pref) первой; при отказе/частичном филле любой ноги —
+        unwind РЕАЛЬНО налитого (сверка executed_lots, а не «поверили запросу»).
         """
         uid_ord, uid_pref = self._uids()
         pref_dir = "BUY" if long_spread else "SELL"
         ord_dir = "SELL" if long_spread else "BUY"
+        un_pref = "SELL" if pref_dir == "BUY" else "BUY"
+        un_ord = "SELL" if ord_dir == "BUY" else "BUY"
         # 1) первая нога — pref (менее ликвидная)
-        self._post(uid_pref, lots_pref, pref_dir, "entry", ref_pref)
-        # 2) вторая нога — ord; при отказе откатываем первую
-        try:
-            self._post(uid_ord, lots_ord, ord_dir, "entry", ref_ord)
-        except Exception as e:  # noqa: BLE001
-            unwind_dir = "SELL" if pref_dir == "BUY" else "BUY"
+        got_pref = self._filled(self._post(uid_pref, lots_pref, pref_dir, "entry", ref_pref),
+                                lots_pref)
+        if got_pref != lots_pref:
+            # частичный филл первой ноги: откатываем то, что реально налилось, вход отменяем
             try:
-                self._post(uid_pref, lots_pref, unwind_dir, "unwind", ref_pref)
+                if got_pref > 0:
+                    self._post(uid_pref, got_pref, un_pref, "unwind", ref_pref)
+            except Exception as ue:  # noqa: BLE001
+                raise St5ExecError(f"частичный филл префа {got_pref}/{lots_pref} И unwind "
+                                   f"не удался: {ue}") from ue
+            raise St5ExecError(f"частичный филл префа {got_pref}/{lots_pref} — "
+                               f"вход отменён, налитое откачено")
+        # 2) вторая нога — ord; при отказе/частичном филле откатываем всё налитое
+        try:
+            got_ord = self._filled(self._post(uid_ord, lots_ord, ord_dir, "entry", ref_ord),
+                                   lots_ord)
+        except Exception as e:  # noqa: BLE001
+            try:
+                self._post(uid_pref, lots_pref, un_pref, "unwind", ref_pref)
             except Exception as ue:  # noqa: BLE001
                 raise St5ExecError(f"вход сорван И unwind не удался: {e} / {ue}") from e
             raise St5ExecError(f"вторая нога не залилась, первая откачена: {e}") from e
+        if got_ord != lots_ord:
+            errs = []
+            try:
+                if got_ord > 0:
+                    self._post(uid_ord, got_ord, un_ord, "unwind", ref_ord)
+            except Exception as ue:  # noqa: BLE001
+                errs.append(f"обычка: {ue}")
+            try:
+                self._post(uid_pref, lots_pref, un_pref, "unwind", ref_pref)
+            except Exception as ue:  # noqa: BLE001
+                errs.append(f"преф: {ue}")
+            if errs:
+                raise St5ExecError(f"частичный филл обычки {got_ord}/{lots_ord} И unwind "
+                                   f"не удался: {'; '.join(errs)}")
+            raise St5ExecError(f"частичный филл обычки {got_ord}/{lots_ord} — "
+                               f"вход откачен целиком")
         return {"ok": True}
 
     def close_pair(self, long_spread: bool, lots_ord: int, lots_pref: int,
                    ref_ord: float, ref_pref: float, op: str = "flat") -> dict:
-        """Закрыть пару (полностью или частично). Обратные стороны входа, лоты ног разные."""
+        """Закрыть пару (полностью или частично). Обратные стороны входа, лоты ног разные.
+
+        Сверка executed_lots: недолив закрывающего ордера НЕ откатываем (закрытие = снижение
+        риска, обратный ордер его снова поднял бы) — поднимаем ошибку, caller халтит пару,
+        остаток на счёте ловит периодический reconcile."""
         uid_ord, uid_pref = self._uids()
         pref_dir = "SELL" if long_spread else "BUY"   # закрытие префа
         ord_dir = "BUY" if long_spread else "SELL"
-        self._post(uid_pref, lots_pref, pref_dir, op, ref_pref)
-        self._post(uid_ord, lots_ord, ord_dir, op, ref_ord)
+        got_pref = self._filled(self._post(uid_pref, lots_pref, pref_dir, op, ref_pref), lots_pref)
+        got_ord = self._filled(self._post(uid_ord, lots_ord, ord_dir, op, ref_ord), lots_ord)
+        if got_pref != lots_pref or got_ord != lots_ord:
+            raise St5ExecError(f"закрытие недолилось: преф {got_pref}/{lots_pref}, "
+                               f"обычка {got_ord}/{lots_ord} — остаток на счёте, нужен разбор")
         return {"ok": True}
 
     # ---------- reconciliation: реальные лоты ног на счёте ----------
