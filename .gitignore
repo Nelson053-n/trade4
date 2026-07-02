@@ -13,6 +13,7 @@ dist/
 session_state_4*.json
 session_state_5*.json
 session_state_6*.json
+session_state_7*.json
 
 # токен T-Bank (секрет, НИКОГДА не коммитить)
 .tbank_token

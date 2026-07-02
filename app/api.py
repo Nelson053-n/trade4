@@ -97,6 +97,10 @@ ST5 = St5Session()
 from .st6.service import ST6_PAIRS, St6Session  # noqa: E402
 ST6 = St6Session()
 
+# ST7 — «фандинг-давление»: полухеджированный шорт вечного при перегретом фандинге
+from .st7.service import ST7_PAIRS, St7Session  # noqa: E402
+ST7 = St7Session()
+
 _server_started = 0.0
 
 
@@ -242,6 +246,9 @@ async def lifespan(app: FastAPI):
     ST6.load_session()                                  # st6 — фандинг-арбитраж (дневной)
     if ST6.state.get("live_intent"):
         ST6.start_live()
+    ST7.load_session()                                  # st7 — фандинг-давление (дневной)
+    if ST7.state.get("live_intent"):
+        ST7.start_live()
     _watchdog_task = asyncio.create_task(ST5.watchdog_loop())  # самовосстановление зависшего live-цикла
     _auto_bt_task = asyncio.create_task(_auto_backtest_loop())
     yield
@@ -1349,6 +1356,97 @@ def st6_connector(payload: dict):
         _sb.set_account_token(ST6.cfg.account_id, str(payload["account_token"]).strip())
     ST6.save_session()
     return {"ok": True, "mode": mode, "account_id": ST6.cfg.account_id or None}
+
+
+# ============================================================================
+# st7 — «фандинг-давление»: полухеджированный шорт вечного (дневной)
+# ============================================================================
+
+@app.get("/st7/state")
+def st7_state():
+    return _clean(ST7.snapshot())
+
+
+@app.get("/st7/signals")
+def st7_signals():
+    """Текущий сигнал по парам: трейл-фандинг vs пороги (обновляет из ISS)."""
+    return _clean({"pairs": ST7.tick_all()})
+
+
+@app.post("/st7/control/start")
+def st7_start():
+    ST7.start_live()
+    return {"ok": True, "live": ST7.state["live"]}
+
+
+@app.post("/st7/control/stop")
+def st7_stop():
+    ST7.stop_live()
+    return {"ok": True}
+
+
+@app.post("/st7/control/trading")
+def st7_trading(on: bool = True):
+    ST7.cfg.trading_enabled = on
+    ST7.save_session()
+    return {"ok": True, "trading_enabled": on}
+
+
+@app.post("/st7/config")
+def st7_set_config(payload: dict):
+    """Параметры st7 (пороги фандинга/трейл/ролл/юниты). Гейт по открытым позициям."""
+    if any(e.position is not None for e in ST7.engines.values()):
+        raise HTTPException(409, "смена параметров: закрой позиции st7")
+    s = ST7.cfg.strategy
+
+    def _num(key, lo, hi, cur):
+        if key not in payload or payload[key] is None:
+            return cur
+        try:
+            v = float(payload[key])
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"{key}: не число")
+        if not (lo <= v <= hi):
+            raise HTTPException(400, f"{key}: вне [{lo}, {hi}]")
+        return v
+
+    s.fund_enter_pp = _num("fund_enter_pp", 10.0, 100.0, s.fund_enter_pp)
+    s.fund_exit_pp = _num("fund_exit_pp", 0.0, 90.0, s.fund_exit_pp)
+    s.basis_sane_pp = _num("basis_sane_pp", 5.0, 100.0, s.basis_sane_pp)
+    s.fund_trail_days = int(_num("fund_trail_days", 1, 20, s.fund_trail_days))
+    s.roll_days_before = int(_num("roll_days_before", 1, 10, s.roll_days_before))
+    s.units = int(_num("units", 1, 20, s.units))
+    s.fee_per_lot = _num("fee_per_lot", 0.0, 50.0, s.fee_per_lot)
+    ST7.save_session()
+    return {"ok": True, "strategy": s.model_dump()}
+
+
+@app.post("/st7/pair-enabled")
+def st7_pair_enabled(payload: dict):
+    pid = payload.get("pair")
+    if pid not in ST7_PAIRS:
+        raise HTTPException(400, "pair: " + " | ".join(ST7_PAIRS))
+    ST7.enabled_pairs[pid] = bool(payload.get("enabled", True))
+    ST7.save_session()
+    return {"ok": True, "enabled_pairs": ST7.enabled_pairs}
+
+
+@app.post("/st7/connector")
+def st7_connector(payload: dict):
+    """paper | tbank_sandbox (+account_id, +account_token). Гейт по открытым позициям."""
+    if any(e.position is not None for e in ST7.engines.values()):
+        raise HTTPException(409, "смена коннектора: закрой позиции st7")
+    mode = payload.get("mode")
+    if mode not in ("paper", "tbank_sandbox"):
+        raise HTTPException(400, "mode: paper | tbank_sandbox")
+    from .st4 import tbank_sandbox as _sb
+    ST7.cfg.mode = mode
+    if "account_id" in payload:
+        ST7.cfg.account_id = str(payload["account_id"]).strip()
+    if payload.get("account_token") and ST7.cfg.account_id:
+        _sb.set_account_token(ST7.cfg.account_id, str(payload["account_token"]).strip())
+    ST7.save_session()
+    return {"ok": True, "mode": mode, "account_id": ST7.cfg.account_id or None}
 
 
 @app.post("/st5/connector")

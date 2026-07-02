@@ -286,6 +286,7 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
   <button class="strat-tab on" data-strat="st4" style="background:var(--chart-line);color:#fff;border:1px solid var(--chart-line);border-radius:8px 8px 0 0;padding:8px 18px;cursor:pointer;font:inherit;font-weight:600">ST4 · спред-арбитраж</button>
   <button class="strat-tab" data-strat="st5" style="background:var(--panel);color:var(--ink-dim);border:1px solid var(--line);border-bottom:none;border-radius:8px 8px 0 0;padding:8px 18px;cursor:pointer;font:inherit">ST5 · statarb (β/коинтеграция)</button>
   <button class="strat-tab" data-strat="st6" style="background:var(--panel);color:var(--ink-dim);border:1px solid var(--line);border-bottom:none;border-radius:8px 8px 0 0;padding:8px 18px;cursor:pointer;font:inherit">ST6 · фандинг-арбитраж</button>
+  <button class="strat-tab" data-strat="st7" style="background:var(--panel);color:var(--ink-dim);border:1px solid var(--line);border-bottom:none;border-radius:8px 8px 0 0;padding:8px 18px;cursor:pointer;font:inherit">ST7 · фандинг-давление</button>
 </div>
 
 <div id="tab-st4">
@@ -843,6 +844,71 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
   </div>
   </div>
 </div><!-- /tab-st6 -->
+
+<div id="tab-st7" hidden>
+  <div class="sessbar" style="margin-top:8px">
+    <span class="sb-dot" id="s7-dot"></span>
+    <span class="sb-state" id="s7-state">ST7 остановлен</span>
+    <span class="sb-count" id="s7-mode"></span>
+    <span style="flex:1"></span>
+    <span class="sb-count" id="s7-net"></span>
+  </div>
+  <div class="wrap">
+  <div class="grid">
+    <div>
+      <div class="card">
+        <h2>Сигнал давления <span class="em">3д-фандинг vs пороги входа/выхода · полухедж 2:1</span>
+          <button id="s7-refresh" style="float:right;font:inherit;font-size:11px;padding:3px 10px;cursor:pointer;background:var(--panel);color:var(--ink-dim);border:1px solid var(--line);border-radius:6px">обновить из ISS</button></h2>
+        <table id="s7-signals"><thead><tr><th>торг.</th><th>пара</th><th>фандинг 3д</th><th>вход&gt;</th><th>выход&lt;</th><th>базис</th><th>ГО юнита</th><th>фандинг ₽/д</th><th>позиция</th></tr></thead><tbody></tbody></table>
+        <div style="margin-top:8px;font-size:11px;color:var(--ink-dim)">бэктест (вся история перпов, движок): imoexf +207,9к₽/юнит за 2.6 года (maxDD 10.2% нотионала), gazpf +10,1к₽ за 1.75 года; все годы в плюсе</div>
+      </div>
+      <div class="card">
+        <h2>Открытые позиции давления</h2>
+        <table id="s7-pos"><thead><tr><th>пара</th><th>ноги</th><th>вход</th><th>фандинг входа</th><th>фандинг накоплен</th><th>роллов</th><th>unrealized</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="card">
+        <h2>Журнал сделок</h2>
+        <table id="s7-trades"><thead><tr><th>период</th><th>пара</th><th>дней</th><th>фандинг in→out</th><th>ноги</th><th>фандинг</th><th>комиссии</th><th>net</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="card">
+        <h2>Упущенные входы <span class="em">сигнал был — входа нет, с причиной</span></h2>
+        <table id="s7-missed"><thead><tr><th>день</th><th>пара</th><th>что сработало</th><th>почему не вошли</th></tr></thead><tbody></tbody></table>
+      </div>
+    </div>
+    <div>
+      <div class="card">
+        <h2>Управление</h2>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+          <button id="s7-start" class="btn">▶ старт</button>
+          <button id="s7-stop" class="btn">⏸ стоп</button>
+          <button id="s7-trading" class="btn">торговля: ?</button>
+        </div>
+        <div class="fld"><label>режим</label>
+          <select id="s7-c-mode"><option value="paper">paper</option><option value="tbank_sandbox">tbank_sandbox</option></select></div>
+        <div class="fld"><label>account_id (sandbox)</label><input id="s7-c-acc" placeholder="пусто = не менять"></div>
+        <div class="fld"><label>account_token</label><input id="s7-c-tok" type="password" placeholder="пусто = не менять"></div>
+        <button id="s7-c-save" class="btn" style="margin-top:6px">применить коннектор</button>
+        <div id="s7-c-msg" style="font-size:11px;color:var(--ink-dim);margin-top:6px"></div>
+      </div>
+      <div class="card">
+        <h2>Параметры стратегии</h2>
+        <div class="fld"><label>вход при фандинге &gt; (пп годовых)</label><input id="s7-p-enter" type="number" step="1"></div>
+        <div class="fld"><label>выход при фандинге &lt; (пп)</label><input id="s7-p-exit" type="number" step="1"></div>
+        <div class="fld"><label>дивидендный фильтр |базис| &gt; (пп)</label><input id="s7-p-sane" type="number" step="1"></div>
+        <div class="fld"><label>трейл фандинга (дней)</label><input id="s7-p-trail" type="number" min="1" max="20"></div>
+        <div class="fld"><label>ролл за (дней до эксп.)</label><input id="s7-p-roll" type="number" min="1" max="10"></div>
+        <div class="fld"><label>юнитов на пару</label><input id="s7-p-units" type="number" min="1" max="20"></div>
+        <button id="s7-p-save" class="btn" style="margin-top:6px">сохранить параметры</button>
+        <div id="s7-p-msg" style="font-size:11px;color:var(--ink-dim);margin-top:6px"></div>
+      </div>
+      <div class="card">
+        <h2>События</h2>
+        <div id="s7-events" style="font-size:11px;font-family:var(--mono);max-height:280px;overflow-y:auto"></div>
+      </div>
+    </div>
+  </div>
+  </div>
+</div><!-- /tab-st7 -->
 
 <!-- модальное подтверждение «закрыть всё» (st5) -->
 <div class="modal-ov" id="s5-flat-modal">
@@ -1679,8 +1745,10 @@ function s5Switch(strat){
   $('tab-st4').hidden = strat!=='st4';
   $('tab-st5').hidden = strat!=='st5';
   $('tab-st6').hidden = strat!=='st6';
+  $('tab-st7').hidden = strat!=='st7';
   if(strat==='st5'){ s5Poll(); s5LoadWeekly(); s5LoadStrategies(); if(!_s5dailyLoaded){ _s5dailyLoaded=true; s5LoadDaily(); s5LoadGoInfo(); s5LoadMarginTimeline(); } }
   if(strat==='st6'){ s6Poll(); if(!_s6chartLoaded){ _s6chartLoaded=true; s6LoadChart(); } }
+  if(strat==='st7'){ s7Poll(); }
 }
 function s5Render(s){
   _s5snap=s;
@@ -2264,6 +2332,84 @@ function s6Init(){
 }
 setInterval(s6Poll, 5000);
 
+// ==================== ST7 · фандинг-давление ====================
+let _s7snap=null;
+async function s7api(path, method='GET', body=null){
+  const opt={method, headers:{'Content-Type':'application/json'}, credentials:'same-origin'};
+  if(body!=null) opt.body=JSON.stringify(body);
+  const r=await fetch('/st7'+path, opt);
+  if(!r.ok){ const e=await r.json().catch(()=>({detail:r.statusText})); throw new Error(e.detail||r.statusText); }
+  return r.json();
+}
+function s7Render(s){
+  _s7snap=s;
+  document.querySelector('#tab-st7 .sessbar').className='sessbar'+(s.live?' live':'');
+  $('s7-state').textContent = s.live?'ST7 live (дневной цикл)':'ST7 остановлен';
+  $('s7-mode').textContent = s.mode + (s.account_id?(' · '+s.account_id.slice(0,8)):'') + (s.trading_enabled?'':' · входы ВЫКЛ');
+  $('s7-net').textContent = 'net '+s5money(s.net_pnl_rub);
+  $('s7-trading').textContent = 'торговля: '+(s.trading_enabled?'ВКЛ':'выкл');
+  const tb=$('s7-signals').querySelector('tbody'); tb.innerHTML='';
+  (s.signals||[]).forEach(e=>{
+    const en=(s.enabled_pairs||{})[e.pair]!==false;
+    const hot=e.fund_ann_pp>=(e.enter_at_pp||35);
+    tb.insertAdjacentHTML('beforeend',
+      `<tr><td><input type="checkbox" data-pair="${e.pair}" class="s7-en" ${en?'checked':''}></td>`+
+      `<td><b>${e.label||e.pair}</b><br><span style="font-size:10px;color:var(--ink-dim)">${e.perp} / ${e.quart}</span></td>`+
+      `<td style="color:${hot?'var(--warn)':'var(--ink)'};font-weight:600">${(e.fund_ann_pp>=0?'+':'')+e.fund_ann_pp}%</td>`+
+      `<td style="color:var(--ink-dim)">${e.enter_at_pp}</td><td style="color:var(--ink-dim)">${e.exit_at_pp}</td>`+
+      `<td>${(e.basis_ann_pp>=0?'+':'')+e.basis_ann_pp}%</td><td>${(e.unit_go_rub||0).toLocaleString('ru')} ₽</td>`+
+      `<td>${(e.swap_today_rub>=0?'+':'')+(e.swap_today_rub||0)} ₽</td>`+
+      `<td>${e.in_position?'<span style="color:var(--warn)">ДАВЛЕНИЕ</span>':'—'}</td></tr>`);
+  });
+  if(!(s.signals||[]).length) tb.innerHTML='<tr><td colspan="9" class="empty">нажми «обновить из ISS» или дождись дневного тика</td></tr>';
+  document.querySelectorAll('.s7-en').forEach(cb=>cb.onchange=async()=>{ try{ await s7api('/pair-enabled','POST',{pair:cb.dataset.pair, enabled:cb.checked}); }catch(e){ alert(e.message); } });
+  const pb=$('s7-pos').querySelector('tbody'); pb.innerHTML='';
+  (s.positions||[]).forEach(p=>pb.insertAdjacentHTML('beforeend',
+    `<tr><td><b>${p.label||p.pair}</b></td><td>шорт ${p.perp_lots} перп + хедж ${p.quart_lots} ${p.quart_secid}</td>`+
+    `<td>${p.entry_date}</td><td>+${p.entry_fund_pp}%</td><td style="color:var(--signal)">${s5money(p.funding_rub)}</td>`+
+    `<td>${p.rolled}</td><td style="color:${p.unrealized_rub>=0?'var(--signal)':'var(--loss)'}">${s5money(p.unrealized_rub)}</td></tr>`));
+  if(!(s.positions||[]).length) pb.innerHTML='<tr><td colspan="7" class="empty">нет позиций — давление в норме</td></tr>';
+  const trb=$('s7-trades').querySelector('tbody'); trb.innerHTML='';
+  (s.trades||[]).slice().reverse().forEach(t=>trb.insertAdjacentHTML('beforeend',
+    `<tr><td style="white-space:nowrap">${t.entry_date} → ${t.exit_date}</td><td>${t.pair}</td><td>${t.days_held}</td>`+
+    `<td>${t.entry_fund_pp}→${t.exit_fund_pp}</td><td>${s5money(t.legs_pnl_rub)}</td><td style="color:var(--signal)">${s5money(t.funding_rub)}</td>`+
+    `<td style="color:var(--ink-dim)">−${Math.round(t.fees_rub)}₽</td><td style="color:${t.net_pnl_rub>=0?'var(--signal)':'var(--loss)'};font-weight:600">${s5money(t.net_pnl_rub)}</td></tr>`));
+  if(!(s.trades||[]).length) trb.innerHTML='<tr><td colspan="8" class="empty">сделок пока нет</td></tr>';
+  const mb=$('s7-missed').querySelector('tbody'); mb.innerHTML='';
+  const ms=(s.missed||[]).slice().reverse();
+  if(!ms.length) mb.innerHTML='<tr><td colspan="4" class="empty">пропусков нет</td></tr>';
+  ms.forEach(m=>mb.insertAdjacentHTML('beforeend',
+    `<tr><td style="color:var(--ink-dim)">${m.date}</td><td>${m.pair}</td>`+
+    `<td>${s4esc(m.fired||'')}</td><td style="color:var(--warn)">${s4esc(m.reason||'')}</td></tr>`));
+  $('s7-events').innerHTML=(s.events||[]).slice().reverse().map(e=>
+    `<div style="padding:2px 0;color:${e.kind==='warn'?'var(--warn)':'var(--ink-dim)'}">${new Date(e.ts).toLocaleTimeString('ru').slice(0,5)} ${s4esc(e.message)}</div>`).join('')||'<div class="empty">пока пусто</div>';
+  const st=s.strategy||{};
+  [['s7-p-enter','fund_enter_pp'],['s7-p-exit','fund_exit_pp'],['s7-p-sane','basis_sane_pp'],
+   ['s7-p-trail','fund_trail_days'],['s7-p-roll','roll_days_before'],['s7-p-units','units']]
+   .forEach(([id,k])=>{ const el=$(id); if(el && document.activeElement!==el && st[k]!=null) el.value=st[k]; });
+  const mo=$('s7-c-mode'); if(document.activeElement!==mo) mo.value=s.mode||'paper';
+}
+async function s7Poll(){ if(_s5strat!=='st7') return; try{ s7Render(await s7api('/state')); }catch(e){} }
+function s7Init(){
+  $('s7-start').onclick=async()=>{ try{ await s7api('/control/start','POST'); s7Poll(); }catch(e){alert(e.message);} };
+  $('s7-stop').onclick=async()=>{ try{ await s7api('/control/stop','POST'); s7Poll(); }catch(e){alert(e.message);} };
+  $('s7-trading').onclick=async()=>{ try{ const on=!(_s7snap&&_s7snap.trading_enabled); await s7api('/control/trading?on='+on,'POST'); s7Poll(); }catch(e){alert(e.message);} };
+  $('s7-refresh').onclick=async()=>{ $('s7-refresh').textContent='…'; try{ await s7api('/signals'); await s7Poll(); }catch(e){alert(e.message);} $('s7-refresh').textContent='обновить из ISS'; };
+  $('s7-p-save').onclick=async()=>{ try{
+    await s7api('/config','POST',{fund_enter_pp:+$('s7-p-enter').value, fund_exit_pp:+$('s7-p-exit').value,
+      basis_sane_pp:+$('s7-p-sane').value, fund_trail_days:+$('s7-p-trail').value,
+      roll_days_before:+$('s7-p-roll').value, units:+$('s7-p-units').value});
+    $('s7-p-msg').textContent='сохранено'; s7Poll();
+  }catch(e){ $('s7-p-msg').textContent='ошибка: '+e.message; } };
+  $('s7-c-save').onclick=async()=>{ try{
+    const body={mode:$('s7-c-mode').value};
+    if($('s7-c-acc').value.trim()) body.account_id=$('s7-c-acc').value.trim();
+    if($('s7-c-tok').value.trim()) body.account_token=$('s7-c-tok').value.trim();
+    await s7api('/connector','POST',body); $('s7-c-msg').textContent='применено'; $('s7-c-tok').value=''; s7Poll();
+  }catch(e){ $('s7-c-msg').textContent='ошибка: '+e.message; } };
+}
+setInterval(s7Poll, 5000);
+
 function s5Init(){
   document.querySelectorAll('.strat-tab').forEach(b=> b.onclick=()=>s5Switch(b.dataset.strat));
   $('s5-btn-start').onclick=async()=>{ try{ await s5api('/control/start','POST'); s5Poll(); }catch(e){alert(e.message);} };
@@ -2470,6 +2616,7 @@ async function s5ApplyStrategy(id,name){
 }
 s5Init();
 s6Init();
+s7Init();
 setInterval(s5Poll, 2500);
 </script>
 </body>
