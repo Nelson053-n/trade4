@@ -373,6 +373,7 @@ class St5Session:
             "sandbox_active": self.state["sandbox_active"],
             "real_trading_armed": self.state["real_trading_armed"],
             "connector_mode": self.cfg.connector.mode,
+            "account_id": self.cfg.connector.account_id or None,
             "capital_rub": round(self.portfolio.capital_rub, 0),
             "day_pnl_rub": round(self.portfolio.day_pnl_rub, 0),
             "net_pnl_rub": round(net, 0),
