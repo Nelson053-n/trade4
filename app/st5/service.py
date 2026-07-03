@@ -1068,11 +1068,16 @@ class St5Session:
             return
         ex = self._make_executor(pid)
         if ex is not None:
-            # PRE-TRADE проверка свободных средств у брокера: sandbox отклоняет ордера
-            # по свободным деньгам ≈ ПОЛНОМУ НОТИОНАЛУ (инцидент 02.07 «Not enough balance»
-            # с обрывом ноги). Лучше чистый отказ ДО ордеров, чем сорванный unwind.
+            # PRE-TRADE проверка свободных средств у брокера (инцидент 02.07 «Not enough
+            # balance» с обрывом ноги; эксперимент 03.07: sandbox деньги почти не морозит,
+            # отказ был контекстным — гейт остаётся страховкой). Порог по режиму:
+            # sandbox — нотионал (перестраховка, free≈капитал — не мешает);
+            # real — ГО×1.3 (на бою морозится именно ГО, нотионал задушил бы входы).
             ord_lots = p.ord_lots if p.ord_lots > 0 else p.lots
-            need = (ord_px * ord_lots + pref_px * p.lots) * 1.05
+            if self.cfg.connector.mode == "tbank_real":
+                need = risk * self.portfolio.go_factor * 1.3
+            else:
+                need = (ord_px * ord_lots + pref_px * p.lots) * 1.05
             try:
                 from ..st4 import tbank_sandbox as _sb
                 free = _sb.free_money_rub(self.cfg.connector.account_id)
