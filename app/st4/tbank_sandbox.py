@@ -312,6 +312,12 @@ def pay_in(account_id: str, rub: int) -> float:
     return _q_to_float(resp.get("balance"))
 
 
+def price_q(px: float) -> dict:
+    """float → Quotation {units, nano} для цены лимитного ордера."""
+    units = int(px)
+    return {"units": str(units), "nano": int(round((px - units) * 1e9))}
+
+
 def post_order(account_id: str, instrument_uid: str, lots: int, direction: str,
                order_id: str, order_type: str = "ORDER_TYPE_MARKET",
                price: dict | None = None) -> dict:
@@ -380,6 +386,12 @@ def free_money_rub(account_id: str) -> float:
         if m.get("currency") == "rub":
             return _q_to_float(m)
     return 0.0
+
+
+def cancel_order(account_id: str, order_id: str) -> None:
+    """Отменить активный (висящий) sandbox-ордер — снятие недолитого лимитника."""
+    _call(_SANDBOX, "CancelSandboxOrder", {"accountId": account_id, "orderId": order_id},
+          token=_account_token(account_id))
 
 
 def close_account(account_id: str) -> None:

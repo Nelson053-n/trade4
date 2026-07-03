@@ -64,6 +64,7 @@ class St5PairExecutor:
         self._uid_ord: str | None = uid_ord
         self._uid_pref: str | None = uid_pref
         self._seq = 0
+        self._tick_cache: dict[str, float] = {}   # uid -> шаг цены (для лимит-потолка)
 
     # ---------- ленивый резолв UID инструментов ----------
     def _uids(self) -> tuple[str, str]:
@@ -72,8 +73,39 @@ class St5PairExecutor:
             self._uid_pref = _sb.find_future(self.pref_ticker)["uid"]
         return self._uid_ord, self._uid_pref
 
-    def _post(self, uid: str, lots: int, direction: str, op: str, ref_price: float) -> dict:
-        """Один боевой/sandbox ордер с защитами. direction: BUY|SELL."""
+    def _tick(self, uid: str) -> float | None:
+        """Шаг цены инструмента (для кратности лимит-цены). None — не узнали."""
+        if uid not in self._tick_cache:
+            try:
+                for it in (_sb.find_future(self.ord_ticker), _sb.find_future(self.pref_ticker)):
+                    if it.get("uid"):
+                        self._tick_cache[it["uid"]] = _sb._q_to_float(it.get("minPriceIncrement"))
+            except Exception:  # noqa: BLE001
+                return None
+        return self._tick_cache.get(uid) or None
+
+    def _limit_cap(self, uid: str, is_buy: bool) -> float | None:
+        """Потолок marketable-limit из стакана: buy → ask+2 тика, sell → bid−2 тика.
+        Исполняется мгновенно как маркет, но НЕ глубже потолка (защита от съедания
+        тонкого стакана — главная скрытая издержка, см. разбор 02.07). None → маркет."""
+        try:
+            ob = _sb.order_book(uid, 1)
+            lvl = (ob.get("asks") or [None])[0] if is_buy else (ob.get("bids") or [None])[0]
+            if not lvl:
+                return None
+            px = float(lvl[0] if isinstance(lvl, (list, tuple)) else lvl.get("price"))
+            tick = self._tick(uid)
+            if not tick or px <= 0:
+                return None
+            cap = px + 2 * tick if is_buy else px - 2 * tick
+            return round(round(cap / tick) * tick, 10)   # кратность шагу цены
+        except Exception:  # noqa: BLE001  стакан недоступен → маркет (гарантия исполнения)
+            return None
+
+    def _post(self, uid: str, lots: int, direction: str, op: str, ref_price: float,
+              limit_cap: float | None = None) -> dict:
+        """Один боевой/sandbox ордер с защитами. direction: BUY|SELL.
+        limit_cap — потолок цены (marketable-limit); None — рыночный."""
         from ..st4 import tbank_live as _live
         # гейт реальной торговли
         if self.real and (self.armed_cb is None or not self.armed_cb()):
@@ -93,12 +125,17 @@ class St5PairExecutor:
         full_dir = f"ORDER_DIRECTION_{direction}"
         audit = {"ts": int(time.time() * 1000), "account": self.account_id, "uid": uid,
                  "lots": lots, "direction": direction, "op": op, "order_id": oid,
-                 "ref_price": ref_price, "market_price": mkt, "real": self.real}
+                 "ref_price": ref_price, "market_price": mkt, "real": self.real,
+                 "limit_cap": limit_cap}
+        otype = "ORDER_TYPE_LIMIT" if limit_cap else "ORDER_TYPE_MARKET"
+        price = _sb.price_q(limit_cap) if limit_cap else None
         try:
             if self.real:
-                resp = _live.post_order(self.account_id, uid, lots, full_dir, oid)
+                resp = _live.post_order(self.account_id, uid, lots, full_dir, oid,
+                                        order_type=otype, price=price)
             else:
-                resp = _sb.post_order(self.account_id, uid, lots, full_dir, oid)
+                resp = _sb.post_order(self.account_id, uid, lots, full_dir, oid,
+                                      order_type=otype, price=price)
             audit["status"] = "ok"
             audit["executed_lots"] = resp.get("lotsExecuted") or resp.get("executedLots")
         except Exception as e:  # noqa: BLE001
@@ -111,11 +148,33 @@ class St5PairExecutor:
             self.audit_cb(audit)
         return resp
 
+    def _cancel_rest(self, resp: dict) -> None:
+        """Снять недолитый ЛИМИТНЫЙ ордер из стакана — иначе он исполнится позже
+        неучтённой ногой. Ошибка отмены не критична (истечёт сам), но логируется."""
+        oid = resp.get("orderId")
+        if not oid:
+            return
+        try:
+            if self.real:
+                from ..st4 import tbank_live as _live
+                _live.cancel_order(self.account_id, oid)
+            else:
+                _sb.cancel_order(self.account_id, oid)
+        except Exception as e:  # noqa: BLE001
+            if self.audit_cb:
+                self.audit_cb({"ts": int(time.time() * 1000), "op": "cancel",
+                               "direction": "-", "lots": 0, "uid": oid,
+                               "status": f"ошибка отмены: {str(e)[:80]}"})
+
     @staticmethod
     def _filled(resp: dict, requested: int) -> int:
         """Фактически исполненные лоты из ответа брокера. Нет поля (paper/старый формат) →
         считаем полный филл (совместимость): маркет-ордер без ответа о лотах не проверить."""
-        v = resp.get("lotsExecuted") or resp.get("executedLots")
+        # ВАЖНО: не «or» — lotsExecuted=0 (ничего не налилось, лимитник висит) это ФАКТ 0,
+        # а не отсутствие поля (иначе 0-филл прочитается как полный — баг пойман тестом)
+        v = resp.get("lotsExecuted")
+        if v is None:
+            v = resp.get("executedLots")
         if v is None:
             return requested
         try:
@@ -136,11 +195,17 @@ class St5PairExecutor:
         ord_dir = "SELL" if long_spread else "BUY"
         un_pref = "SELL" if pref_dir == "BUY" else "BUY"
         un_ord = "SELL" if ord_dir == "BUY" else "BUY"
+        # ВХОДЫ — marketable-limit (потолок ask/bid±2 тика): мгновенное исполнение как
+        # маркет, но без съедания тонкого стакана. Выходы/unwind — всегда МАРКЕТ (гарантия).
+        cap_pref = self._limit_cap(uid_pref, pref_dir == "BUY")
+        cap_ord = self._limit_cap(uid_ord, ord_dir == "BUY")
         # 1) первая нога — pref (менее ликвидная)
-        got_pref = self._filled(self._post(uid_pref, lots_pref, pref_dir, "entry", ref_pref),
-                                lots_pref)
+        r1 = self._post(uid_pref, lots_pref, pref_dir, "entry", ref_pref, limit_cap=cap_pref)
+        got_pref = self._filled(r1, lots_pref)
         if got_pref != lots_pref:
-            # частичный филл первой ноги: откатываем то, что реально налилось, вход отменяем
+            # частичный филл первой ноги: снять висящий лимитник, откатить налитое
+            if cap_pref:
+                self._cancel_rest(r1)
             try:
                 if got_pref > 0:
                     self._post(uid_pref, got_pref, un_pref, "unwind", ref_pref)
@@ -150,9 +215,10 @@ class St5PairExecutor:
             raise St5ExecError(f"частичный филл префа {got_pref}/{lots_pref} — "
                                f"вход отменён, налитое откачено")
         # 2) вторая нога — ord; при отказе/частичном филле откатываем всё налитое
+        r2 = None
         try:
-            got_ord = self._filled(self._post(uid_ord, lots_ord, ord_dir, "entry", ref_ord),
-                                   lots_ord)
+            r2 = self._post(uid_ord, lots_ord, ord_dir, "entry", ref_ord, limit_cap=cap_ord)
+            got_ord = self._filled(r2, lots_ord)
         except Exception as e:  # noqa: BLE001
             try:
                 self._post(uid_pref, lots_pref, un_pref, "unwind", ref_pref)
@@ -160,6 +226,8 @@ class St5PairExecutor:
                 raise St5ExecError(f"вход сорван И unwind не удался: {e} / {ue}") from e
             raise St5ExecError(f"вторая нога не залилась, первая откачена: {e}") from e
         if got_ord != lots_ord:
+            if cap_ord and r2 is not None:
+                self._cancel_rest(r2)   # снять висящий лимитник обычки
             errs = []
             try:
                 if got_ord > 0:

@@ -1224,8 +1224,9 @@ def test_executor_posts_different_leg_lots():
     from app.st5.executor import St5PairExecutor
     ex = St5PairExecutor("acc", "TATN", "TATP", real=False)
     ex._uid_ord, ex._uid_pref = "uid_o", "uid_p"
+    ex._limit_cap = lambda uid, is_buy: None
     calls = []
-    ex._post = lambda uid, lots, direction, op, ref: calls.append((uid, lots, direction, op)) or {}
+    ex._post = lambda uid, lots, direction, op, ref, limit_cap=None: calls.append((uid, lots, direction, op)) or {}
     ex.open_pair(True, 1, 10, 49000.0, 4700.0)         # long: buy pref ×10, sell ord ×1
     assert calls[0] == ("uid_p", 10, "BUY", "entry")   # преф первым
     assert calls[1] == ("uid_o", 1, "SELL", "entry")
@@ -1263,13 +1264,14 @@ def _ex_with_fills(fills):
     calls = []
     queue = list(fills)
 
-    def _post(uid, lots, direction, op, ref):
+    def _post(uid, lots, direction, op, ref, limit_cap=None):
         calls.append((uid, lots, direction, op))
         r = queue.pop(0) if queue else {}
         if isinstance(r, Exception):
             raise r
         return r
     ex._post = _post
+    ex._limit_cap = lambda uid, is_buy: None   # без сети: тесты про механику филлов, маркет
     return ex, calls
 
 
@@ -1587,3 +1589,59 @@ def test_periodic_reconcile_real_never_touches_account(monkeypatch):
     asyncio.run(s._periodic_reconcile())
     assert orders == []                                # ни одного ордера
     assert any("РЕАЛЬНОМ счёте" in e["message"] and e["kind"] == "warn" for e in s.events)
+
+
+# ============================ marketable-limit входы (V1) ============================
+
+def _limit_ex(monkeypatch, ob=None, tick=1.0):
+    """Исполнитель с моками стакана/тика/ордеров. Возвращает (ex, orders, cancels)."""
+    from app.st5.executor import St5PairExecutor
+    from app.st4 import tbank_sandbox as sb
+    ex = St5PairExecutor("acc", "SBRF", "SBPR", real=False)
+    ex._uid_ord, ex._uid_pref = "uid_o", "uid_p"
+    ex._tick_cache = {"uid_o": tick, "uid_p": tick}
+    orders, cancels = [], []
+    if ob is not None:
+        monkeypatch.setattr(sb, "order_book", lambda uid, depth=1: ob)
+    def _post(uid, lots, direction, op, ref, limit_cap=None):
+        orders.append((uid, lots, direction, op, limit_cap))
+        return {"lotsExecuted": lots, "orderId": "oid-" + str(len(orders))}
+    ex._post = _post
+    monkeypatch.setattr(sb, "cancel_order", lambda acc, oid: cancels.append(oid))
+    return ex, orders, cancels
+
+
+def test_entry_uses_marketable_limit_cap(monkeypatch):
+    """Входы идут ЛИМИТОМ с потолком ask+2 тика (buy) / bid−2 тика (sell) из стакана."""
+    ex, orders, _ = _limit_ex(monkeypatch, ob={"bids": [(28000.0, 5)], "asks": [(28010.0, 5)]})
+    ex.open_pair(True, 1, 1, 28000.0, 28100.0)         # long: buy pref, sell ord
+    (u1, _, d1, _, cap1), (u2, _, d2, _, cap2) = orders
+    assert (u1, d1, cap1) == ("uid_p", "BUY", 28012.0)   # ask+2 тика
+    assert (u2, d2, cap2) == ("uid_o", "SELL", 27998.0)  # bid−2 тика
+
+
+def test_entry_falls_back_to_market_without_book(monkeypatch):
+    """Стакан недоступен → вход маркетом (гарантия исполнения важнее цены)."""
+    from app.st4 import tbank_sandbox as sb
+    ex, orders, _ = _limit_ex(monkeypatch)
+    monkeypatch.setattr(sb, "order_book", lambda uid, depth=1: (_ for _ in ()).throw(RuntimeError))
+    ex.open_pair(True, 1, 1, 28000.0, 28100.0)
+    assert all(o[4] is None for o in orders)             # limit_cap не задан → маркет
+
+
+def test_underfilled_limit_gets_cancelled(monkeypatch):
+    """Недолитый лимитник ОТМЕНЯЕТСЯ (иначе висит в стакане и нальётся неучтённой ногой)."""
+    from app.st5.executor import St5ExecError
+    from app.st4 import tbank_sandbox as sb
+    ex, orders, cancels = _limit_ex(monkeypatch, ob={"bids": [(28000.0, 5)], "asks": [(28010.0, 5)]})
+    def _post(uid, lots, direction, op, ref, limit_cap=None):
+        orders.append((uid, lots, direction, op, limit_cap))
+        done = 0 if op == "entry" and direction == "BUY" else lots   # BUY-вход не налился
+        return {"lotsExecuted": done, "orderId": "oid-" + str(len(orders))}
+    ex._post = _post
+    try:
+        ex.open_pair(True, 1, 1, 28000.0, 28100.0)
+        assert False
+    except St5ExecError:
+        pass
+    assert cancels == ["oid-1"]                          # висящий лимитник снят
