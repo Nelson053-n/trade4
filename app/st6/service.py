@@ -38,6 +38,9 @@ class St6Session:
         self.events: list[dict] = []
         self.enabled_pairs = {pid: True for pid in ST6_PAIRS}
         self.last_day: dict[str, str] = {}       # pid -> последний обработанный день ISS
+        self.capital_rub: float = 0.0            # капитал sandbox-счёта (обновляется тиком)
+        # якорь сверки «журнал vs счёт» (как st5): gap<0 = скрытые издержки/нет фандинга
+        self.exec_anchor: dict | None = None
         self.edge_view: dict[str, dict] = {}      # pid -> снимок сигнала для UI
         self.state = {"live": False, "live_intent": False}
         self._session_file = Path(__file__).resolve().parent.parent.parent / "session_state_6.json"
@@ -250,7 +253,40 @@ class St6Session:
             except Exception as e:  # noqa: BLE001  одна пара не должна ронять остальные
                 out.append({"pair": pid, "error": str(e)[:200]})
                 self.log_event("warn", f"{pid}: тик не удался: {e}")
+        self._refresh_capital()
         return out
+
+    def _refresh_capital(self) -> None:
+        """Капитал sandbox-счёта + якорь сверки. КРИТИЧНАЯ проверка st6: если песочница
+        НЕ начисляет фандинг вечных, gap уедет в минус ровно на модельный фандинг."""
+        if self.cfg.mode != "tbank_sandbox" or not self.cfg.account_id:
+            return
+        try:
+            from ..st4 import tbank_sandbox as sb
+            pf = sb.portfolio(self.cfg.account_id)
+            total = sb._q_to_float(pf.get("totalAmountPortfolio"))
+        except Exception:  # noqa: BLE001
+            return
+        if total and total > 0:
+            self.capital_rub = float(total)
+            if (self.exec_anchor is None
+                    or self.exec_anchor.get("account_id") != self.cfg.account_id):
+                net = sum(t.get("net_pnl_rub", 0) for t in self.trades)
+                self.exec_anchor = {"account_id": self.cfg.account_id,
+                                    "capital": float(total), "net": net}
+                self.save_session()
+
+    def _execution_gap(self) -> float | None:
+        """Δфакт счёта − Δмодели (журнал + unrealized с фандингом) от якоря. None — нет данных."""
+        a = self.exec_anchor
+        if a is None or self.cfg.mode != "tbank_sandbox" or not self.capital_rub:
+            return None
+        if a.get("account_id") != self.cfg.account_id:
+            return None
+        net = sum(t.get("net_pnl_rub", 0) for t in self.trades)
+        unreal = sum(e.unrealized_rub() for e in self.engines.values())
+        return round((self.capital_rub - a.get("capital", 0.0))
+                     - ((net + unreal) - a.get("net", 0.0)))
 
     # ---------- live-цикл ----------
     async def run_live(self) -> None:
@@ -295,6 +331,8 @@ class St6Session:
                                   "unrealized_rub": round(eng.unrealized_rub())})
         net = sum(t.get("net_pnl_rub", 0) for t in self.trades)
         return {"live": self.state["live"], "mode": self.cfg.mode,
+                "capital_rub": round(self.capital_rub) or None,
+                "execution_gap_rub": self._execution_gap(),
                 "account_id": self.cfg.account_id or None,
                 "trading_enabled": self.cfg.trading_enabled,
                 "enabled_pairs": self.enabled_pairs,
@@ -308,7 +346,7 @@ class St6Session:
     def save_session(self) -> None:
         try:
             data = {"config": self.cfg.model_dump(), "trades": self.trades,
-                    "missed": self.missed[-100:],
+                    "missed": self.missed[-100:], "exec_anchor": self.exec_anchor,
                     "last_day": self.last_day, "enabled_pairs": self.enabled_pairs,
                     "live_intent": self.state.get("live_intent", False),
                     "positions": {pid: (asdict(e.position) if e.position else None)
@@ -326,6 +364,7 @@ class St6Session:
             return False
         self.trades = data.get("trades", [])
         self.missed = list(data.get("missed") or [])
+        self.exec_anchor = data.get("exec_anchor") or None
         self.last_day = data.get("last_day", {})
         en = data.get("enabled_pairs") or {}
         self.enabled_pairs = {pid: bool(en.get(pid, True)) for pid in ST6_PAIRS}

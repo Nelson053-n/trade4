@@ -189,3 +189,21 @@ def test_st6_missed_dividend_trap_logged():
     s.log_missed("sberf", "2026-07-03", "edge +55пп", "новый день")
     assert len(s.missed) == 2
     assert s.snapshot()["missed"][0]["reason"].startswith("дивидендная ловушка")
+
+
+def test_st6_execution_gap_math():
+    """gap st6 = Δкапитала − Δ(журнал+unrealized) от якоря — детектор фандинга песочницы:
+    если она НЕ начисляет SWAPRATE, gap уедет в минус ровно на модельный фандинг."""
+    from app.st6.service import St6Session
+    s = St6Session()
+    assert s._execution_gap() is None
+    s.cfg.mode = "tbank_sandbox"; s.cfg.account_id = "acc"
+    s.exec_anchor = {"account_id": "acc", "capital": 500_000.0, "net": 0.0}
+    s.capital_rub = 500_100.0
+    eng = _eng()
+    s.engines["imoexf"] = eng
+    eng.confirm_enter(_snap(), perp_fill=2344.0, quart_fill=236000.0, fee_rub=0.0)
+    eng.position.funding_rub = 300.0                   # модель начислила фандинг
+    eng.last_snap = _snap()                            # unrealized = funding (цены не двигались)
+    # модель +300, факт +100 → gap −200 (песочница недоначислила)
+    assert s._execution_gap() == -200

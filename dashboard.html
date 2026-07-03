@@ -2232,7 +2232,9 @@ function s6Render(s){
   _s6snap=s;
   document.querySelector('#tab-st6 .sessbar').className='sessbar'+(s.live?' live':'');
   $('s6-state').textContent = s.live?'ST6 live (дневной цикл)':'ST6 остановлен';
-  $('s6-mode').textContent = s.mode + (s.account_id?(' · '+s.account_id.slice(0,8)):'') + (s.trading_enabled?'':' · входы ВЫКЛ');
+  $('s6-mode').textContent = s.mode + (s.account_id?(' · '+s.account_id.slice(0,8)):'') + (s.trading_enabled?'':' · входы ВЫКЛ')
+    + (s.capital_rub?(' · счёт '+Math.round(s.capital_rub).toLocaleString('ru')+' ₽'):'')
+    + (s.execution_gap_rub!=null?(' · сверка '+(s.execution_gap_rub>=0?'+':'')+s.execution_gap_rub+' ₽'):'');
   $('s6-net').textContent = 'net '+s5money(s.net_pnl_rub);
   $('s6-trading').textContent = 'торговля: '+(s.trading_enabled?'ВКЛ':'выкл');
   // сигналы

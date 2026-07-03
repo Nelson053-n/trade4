@@ -200,6 +200,61 @@ def _run_backtest_tbank(stop_sigma: float | None, ST4: St4Session) -> dict:
     return res
 
 
+async def _daily_digest_loop():
+    """Вечерний Telegram-дайджест по ВСЕМ движкам (23:55 МСК, раз в день).
+    Шлётся через notifier st5 (общий бот/чат); выключен вместе с notify.enabled."""
+    import datetime as _dtm
+    sent_for: str | None = None
+    MSK = _dtm.timezone(_dtm.timedelta(hours=3))
+    while True:
+        await asyncio.sleep(60)
+        try:
+            now = _dtm.datetime.now(MSK)
+            day = now.strftime("%Y-%m-%d")
+            if not (now.hour == 23 and now.minute >= 55) or sent_for == day:
+                continue
+            if not ST5.cfg.notify.enabled:
+                sent_for = day
+                continue
+            def _today_net(trades, key="exit_ts"):
+                out_n, out_c = 0.0, 0
+                for t in trades or []:
+                    ts = t.get(key) if isinstance(t, dict) else getattr(t, key, 0)
+                    if ts and _dtm.datetime.fromtimestamp(ts / 1000, MSK).strftime("%Y-%m-%d") == day:
+                        v = t.get("net_pnl_rub") if isinstance(t, dict) else getattr(t, "net_pnl_rub", 0)
+                        out_n += v or 0; out_c += 1
+                return out_n, out_c
+            lines = [f"📊 <b>Дневной дайджест {day}</b>"]
+            n5, c5 = _today_net(ST5.trades)
+            gap = ST5._execution_gap()
+            lines.append(f"ST5: {c5} сд, {n5:+.0f}₽ · капитал {ST5.portfolio.capital_rub:,.0f}₽"
+                         + (f" · сверка {gap:+.0f}₽" if gap is not None else "")
+                         + f" · позиций на ночь {sum(1 for e in ST5.engines.values() if e.position)}")
+            n4 = 0.0; c4 = 0
+            for s4 in ST4S.values():
+                nn, cc = _today_net([{"exit_ts": t.exit_ts, "net_pnl_rub": t.net_pnl_rub}
+                                     for t in s4.engine.trades])
+                n4 += nn; c4 += cc
+            lines.append(f"ST4: {c4} сд, {n4:+.0f}₽")
+            fund6 = sum(p.funding_rub for e in ST6.engines.values() if (p := e.position))
+            gap6 = ST6._execution_gap()
+            lines.append(f"ST6: позиций {sum(1 for e in ST6.engines.values() if e.position)}"
+                         f" · фандинг накоплен {fund6:+.0f}₽ · net {sum(t.get('net_pnl_rub', 0) for t in ST6.trades):+.0f}₽"
+                         + (f" · сверка {gap6:+.0f}₽" if gap6 is not None else ""))
+            sig7 = ", ".join(f"{v['pair']} {v['fund_ann_pp']:+.0f}%" for v in ST7.signal_view.values())
+            lines.append(f"ST7: позиций {sum(1 for e in ST7.engines.values() if e.position)}"
+                         f" · net {sum(t.get('net_pnl_rub', 0) for t in ST7.trades):+.0f}₽"
+                         + (f" · фандинг: {sig7}" if sig7 else ""))
+            miss_today = sum(1 for m in ST5.missed
+                             if _dtm.datetime.fromtimestamp(m["ts"] / 1000, MSK).strftime("%Y-%m-%d") == day)
+            if miss_today:
+                lines.append(f"⏭ упущенных входов st5: {miss_today}")
+            await ST5.notifier.send("\n".join(lines))
+            sent_for = day
+        except Exception:  # noqa: BLE001  дайджест не должен ронять сервис
+            pass
+
+
 async def _auto_backtest_loop():
     """Авто-бэктест раз в ~2.5 дня: копит историю результативности на свежих данных T-Bank."""
     await asyncio.sleep(120)                 # первый прогон — через 2 мин после старта
@@ -251,6 +306,7 @@ async def lifespan(app: FastAPI):
         ST7.start_live()
     _watchdog_task = asyncio.create_task(ST5.watchdog_loop())  # самовосстановление зависшего live-цикла
     _auto_bt_task = asyncio.create_task(_auto_backtest_loop())
+    _digest_task = asyncio.create_task(_daily_digest_loop())   # вечерний TG-дайджест (23:55)
     yield
     _watchdog_task.cancel()
     _auto_bt_task.cancel()
@@ -1788,6 +1844,10 @@ def st4_connector(payload: dict, pair: str = "sber"):
         except Exception as e:  # noqa: BLE001
             raise HTTPException(502, f"не удалось проверить счёт через T-Bank: {e}")
         ST4.cfg.connector.account_id = account_id
+    elif mode == "tbank_sandbox" and payload.get("account_id"):
+        # выделенный sandbox-счёт (развод с чужими движками): executor использует его
+        # приоритетно перед резолвом по имени (TinkoffSandboxExecutor._account)
+        ST4.cfg.connector.account_id = str(payload["account_id"]).strip()
     if "payin_rub" in payload:
         try:
             ST4.cfg.connector.payin_rub = int(payload["payin_rub"])
