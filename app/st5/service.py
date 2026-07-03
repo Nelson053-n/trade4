@@ -1077,27 +1077,37 @@ class St5Session:
             return
         ex = self._make_executor(pid)
         if ex is not None:
-            # PRE-TRADE проверка свободных средств у брокера (инцидент 02.07 «Not enough
-            # balance» с обрывом ноги; эксперимент 03.07: sandbox деньги почти не морозит,
-            # отказ был контекстным — гейт остаётся страховкой). Порог по режиму:
-            # sandbox — нотионал (перестраховка, free≈капитал — не мешает);
-            # real — ГО×1.3 (на бою морозится именно ГО, нотионал задушил бы входы).
+            # PRE-TRADE проверка «ёмкости» у брокера. Механика ПЕСОЧНИЦЫ (вскрыта инцидентами
+            # 02-03.07, все отказы сходятся): она отклоняет BUY, когда Σ НОТИОНАЛОВ всех
+            # открытых позиций + новый ордер превышает ~0.8×капитала; free_money API эту
+            # внутреннюю блокировку НЕ отражает (показывает почти весь капитал).
+            # На БОЮ морозится именно ГО → порог ГО×1.3 (нотионал задушил бы входы).
             ord_lots = p.ord_lots if p.ord_lots > 0 else p.lots
-            if self.cfg.connector.mode == "tbank_real":
-                need = risk * self.portfolio.go_factor * 1.3
-            else:
-                need = (ord_px * ord_lots + pref_px * p.lots) * 1.05
             try:
                 from ..st4 import tbank_sandbox as _sb
                 free = _sb.free_money_rub(self.cfg.connector.account_id)
             except Exception:  # noqa: BLE001  не смогли узнать — не блокируем (старое поведение)
                 free = None
-            if free is not None and free < need:
-                # АВТО-ДАУНСАЙЗ: входим тем числом юнитов, на которое средств хватает —
+            order_notional = ord_px * ord_lots + pref_px * p.lots
+            if self.cfg.connector.mode == "tbank_real":
+                need = risk * self.portfolio.go_factor * 1.3
+                capacity = free if free is not None else None
+            else:
+                open_notional = 0.0
+                for oeng in self.engines.values():
+                    op = oeng.position
+                    if op is not None and op is not p:
+                        o_ord = op.ord_lots if op.ord_lots > 0 else op.lots
+                        open_notional += op.ord_entry * o_ord + op.pref_entry * op.lots
+                need = open_notional + order_notional
+                capacity = free * 0.75 if free is not None else None   # эмпирический порог ~0.8
+            if capacity is not None and capacity < need:
+                # АВТО-ДАУНСАЙЗ: входим тем числом юнитов, на которое ёмкости хватает —
                 # лучше меньший размер, чем пропуск сигнала (механика по решению 03.07)
-                unit_notional = (ord_px * p.unit_ord + pref_px * p.unit_pref) * 1.05
-                fit = int(free // unit_notional) if unit_notional > 0 and p.units > 0 else 0
-                if fit >= 1:
+                unit_notional = ord_px * p.unit_ord + pref_px * p.unit_pref
+                room = capacity - (need - order_notional)   # остаток ёмкости под НОВЫЙ ордер
+                fit = int(room // unit_notional) if unit_notional > 0 and p.units > 0 else 0
+                if fit >= 1 and fit < p.units:
                     old_units = p.units
                     p.units = fit
                     p.lots = fit * p.unit_pref
@@ -1105,17 +1115,17 @@ class St5Session:
                     p.entry_lots = p.lots
                     p.fees_rub = eng._legs_fee(p.ord_lots, p.lots)
                     ord_lots = p.ord_lots
-                    need = (ord_px * ord_lots + pref_px * p.lots) * 1.05
-                    self.log_event("info", f"{pid}: вход урезан по свободным средствам "
-                                           f"{old_units}→{fit} юнитов (свободно {free:,.0f}₽)")
-                else:
+                    self.log_event("info", f"{pid}: вход урезан по ёмкости брокера "
+                                           f"{old_units}→{fit} юнитов (ёмкость {capacity:,.0f}₽, "
+                                           f"занято позициями {need - order_notional:,.0f}₽)")
+                elif fit < 1:
                     fired = f"|z|={abs(p.entry_z):.2f}, гейты пройдены"
                     eng.position = None
                     self.log_missed(pid, p.entry_ts, fired,
-                                    f"нет свободных средств у брокера даже на 1 юнит "
-                                    f"(юнит ~{unit_notional:,.0f}₽, свободно {free:,.0f}₽)")
+                                    f"нет ёмкости у брокера даже на 1 юнит (юнит "
+                                    f"~{unit_notional:,.0f}₽, остаток ёмкости {room:,.0f}₽)")
                     self.log_event("info", f"{pid}: вход отклонён pre-trade "
-                                           f"(свободно {free:,.0f}₽ < юнит {unit_notional:,.0f}₽)")
+                                           f"(остаток ёмкости {room:,.0f}₽ < юнит {unit_notional:,.0f}₽)")
                     return
             try:
                 long_spread = (p.state == St5State.LONG_SPREAD)

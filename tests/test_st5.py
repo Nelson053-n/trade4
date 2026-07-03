@@ -1539,7 +1539,7 @@ def test_pretrade_free_money_gate(monkeypatch):
     s._on_engine_opened("sber", eng, 28000.0, 28100.0)
     assert eng.position is None                       # вход откачен ЧИСТО
     assert orders == []                               # ни одного ордера не ушло
-    assert any("нет свободных средств" in m["reason"] for m in s.missed)
+    assert any("нет ёмкости у брокера" in m["reason"] for m in s.missed)
     St5Portfolio._go_cache = {}
 
 
@@ -1555,16 +1555,16 @@ def test_pretrade_downsize_enters_with_fitting_units(monkeypatch):
     eng._open(1700000000000, -3.0, 0.0, 1.0, 28000.0, 28100.0)   # высокий |z| → макс. тир
     p = eng.position
     assert p is not None and p.units >= 2                        # полный размер ≥2 юнитов
-    # юнит sber ≈ (28000+28100)×1.05 ≈ 58.9к; свободно 70к → влезает ровно 1 юнит
+    # юнит sber = 28000+28100 = 56.1к; ёмкость = 90к×0.75 = 67.5к → влезает ровно 1 юнит
     orders = []
     s._fake_ex.open_pair = lambda ls, lo, lp, ro, rp: orders.append((lo, lp))
     monkeypatch.setattr(s, "_make_executor", lambda pid: s._fake_ex)
-    monkeypatch.setattr(sb, "free_money_rub", lambda acc: 70_000.0)
+    monkeypatch.setattr(sb, "free_money_rub", lambda acc: 90_000.0)   # ёмкость 67.5к → ровно 1 юнит (~56.1к)
     s._on_engine_opened("sber", eng, 28000.0, 28100.0)
     assert eng.position is not None
     assert eng.position.units == 1                               # урезано до вмещающегося
     assert orders == [(1, 1)]                                    # ордера ушли на 1+1 лот
-    assert any("урезан по свободным средствам" in e["message"] for e in s.events)
+    assert any("урезан по ёмкости брокера" in e["message"] for e in s.events)
     St5Portfolio._go_cache = {}
 
 
