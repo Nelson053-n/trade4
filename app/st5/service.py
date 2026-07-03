@@ -251,7 +251,8 @@ class St5Session:
             pcfg = self._pair_cfg(pid)
             self.pair_cfgs[pid] = pcfg
             self.engines[pid] = ST5Engine(pid, pcfg, base_lots=pcfg.execution.quantity_lots,
-                                          half_spread_pts=pcfg.strategy.half_spread_pts)
+                                          half_spread_pts=pcfg.strategy.half_spread_pts,
+                                          fee_rate=pcfg.strategy.fee_rate)
         self.trades: list[dict] = []             # общий журнал портфеля (json-записи)
         self.history: dict[str, list] = {pid: [] for pid in ST5_PAIRS}   # история спреда по парам
         self.events: list[dict] = []
@@ -289,7 +290,7 @@ class St5Session:
     # ключевые параметры стратегии, которыми оперирует версионирование/калибровка
     OVERRIDE_KEYS = ("z_entry", "z_exit_full", "z_take_partial", "z_no_entry",
                      "z_stop", "half_life_stop_mult", "size_tiers",
-                     "rv_ratio_max", "hurst_max", "max_units", "half_spread_pts")
+                     "rv_ratio_max", "hurst_max", "max_units", "half_spread_pts", "fee_rate")
 
     def _pair_cfg(self, pid: str) -> St5Config:
         """Конфиг пары = базовый ST5 + per-pair оверрайды из ST5_PAIRS[pid][4] (код) +
@@ -320,6 +321,7 @@ class St5Session:
             self.pair_cfgs[pid] = pcfg
             self.engines[pid].cfg = pcfg          # движок читает cfg.strategy каждый бар
             self.engines[pid].half_spread = pcfg.strategy.half_spread_pts
+            self.engines[pid].fee_rate = pcfg.strategy.fee_rate
         self.save_session()
         self.log_event("info", f"параметры стратегии применены: {targets}")
         return True, "ok"

@@ -55,12 +55,13 @@ def size_multiplier(abs_z: float, cfg) -> float | None:
 class ST5Engine:
     def __init__(self, pair: str, cfg: St5Config, base_lots: int = 1,
                  fee_per_lot: float = 2.0, half_spread_pts: float = 0.0,
-                 slippage_pts: float = 0.0):
+                 slippage_pts: float = 0.0, fee_rate: float = 0.0):
         self.pair = pair
         self.cfg = cfg
         s = cfg.strategy
         self.base_lots = base_lots
-        self.fee_per_lot = fee_per_lot          # комиссия за лот (одна нога)
+        self.fee_per_lot = fee_per_lot          # комиссия за лот (одна нога) — если fee_rate=0
+        self.fee_rate = fee_rate                # доля от нотионала операции (приоритетна)
         self.half_spread = half_spread_pts      # половина bid-ask в пунктах (на ногу)
         self.slippage = slippage_pts            # проскальзывание в пунктах
         self.kalman = KalmanHedge(s.kalman_delta, s.kalman_obs_noise)
@@ -100,7 +101,12 @@ class ST5Engine:
         adj = self.half_spread + self.slippage
         return ref + adj if is_buy else ref - adj
 
-    def _legs_fee(self, ord_lots: int, pref_lots: int) -> float:
+    def _legs_fee(self, ord_lots: int, pref_lots: int,
+                  ord_px: float | None = None, pref_px: float | None = None) -> float:
+        """Комиссия одной операции по обеим ногам. С fee_rate — от нотионала (как берёт
+        брокер: сверка леджера 03.07), без цен/ставки — старый фикс ₽/лот."""
+        if self.fee_rate > 0 and ord_px and pref_px:
+            return (ord_px * ord_lots + pref_px * pref_lots) * self.fee_rate
         return (ord_lots + pref_lots) * self.fee_per_lot
 
     # ---------- основной шаг ----------
@@ -243,7 +249,7 @@ class ST5Engine:
         self.position = St5Position(
             pair=self.pair, state=state, entry_ts=ts, entry_z=z, entry_spread=spread,
             entry_beta=beta, lots=lots, entry_lots=lots, ord_entry=ord_fill, pref_entry=pref_fill,
-            half_life=hl, fees_rub=self._legs_fee(ord_lots, lots),
+            half_life=hl, fees_rub=self._legs_fee(ord_lots, lots, ord_fill, pref_fill),
             ord_lots=ord_lots, units=units, unit_ord=unit_ord, unit_pref=unit_pref)
 
     # ---------- ведение позиции ----------
@@ -298,14 +304,16 @@ class ST5Engine:
         ord_x, pref_x = self._leg_exit_prices(ord_px, pref_px)
         exit_spread = pref_x - p.entry_beta * ord_x
         gross = self._legs_pnl(ord_x, pref_x, close_ord, close_pref)
-        fee = 2 * self._legs_fee(close_ord, close_pref)   # round-trip закрытых ног (вход+выход)
+        # round-trip закрытых ног: вход по entry-ценам + выход по exit-ценам
+        fee = (self._legs_fee(close_ord, close_pref, p.ord_entry, p.pref_entry)
+               + self._legs_fee(close_ord, close_pref, ord_x, pref_x))
         net = gross - fee
         p.units -= close_units
         p.lots -= close_pref
         p.ord_lots -= close_ord
         p.partial_done = True
         p.realized_rub += net
-        p.fees_rub += self._legs_fee(close_ord, close_pref)
+        p.fees_rub += self._legs_fee(close_ord, close_pref, ord_x, pref_x)
         tr = St5Trade(pair=self.pair, state=p.state, entry_ts=p.entry_ts, exit_ts=ts,
                       entry_z=p.entry_z, exit_z=z, entry_spread=p.entry_spread, exit_spread=exit_spread,
                       lots=close_pref, gross_pnl_rub=gross, fees_rub=fee, net_pnl_rub=net,
@@ -321,7 +329,8 @@ class ST5Engine:
         ord_x, pref_x = self._leg_exit_prices(ord_px, pref_px)
         exit_spread = pref_x - p.entry_beta * ord_x
         gross = self._legs_pnl(ord_x, pref_x, close_ord, p.lots)
-        fee = 2 * self._legs_fee(close_ord, p.lots)        # round-trip закрытых ног (вход+выход)
+        fee = (self._legs_fee(close_ord, p.lots, p.ord_entry, p.pref_entry)
+               + self._legs_fee(close_ord, p.lots, ord_x, pref_x))   # вход+выход
         net = gross - fee
         tr = St5Trade(pair=self.pair, state=p.state, entry_ts=p.entry_ts, exit_ts=ts,
                       entry_z=p.entry_z, exit_z=z, entry_spread=p.entry_spread, exit_spread=exit_spread,

@@ -1645,3 +1645,18 @@ def test_underfilled_limit_gets_cancelled(monkeypatch):
     except St5ExecError:
         pass
     assert cancels == ["oid-1"]                          # висящий лимитник снят
+
+
+def test_fee_rate_notional_model():
+    """Честная комиссия: 0.05% от нотионала операции (сверка леджера 03.07), а не фикс/лот.
+    Вход 15+6 ног по ценам sngr должен дать комиссию ~сотни ₽, не 42₽."""
+    from app.st5.engine import ST5Engine
+    from app.st5.config import St5Config
+    eng = ST5Engine("sngr", St5Config(), fee_rate=0.0005)
+    # вход: 15 лотов обычки @15300 + 6 префов @39500 → (229500+237000)*0.0005 = 233.25
+    assert abs(eng._legs_fee(15, 6, 15300.0, 39500.0) - 233.25) < 0.01
+    # без цен (нет данных) — fallback на старый фикс
+    assert eng._legs_fee(15, 6) == (15 + 6) * eng.fee_per_lot
+    # fee_rate=0 → старая модель даже с ценами
+    eng0 = ST5Engine("sngr", St5Config(), fee_rate=0.0)
+    assert eng0._legs_fee(15, 6, 15300.0, 39500.0) == (15 + 6) * eng0.fee_per_lot
