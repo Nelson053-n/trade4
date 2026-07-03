@@ -833,7 +833,16 @@ class St5Session:
                 if self.cfg.notify.notify_reconcile:
                     self._notify(f"⚠️ <b>Сверка ног</b> · {tg.esc(ST5_PAIRS[pid][3])}\n{tg.esc(msg)}")
             elif p is None and (bal_ord or bal_pref):
-                if self.cfg.dedicated_account:
+                if self.cfg.connector.mode == "tbank_real":
+                    # БОЕВОЙ счёт: НИКАКИХ автоордеров по чужим/осиротевшим ногам — там могут
+                    # быть ручные позиции оператора. Только громкая тревога, решает человек.
+                    msg = (f"reconcile {pid}: на РЕАЛЬНОМ счёте ноги вне движка "
+                           f"(ord={bal_ord} pref={bal_pref}) — ручной разбор, бот НЕ трогает")
+                    self.log_event("warn", msg)
+                    if self.cfg.notify.notify_reconcile:
+                        self._notify(f"🚨 <b>Ноги вне движка (РЕАЛ)</b> · "
+                                     f"{tg.esc(ST5_PAIRS[pid][3])}\n{tg.esc(msg)}")
+                elif self.cfg.dedicated_account:
                     # выделенный счёт: чужих нет → это НАША голая нога (сорванный unwind,
                     # регресс 02.07 18:20 SGU6 −6). Закрываем маркетом + тревога.
                     msg = (f"reconcile {pid}: ГОЛАЯ НОГА на выделенном счёте "

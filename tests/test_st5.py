@@ -1566,3 +1566,24 @@ def test_pretrade_downsize_enters_with_fitting_units(monkeypatch):
     assert orders == [(1, 1)]                                    # ордера ушли на 1+1 лот
     assert any("урезан по свободным средствам" in e["message"] for e in s.events)
     St5Portfolio._go_cache = {}
+
+
+def test_periodic_reconcile_real_never_touches_account(monkeypatch):
+    """БОЕВОЙ режим: осиротевшие/чужие ноги НЕ автозакрываются (на счёте могут быть ручные
+    позиции оператора) — только warn-тревога. Директива 03.07: ошибки на бою очень дорогие."""
+    import asyncio
+    s = _session_with_fake_executor()
+    s.cfg.connector.mode = "tbank_real"
+    s.cfg.dedicated_account = True                     # даже с флагом — на бою не трогаем
+    s._reconciled.add("sber")
+    s._periodic_reconcile_every_s = 0
+    s.engines["sber"].position = None
+    orders = []
+    s._fake_ex.broker_lots = lambda: (0, -6)
+    s._fake_ex._uids = lambda: ("uid_o", "uid_p")
+    s._fake_ex._post = lambda *a: orders.append(a)
+    monkeypatch.setattr(s, "_make_executor", lambda pid: s._fake_ex)
+    monkeypatch.setattr(s, "_ensure_uid_cache", lambda pid: pid == "sber")
+    asyncio.run(s._periodic_reconcile())
+    assert orders == []                                # ни одного ордера
+    assert any("РЕАЛЬНОМ счёте" in e["message"] and e["kind"] == "warn" for e in s.events)
