@@ -1591,6 +1591,10 @@ async def st4_set_config(payload: dict, pair: str = "sber"):
         if payload["deviation_mode"] not in ("AbsOfMean", "LiteralPct", "Sigma"):
             raise HTTPException(400, "deviation_mode: AbsOfMean | LiteralPct | Sigma")
         s.deviation_mode = payload["deviation_mode"]
+    if "exit_mode" in payload:
+        if payload["exit_mode"] not in ("Mean", "Band"):
+            raise HTTPException(400, "exit_mode: Mean | Band")
+        s.exit_mode = payload["exit_mode"]
     if "entry_trigger" in payload:
         if payload["entry_trigger"] not in ("Breakout", "ReEntry"):
             raise HTTPException(400, "entry_trigger: Breakout | ReEntry")

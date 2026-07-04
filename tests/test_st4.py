@@ -1070,3 +1070,68 @@ def test_tinkoff_close_pair_underfill_raises(monkeypatch):
     monkeypatch.setattr(ex, "_retry_leg", underfilled)
     with pytest.raises(UnwindError, match="6/10"):
         ex.close_pair(pos, 32000, 32100)
+
+
+# ============================ exit_mode=Band (SAR band-to-band) ============================
+
+def test_band_mode_exit_and_reverse_same_bar():
+    """Band-режим: SHORT от верхней полосы закрывается у НИЖНЕЙ и ТЕМ ЖЕ баром
+    открывается LONG (SAR) — иначе пересечение «съедено» выходом и Breakout не сработает."""
+    cfg = St4Config()
+    cfg.strategy.sma_period = 30
+    cfg.strategy.deviation_pct = 0.0
+    cfg.strategy.exit_mode = "Band"
+    cfg.strategy.stop_sigma = 0.0            # чистый SAR без стопа в тесте
+    cfg.auto_approve = True
+    so, sp = _specs()
+    eng = TradingEngine(cfg, so, sp)
+    base = 32000.0
+    ts = 0
+    for i in range(40):                       # прогрев: спред 100±5, полосы ~100±10
+        eng.on_candles(ts, base, base + 100 + (5.0 if i % 2 == 0 else -5.0))
+        ts += 600000
+    eng.on_candles(ts, base, base + 250)      # пробой верхней → SHORT
+    ts += 600000
+    assert eng.state == BotState.SHORT_SPREAD
+    # спред к средней — Band-режим НЕ закрывает (Mean закрыл бы)
+    eng.on_candles(ts, base, base + 100)
+    ts += 600000
+    assert eng.state == BotState.SHORT_SPREAD
+    assert len(eng.trades) == 0
+    # спред глубоко под нижнюю полосу → закрытие шорта (в плюс) + реверс в LONG тем же баром
+    eng.on_candles(ts, base, base - 60)
+    ts += 600000
+    assert len(eng.trades) == 1
+    assert eng.trades[0].gross_pnl_rub > 0
+    assert eng.state == BotState.LONG_SPREAD  # SAR: сразу в обратную позицию
+    # возврат к верхней полосе → закрытие лонга (в плюс) + реверс в SHORT
+    eng.on_candles(ts, base, base + 220)
+    ts += 600000
+    assert len(eng.trades) == 2
+    assert eng.trades[1].gross_pnl_rub > 0
+    assert eng.state == BotState.SHORT_SPREAD
+
+
+def test_band_mode_no_reverse_when_risk_blocks():
+    """Реверс уважает риск-гейт: при trading_enabled=False закрытие происходит, реверса нет."""
+    cfg = St4Config()
+    cfg.strategy.sma_period = 30
+    cfg.strategy.deviation_pct = 0.0
+    cfg.strategy.exit_mode = "Band"
+    cfg.strategy.stop_sigma = 0.0
+    cfg.auto_approve = True
+    so, sp = _specs()
+    eng = TradingEngine(cfg, so, sp)
+    base = 32000.0
+    ts = 0
+    for i in range(40):
+        eng.on_candles(ts, base, base + 100 + (5.0 if i % 2 == 0 else -5.0))
+        ts += 600000
+    eng.on_candles(ts, base, base + 250)
+    ts += 600000
+    assert eng.state == BotState.SHORT_SPREAD
+    cfg.risk.trading_enabled = False          # оператор выключил входы
+    eng.on_candles(ts, base, base - 60)
+    ts += 600000
+    assert len(eng.trades) == 1               # выход состоялся (выходы не гейтятся)
+    assert eng.state == BotState.FLAT         # но реверса нет

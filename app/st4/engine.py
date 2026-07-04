@@ -225,7 +225,8 @@ class TradingEngine:
         if self.position is not None and self._prev is not None and band.is_ready:
             sma_level = (self.position.sma_at_entry
                          if self.cfg.strategy.freeze_sma_on_exit else band.sma)
-            crossed = exit_signal(self.state, self._prev, band, sma_level)
+            exit_mode = self.cfg.strategy.exit_mode
+            crossed = exit_signal(self.state, self._prev, band, sma_level, exit_mode)
             time_stop = (self.cfg.strategy.max_bars_in_trade > 0
                          and self._bars_held >= self.cfg.strategy.max_bars_in_trade)
             # защитный стоп (опционально): спред ушёл против позиции дальше stop_sigma·σ
@@ -241,7 +242,7 @@ class TradingEngine:
             # SHORT вошёл сверху → тейк когда спред опустился до SMA+take·σ; LONG — зеркально.
             tp = self.cfg.strategy.take_profit_sigma
             take = False
-            if tp > 0 and band.sigma > 0 and not crossed:
+            if tp > 0 and band.sigma > 0 and not crossed and exit_mode == "Mean":
                 if self.state == BotState.SHORT_SPREAD:
                     take = band.spread <= band.sma + tp * band.sigma
                 elif self.state == BotState.LONG_SPREAD:
@@ -258,9 +259,32 @@ class TradingEngine:
                                   f"выход ({reason}) отложен: рынок закрыт (неторговое время)", {}))
                     self._prev = band
                     return StepResult(state=self.state, band=band, events=events)
+                was_short = self.state == BotState.SHORT_SPREAD
                 trade = self._close_position(bar, reason)
                 events.append(EngineEvent(bar.ts, "exit",
                               f"выход ({reason}): net {trade.net_pnl_rub:+.0f}₽", {}))
+                # Band-режим (SAR): выход у противоположной полосы = вход в обратную
+                # сторону ТЕМ ЖЕ баром (иначе пересечение «съедено» выходом и Breakout
+                # больше не сработает). Реверс уважает гейты: риск, роллировер, клиринг,
+                # авто-режим (в ручном реверс не делаем — только классический выход).
+                if crossed and exit_mode == "Band" and self.cfg.auto_approve:
+                    rev = Signal.BUY if was_short else Signal.SELL
+                    d2e = self.days_to_expiry(bar.ts)
+                    no_entry = self.cfg.instruments.rollover_no_new_entry_days_before
+                    exec_ts = bar.ts + self.cfg.strategy.candle_interval_minutes * 60_000
+                    ok, why = self.risk.can_enter(bar.ts, 0)
+                    if d2e is not None and d2e < no_entry:
+                        self._log_missed(bar, rev, band, f"реверс: окно роллировера ({d2e} дн)")
+                    elif in_clearing_window(exec_ts, self.cfg.session):
+                        self._log_missed(bar, rev, band, "реверс: клиринговое окно")
+                    elif not ok:
+                        events.append(EngineEvent(bar.ts, "warn", f"реверс запрещён: {why}", {}))
+                        self._log_missed(bar, rev, band, f"реверс: риск-гейт: {why}")
+                    else:
+                        res = self._open_position(rev, band, bar, events)
+                        res.trade = trade      # сделка закрытия — в результате шага
+                        self._prev = band
+                        return res
                 self._prev = band
                 return StepResult(state=self.state, band=band, signal=Signal.EXIT,
                                   trade=trade, events=events)

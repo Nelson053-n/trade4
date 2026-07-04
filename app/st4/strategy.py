@@ -70,12 +70,20 @@ def entry_signal(prev: BandReading, cur: BandReading, cfg: StrategyConfig) -> Si
 
 
 def exit_signal(state: BotState, prev: BandReading, cur: BandReading,
-                sma_level: float) -> bool:
-    """Выход по пересечению средней (§9.4). sma_level — живая SMA или зафиксированная.
+                sma_level: float, mode: str = "Mean") -> bool:
+    """Выход. Mean (§9.4): пересечение средней. Band (SAR): пересечение ПРОТИВОПОЛОЖНОЙ
+    полосы — SHORT закрывается у нижней (забрали весь канал), LONG у верхней; полосы
+    живые (sma_level в Band не используется).
 
-    SHORT_SPREAD: спред пересекает среднюю сверху вниз (prev > SMA и cur <= SMA).
-    LONG_SPREAD:  снизу вверх (prev < SMA и cur >= SMA).
+    Mean SHORT_SPREAD: спред пересекает среднюю сверху вниз (prev > SMA и cur <= SMA).
+    Mean LONG_SPREAD:  снизу вверх (prev < SMA и cur >= SMA).
     """
+    if mode == "Band":
+        if state == BotState.SHORT_SPREAD:
+            return prev.spread > prev.lower and cur.spread <= cur.lower
+        if state == BotState.LONG_SPREAD:
+            return prev.spread < prev.upper and cur.spread >= cur.upper
+        return False
     if state == BotState.SHORT_SPREAD:
         return prev.spread > sma_level and cur.spread <= sma_level
     if state == BotState.LONG_SPREAD:
