@@ -290,7 +290,7 @@ class St5Session:
     # ключевые параметры стратегии, которыми оперирует версионирование/калибровка
     OVERRIDE_KEYS = ("z_entry", "z_exit_full", "z_take_partial", "z_no_entry",
                      "z_stop", "half_life_stop_mult", "size_tiers",
-                     "rv_ratio_max", "hurst_max", "max_units", "half_spread_pts", "fee_rate")
+                     "rv_ratio_max", "hurst_max", "max_units", "half_spread_pts", "fee_rate", "exit_mode")
 
     def _pair_cfg(self, pid: str) -> St5Config:
         """Конфиг пары = базовый ST5 + per-pair оверрайды из ST5_PAIRS[pid][4] (код) +

@@ -1660,3 +1660,43 @@ def test_fee_rate_notional_model():
     # fee_rate=0 → старая модель даже с ценами
     eng0 = ST5Engine("sngr", St5Config(), fee_rate=0.0)
     assert eng0._legs_fee(15, 6, 15300.0, 39500.0) == (15 + 6) * eng0.fee_per_lot
+
+
+def test_band_exit_mode_holds_until_opposite_threshold():
+    """exit_mode=band (SAR по z): SHORT не закрывается ни у нуля, ни при z<z_exit_full —
+    только при проходе z ДО −z_entry (противоположный порог); причина exit_band."""
+    from app.st5.config import St5Config
+    from app.st5.engine import ST5Engine
+    from app.st5.models import St5Position, St5State
+    c = St5Config()
+    c.strategy.exit_mode = "band"
+    c.strategy.z_entry = 2.0
+    eng = ST5Engine("t", c, base_lots=1, fee_per_lot=2.0)
+    eng.filt.adf_p = 0.01                # фильтры «прогреты» — иначе стоп adf_break
+    def pos():
+        return St5Position(
+            pair="t", state=St5State.SHORT_SPREAD, entry_ts=1, entry_z=2.5, entry_spread=0.0,
+            entry_beta=1.0, lots=1, entry_lots=1, ord_entry=100.0, pref_entry=100.0,
+            half_life=float("inf"), ord_lots=1, units=1, unit_ord=1, unit_pref=1)
+    eng.position = pos()
+    # z у нуля (mean закрыл бы) — band держит
+    assert eng._manage_position(2, 0.1, 0.0, 100.0, 100.0) is None
+    assert eng.position is not None
+    # z = −1.9 (ещё не дошёл до −z_entry) — держим
+    assert eng._manage_position(3, -1.9, 0.0, 100.0, 100.0) is None
+    # z = −2.1 — противоположный порог пройден → полный выход exit_band
+    tr = eng._manage_position(4, -2.1, 0.0, 100.0, 100.0)
+    assert tr is not None and tr.reason == "exit_band"
+    assert eng.position is None
+    # зеркально для LONG: выход только при z >= +z_entry
+    eng.position = pos()
+    eng.position.state = St5State.LONG_SPREAD
+    eng.position.entry_z = -2.5
+    assert eng._manage_position(5, 1.9, 0.0, 100.0, 100.0) is None
+    tr = eng._manage_position(6, 2.2, 0.0, 100.0, 100.0)
+    assert tr is not None and tr.reason == "exit_band"
+    # стопы работают и в band-режиме
+    c.strategy.z_stop = 3.5
+    eng.position = pos()
+    tr = eng._manage_position(7, 3.6, 0.0, 100.0, 100.0)   # z > z_stop
+    assert tr is not None and tr.reason == "z_stop"

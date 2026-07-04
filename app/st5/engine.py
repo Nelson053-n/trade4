@@ -266,6 +266,13 @@ class ST5Engine:
         if self.filt.adf_p > s.adf_p_break:
             return self._close(ts, z, spread, ord_px, pref_px, "adf_break")
         # 2) полный выход остатка
+        if s.exit_mode == "band":
+            # band-to-band (SAR): выход только у ПРОТИВОПОЛОЖНОГО порога ±z_entry;
+            # реверс сделает обычный вход на следующем баре (|z| всё ещё > z_entry)
+            short = p.state == St5State.SHORT_SPREAD
+            if (z <= -s.z_entry) if short else (z >= s.z_entry):
+                return self._close(ts, z, spread, ord_px, pref_px, "exit_band")
+            return None
         if az < s.z_exit_full:
             return self._close(ts, z, spread, ord_px, pref_px, "exit")
         # 3) частичная фиксация 50% при |z| < z_take_partial (закрываем целые юниты)
