@@ -76,3 +76,50 @@ def test_session_persist_and_registry(tmp_path, monkeypatch):
     p = s2.engines["imoexf"].position
     assert p is not None and p.perp_lots == 20 and p.quart_lots == 1
     assert s2.trades[0]["net_pnl_rub"] == 500.0
+
+
+# ============================ ЗАЩИТА ОТ ГЭПА ============================
+
+def test_stop_loss_on_gap_against_short():
+    """Стоп-лосс: девальвационный гэп ПРОТИВ шорта (перп резко вырос) при высоком
+    фандинге → action='stop' НЕЗАВИСИМО от фандинга (иначе позиция висела бы в убытке)."""
+    e = _eng(fund_enter_pp=35.0, fund_exit_pp=25.0, stop_loss_pct=10.0)
+    e.daily_step(_snap(fund=40))
+    e.confirm_enter(_snap(fund=40, perp=2344.0), perp_fill=2344.0, quart_fill=236000.0, fee_rub=42.0)
+    # перп +25% против шорта: полухедж компенсирует часть кварт-ногой, но нетто-убыток
+    # пробивает 10% нотионала (468800). Полухедж настолько эффективен, что стоп бьёт
+    # только на КРУПНОМ гэпе — это подтверждает защитную ценность конструкции.
+    gap = _snap(date="2026-07-03", fund=45, perp=2344.0*1.25, quart=236000.0*1.25)
+    # фандинг ВЫСОКИЙ (45>25) — обычный выход НЕ сработал бы, но убыток огромен → stop
+    assert e.daily_step(gap) == "stop"
+
+
+def test_stop_loss_not_triggered_small_move():
+    """Малое движение против шорта (в пределах стопа) — держим, не стопим."""
+    e = _eng(fund_enter_pp=35.0, stop_loss_pct=10.0)
+    e.daily_step(_snap(fund=40))
+    e.confirm_enter(_snap(fund=40, perp=2344.0), perp_fill=2344.0, quart_fill=236000.0, fee_rub=42.0)
+    # перп +2% — убыток мал, стоп не бьёт (фандинг высокий → hold)
+    assert e.daily_step(_snap(date="2026-07-03", fund=40, perp=2344.0*1.02, quart=236000.0*1.02)) == "hold"
+
+
+def test_stop_loss_disabled_when_zero():
+    """stop_loss_pct=0 → стоп выключен, поведение как раньше (hold при высоком фандинге)."""
+    e = _eng(fund_enter_pp=35.0, stop_loss_pct=0.0)
+    e.daily_step(_snap(fund=40))
+    e.confirm_enter(_snap(fund=40, perp=2344.0), perp_fill=2344.0, quart_fill=236000.0, fee_rub=42.0)
+    assert e.daily_step(_snap(date="2026-07-03", fund=40, perp=2344.0*1.20, quart=236000.0*1.20)) == "hold"
+
+
+def test_gap_block_prevents_entry():
+    """Гейт гэпа: перп вырос >gap_block_pct за день → вход заблокирован (gap_block),
+    даже если фандинг выше порога входа."""
+    e = _eng(fund_enter_pp=35.0, gap_block_pct=7.0)
+    # первый снап устанавливает базу цены
+    assert e.daily_step(_snap(date="2026-07-02", fund=30, perp=100.0)) == "none"
+    # следующий день: фандинг перегрет (40>35), НО перп +10% (>7%) → gap_block
+    assert e.daily_step(_snap(date="2026-07-03", fund=40, perp=110.0)) == "gap_block"
+    # а при спокойном движении (+2%) — обычный вход
+    e2 = _eng(fund_enter_pp=35.0, gap_block_pct=7.0)
+    e2.daily_step(_snap(date="2026-07-02", fund=30, perp=100.0))
+    assert e2.daily_step(_snap(date="2026-07-03", fund=40, perp=102.0)) == "enter"

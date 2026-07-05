@@ -1540,6 +1540,9 @@ def st7_set_config(payload: dict):
     s.roll_days_before = int(_num("roll_days_before", 1, 10, s.roll_days_before))
     s.units = int(_num("units", 1, 20, s.units))
     s.fee_per_lot = _num("fee_per_lot", 0.0, 50.0, s.fee_per_lot)
+    s.stop_loss_pct = _num("stop_loss_pct", 0.0, 50.0, s.stop_loss_pct)
+    s.gap_block_pct = _num("gap_block_pct", 0.0, 30.0, s.gap_block_pct)
+    s.daily_loss_limit_rub = _num("daily_loss_limit_rub", 0.0, 1e7, s.daily_loss_limit_rub)
     ST7.save_session()
     return {"ok": True, "strategy": s.model_dump()}
 

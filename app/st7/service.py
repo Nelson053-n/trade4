@@ -175,10 +175,39 @@ class St7Session:
             self.log_missed(pid, day, fired,
                             f"дивидендная аномалия базиса ({view['basis_ann_pp']:+.1f}пп)")
             action = "none"
+        if action == "gap_block":
+            self.log_missed(pid, day, fired,
+                            f"🚨 широкий гэп перпа >{st.gap_block_pct}% против шорта — вход заблокирован")
+            self.log_event("warn", f"{pid}: вход заблокирован защитой от гэпа")
+            action = "none"
+        # дневной лимит убытка (HALT новых входов при накопленном минусе за день)
+        if action == "enter" and st.daily_loss_limit_rub > 0:
+            import datetime as _dtm
+            _msk = _dtm.timezone(_dtm.timedelta(hours=3))
+            day_net = sum(t.get("net_pnl_rub", 0) for t in self.trades
+                          if t.get("exit_date") == day)
+            if day_net < -abs(st.daily_loss_limit_rub):
+                self.log_missed(pid, day, fired,
+                                f"🚨 дневной лимит убытка {st.daily_loss_limit_rub:.0f}₽ достигнут "
+                                f"(день {day_net:+.0f}₽) — входы остановлены")
+                action = "none"
         if action == "enter" and not (self.cfg.trading_enabled and self.enabled_pairs.get(pid, True)):
             self.log_missed(pid, day, fired,
                             "торговля выключена" if not self.cfg.trading_enabled else "пара выключена")
             action = "none"
+        if action == "stop":
+            # АВАРИЙНЫЙ ВЫХОД по стоп-лоссу (защита от девальвационного гэпа) — то же
+            # исполнение, что exit, но причина 'stop' и 🚨 TG-нотификация
+            p = eng.position
+            if self._exec_exit(pid, eng, snap):
+                fee = eng.pair_fee(p.perp_lots, p.quart_lots)
+                tr = eng.confirm_exit(snap, perp_fill=perp_s, quart_fill=qs, fee_rub=fee, reason="stop")
+                self.trades.append(asdict(tr))
+                self.log_event("warn", f"🚨 {pid}: СТОП-ЛОСС net {tr.net_pnl_rub:+.0f}₽ "
+                                       f"(убыток > {st.stop_loss_pct}% нотионала — защита от гэпа)")
+            self.save_session()
+            view["in_position"] = eng.position is not None
+            return view
         if action == "enter":
             if not self._exec_enter(pid, eng, snap, st.units):
                 self.log_missed(pid, day, fired, "брокер: вход не исполнен (см. события)")

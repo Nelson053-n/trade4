@@ -60,23 +60,70 @@ class St7Engine:
         self.last_snap: DaySnap | None = None
         self.last_fund_pp: float | None = None
 
+    def entry_notional_rub(self) -> float:
+        """Нотионал перп-ноги на входе (база для стоп-лосса в %). 0 если нет позиции."""
+        p = self.position
+        if p is None:
+            return 0.0
+        return abs(p.perp_entry * p.perp_lots * self.pv_perp)
+
+    def stop_hit(self, snap: DaySnap) -> bool:
+        """Стоп-лосс: unrealized < −stop_loss_pct·нотионал перп-ноги. Защита от
+        девальвационного гэпа — срабатывает НЕЗАВИСИМО от фандинга (полухедж режет
+        движение вдвое, но не останавливает кровотечение при удержании позиции)."""
+        p = self.position
+        pct = getattr(self.strat, "stop_loss_pct", 0.0)
+        if p is None or pct <= 0:
+            return False
+        notional = self.entry_notional_rub()
+        if notional <= 0:
+            return False
+        # unrealized по текущему снапу: P&L ног + фандинг − комиссии
+        legs = ((snap.quart_settle - p.quart_entry) * p.quart_lots * self.pv_quart
+                - (snap.perp_settle - p.perp_entry) * p.perp_lots * self.pv_perp)
+        unreal = legs + p.funding_rub - p.fees_rub
+        return unreal < -(pct / 100.0) * notional
+
+    def gap_against(self, snap: DaySnap) -> bool:
+        """Широкий гэп перпа ВВЕРХ (против шорта) за день > gap_block_pct — блок входа
+        (толпа могла развернуться на панике/девальвации, вход в разгар опасен)."""
+        pct = getattr(self.strat, "gap_block_pct", 0.0)
+        if pct <= 0 or self.last_snap is None or self.last_snap.perp_settle <= 0:
+            return False
+        chg = (snap.perp_settle - self.last_snap.perp_settle) / self.last_snap.perp_settle * 100
+        return chg > pct
+
     def daily_step(self, snap: DaySnap) -> str:
-        """'enter' | 'exit' | 'roll' | 'hold' | 'trap' | 'none'. Фандинг начисляется в hold."""
-        self.last_snap = snap
-        self.last_fund_pp = snap.fund_trail_ann_pp
+        """'enter' | 'exit' | 'stop' | 'roll' | 'hold' | 'trap' | 'gap_block' | 'none'.
+        Фандинг начисляется в hold. stop — аварийный выход по убытку (защита от гэпа)."""
+        prev_snap = self.last_snap
         p = self.position
         if p is not None:
             p.funding_rub += snap.swaprate * self.pv_perp * p.perp_lots
+            # ЗАЩИТА: стоп-лосс раньше фандингового выхода — гэп может держать фандинг высоким
+            if self.stop_hit(snap):
+                self.last_snap = snap; self.last_fund_pp = snap.fund_trail_ann_pp
+                return "stop"
             if snap.fund_trail_ann_pp < self.strat.fund_exit_pp:
+                self.last_snap = snap; self.last_fund_pp = snap.fund_trail_ann_pp
                 return "exit"
             if snap.quart_secid != p.quart_secid:
+                self.last_snap = snap; self.last_fund_pp = snap.fund_trail_ann_pp
                 return "roll"
+            self.last_snap = snap; self.last_fund_pp = snap.fund_trail_ann_pp
             return "hold"
+        # нет позиции — вход, но с гейтом гэпа (last_snap ещё = prev до присвоения)
+        action = "none"
         if snap.fund_trail_ann_pp > self.strat.fund_enter_pp:
             if abs(snap.basis_ann_pp) > self.strat.basis_sane_pp:
-                return "trap"          # дивидендная аномалия базиса — хедж-нога непредсказуема
-            return "enter"
-        return "none"
+                action = "trap"        # дивидендная аномалия базиса
+            elif self.gap_against(snap):
+                action = "gap_block"   # широкий гэп против шорта — вход опасен
+            else:
+                action = "enter"
+        self.last_snap = snap
+        self.last_fund_pp = snap.fund_trail_ann_pp
+        return action
 
     def confirm_enter(self, snap: DaySnap, perp_fill: float, quart_fill: float,
                       fee_rub: float) -> None:
