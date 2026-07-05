@@ -150,6 +150,14 @@ class ST5Engine:
         if self.position is not None:
             self.position.bars_held += 1
             result = self._manage_position(ts, z, spread, ord_px, pref_px)
+            # band-режим (SAR): после закрытия у противоположного порога — РЕВЕРС ТЕМ ЖЕ
+            # баром. Иначе на быстром mean-reversion отскоке спред вернётся внутрь ±z_entry
+            # раньше следующего бара, окно входа проскочит и разворот потеряется (баг
+            # найден на сделке tatn 05.07 12:00: вышли z=−1.82, лонга не открыли).
+            if (result is not None and result.reason == "exit_band"
+                    and self.position is None
+                    and self._can_enter(z, dz, ts_local_min)):
+                self._open(ts, z, spread, beta, ord_px, pref_px)
         elif self._can_enter(z, dz, ts_local_min):
             self._open(ts, z, spread, beta, ord_px, pref_px)
 

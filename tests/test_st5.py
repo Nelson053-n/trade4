@@ -1700,3 +1700,39 @@ def test_band_exit_mode_holds_until_opposite_threshold():
     eng.position = pos()
     tr = eng._manage_position(7, 3.6, 0.0, 100.0, 100.0)   # z > z_stop
     assert tr is not None and tr.reason == "z_stop"
+
+
+def test_band_reverse_same_bar_on_fast_snapback():
+    """band-SAR: выход у противоположного порога → реверс ТЕМ ЖЕ баром. Регресс на баг
+    tatn 05.07 12:00: спред долетел до −z_entry и сразу пошёл обратно — лонг не открылся,
+    т.к. вход был в ветке elif (только когда позиции не было с начала бара)."""
+    from app.st5.config import St5Config
+    from app.st5.engine import ST5Engine
+    from app.st5.models import St5State
+    c = St5Config()
+    c.strategy.exit_mode = "band"
+    c.strategy.z_entry = 1.5
+    c.strategy.z_stop = 6.5
+    c.strategy.z_no_entry = 6.0
+    c.strategy.size_tiers = [(1.5, 2.25, 1), (2.25, 6.0, 2)]   # тиры от z_entry (как tatn на проде)
+    c.strategy.kalman_warmup = 0
+    eng = ST5Engine("t", c, base_lots=1, fee_per_lot=2.0)
+    eng.filt.adf_p = 0.001
+    eng.filt.hurst = 0.4
+    eng.filt.cointegrated = True
+    eng.filt.mean_reverting = True
+    eng.filt.calm_regime = True
+    # искусственно поставим SHORT-позицию и подадим бар с z ниже −z_entry —
+    # step должен закрыть шорт (exit_band) И тем же вызовом открыть LONG
+    from app.st5.models import St5Position
+    eng.position = St5Position(
+        pair="t", state=St5State.SHORT_SPREAD, entry_ts=1, entry_z=2.2, entry_spread=5.0,
+        entry_beta=1.0, lots=1, entry_lots=1, ord_entry=100.0, pref_entry=100.0,
+        half_life=float("inf"), ord_lots=1, units=1, unit_ord=1, unit_pref=1)
+    # мокаем z-выход: заставим zscore.step вернуть z=-1.9 (за порог −1.5)
+    eng.zscore.step = lambda spread: (-1.9, -0.5)
+    eng.rv.step = lambda spread: 0.5
+    tr = eng.step(2, 100.0, 100.0)
+    assert tr is not None and tr.reason == "exit_band"   # шорт закрыт
+    assert eng.position is not None                       # реверс состоялся
+    assert eng.position.state == St5State.LONG_SPREAD     # в противоположную сторону
