@@ -1736,3 +1736,21 @@ def test_band_reverse_same_bar_on_fast_snapback():
     assert tr is not None and tr.reason == "exit_band"   # шорт закрыт
     assert eng.position is not None                       # реверс состоялся
     assert eng.position.state == St5State.LONG_SPREAD     # в противоположную сторону
+
+
+def test_pair_interval_per_pair():
+    """Per-pair торговый ТФ: pair_cfgs с candle_interval_minutes переопределяет глобальный
+    (tatn=10м, sngr=30м, sber=45м одновременно — оптимизация 90д)."""
+    from app.st5.service import St5Session
+    s = St5Session()
+    # глобальный дефолт
+    glob = s.cfg.strategy.candle_interval_minutes
+    # пары без своего pair_cfg → глобальный
+    assert s._pair_interval("nonexistent") == glob
+    # подменим pair_cfg с per-pair интервалом
+    from app.st5.config import St5Config
+    c = St5Config(); c.strategy.candle_interval_minutes = 30
+    s.pair_cfgs["sngr"] = c
+    assert s._pair_interval("sngr") == 30
+    # candle_interval_minutes в OVERRIDE_KEYS (проходит через apply_overrides)
+    assert "candle_interval_minutes" in s.OVERRIDE_KEYS

@@ -290,7 +290,16 @@ class St5Session:
     # ключевые параметры стратегии, которыми оперирует версионирование/калибровка
     OVERRIDE_KEYS = ("z_entry", "z_exit_full", "z_take_partial", "z_no_entry",
                      "z_stop", "half_life_stop_mult", "size_tiers",
-                     "rv_ratio_max", "hurst_max", "max_units", "half_spread_pts", "fee_rate", "exit_mode")
+                     "rv_ratio_max", "hurst_max", "max_units", "half_spread_pts", "fee_rate",
+                     "exit_mode", "candle_interval_minutes")
+
+    def _pair_interval(self, pid: str) -> int:
+        """Торговый ТФ пары: per-pair из pair_cfgs (оптимизация 90д — sngr/sber крупнее),
+        иначе глобальный. Позволяет tatn=10м, sngr=30м, sber=45м одновременно."""
+        pc = self.pair_cfgs.get(pid)
+        if pc is not None:
+            return pc.strategy.candle_interval_minutes
+        return self.cfg.strategy.candle_interval_minutes
 
     def _pair_cfg(self, pid: str) -> St5Config:
         """Конфиг пары = базовый ST5 + per-pair оверрайды из ST5_PAIRS[pid][4] (код) +
@@ -744,7 +753,7 @@ class St5Session:
             from ..st4 import tbank_sandbox as _sb
             ao, ap = _P[pid][0], _P[pid][1]
             c4 = _C4(); c4.instruments.asset_ordinary = ao; c4.instruments.asset_preferred = ap
-            c4.strategy.candle_interval_minutes = self.cfg.strategy.candle_interval_minutes
+            c4.strategy.candle_interval_minutes = self._pair_interval(pid)
             if pid not in self._legs_cache:
                 self._legs_cache[pid] = feed.resolve_legs(c4)
             so, sp = self._legs_cache[pid]
@@ -998,7 +1007,7 @@ class St5Session:
         c4 = _C4()
         c4.instruments.asset_ordinary = ao
         c4.instruments.asset_preferred = ap
-        c4.strategy.candle_interval_minutes = self.cfg.strategy.candle_interval_minutes
+        c4.strategy.candle_interval_minutes = self._pair_interval(pid)
         sandbox = self.state.get("sandbox_active", False)
         # после прогрева тянем только хвост (80 баров), не весь warmup — снижает нагрузку/обрывы
         warm = len(eng.spread_buf) < 50
