@@ -232,17 +232,26 @@ def _daily_ledger_recon(day: str, MSK):
         jn = sum(1 for t in (trades or []) if t.get("exit_ts")
                  and _dtm.datetime.fromtimestamp(t["exit_ts"] / 1000, MSK).strftime("%Y-%m-%d") == day)
         try:
-            # 'to' не может быть в будущем (API 30070) → берём текущий момент UTC;
-            # 'from' с миллисекундами (без .000 API даёт HTTP 400). Операции фильтруем
-            # по нужному дню (day) уже на нашей стороне.
+            # ВАЖНО: 'day' — МСК-дата, а API работает в UTC. Ранним утром МСК (00:00-03:00
+            # UTC ещё вчера) 'from={day}T00:00Z' оказывается В БУДУЩЕМ по UTC → 30070.
+            # Берём 'from' на сутки раньше в UTC, 'to' = текущий момент UTC (не будущее),
+            # оба с миллисекундами (.000 иначе HTTP 400). Фильтруем по МСК-дню на нашей стороне.
             _now_utc = _dtm.datetime.now(_dtm.timezone.utc)
+            _frm = (_now_utc - _dtm.timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
             _to = _now_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z")
             ops = _sb._call("tinkoff.public.invest.api.contract.v1.SandboxService",
                             "GetSandboxOperations",
-                            {"accountId": acc, "from": f"{day}T00:00:00.000Z",
+                            {"accountId": acc, "from": _frm,
                              "to": _to, "state": "OPERATION_STATE_EXECUTED"},
                             token=_sb._account_token(acc)).get("operations", [])
-            ops = [o for o in ops if str(o.get("date", "")).startswith(day)]
+            # операции этого МСК-дня: date в UTC → конвертируем в МСК и сверяем
+            def _msk_day(o):
+                try:
+                    return _dtm.datetime.fromisoformat(
+                        str(o.get("date")).replace("Z", "+00:00")).astimezone(MSK).strftime("%Y-%m-%d")
+                except Exception:  # noqa: BLE001
+                    return ""
+            ops = [o for o in ops if _msk_day(o) == day]
             afee = -sum(_sb._q_to_float(o.get("payment")) for o in ops
                         if o.get("operationType") == "OPERATION_TYPE_BROKER_FEE")
             aops = sum(1 for o in ops if o.get("operationType") in

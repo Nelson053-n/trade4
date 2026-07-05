@@ -1,0 +1,34 @@
+# systemd-сервис backend trade4 (st4 спред-арбитраж) — uvicorn на 127.0.0.1:8001.
+# Вариант под ФАКТИЧЕСКИЙ путь /home/nel/trade4 и юзера nel (проект и .venv принадлежат nel).
+# Отличается от trade4.service (тот рассчитан на /opt/trade4 + root, что здесь не разворачивали).
+#
+# Установка (требует sudo):
+#   sudo cp /home/nel/trade4/infra/trade4.service.local /etc/systemd/system/trade4.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now trade4
+# Проверка:   systemctl status trade4   |   journalctl -u trade4 -f
+#
+# Токен T-Bank (для tbank_sandbox/real) — через drop-in:
+#   /etc/systemd/system/trade4.service.d/token.conf  →  [Service]\nEnvironment=TBANK_TOKEN=...
+# Для paper (текущий режим перенесённых сессий) токен не нужен.
+# Авторизация панели — TRADE4_USER / TRADE4_PASS тем же способом (drop-in), иначе вход открыт.
+
+[Unit]
+Description=trade4 backend (st4 spread arbitrage paper) — uvicorn API + panel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nel
+Group=nel
+WorkingDirectory=/home/nel/trade4
+ExecStart=/home/nel/trade4/.venv/bin/python -m uvicorn app.api:app --host 127.0.0.1 --port 8001
+Restart=always
+RestartSec=3
+# мягкая остановка, чтобы фоновые задачи (плеер/поллер) завершились
+KillSignal=SIGINT
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
