@@ -232,11 +232,17 @@ def _daily_ledger_recon(day: str, MSK):
         jn = sum(1 for t in (trades or []) if t.get("exit_ts")
                  and _dtm.datetime.fromtimestamp(t["exit_ts"] / 1000, MSK).strftime("%Y-%m-%d") == day)
         try:
+            # 'to' не может быть в будущем (API 30070) → берём текущий момент UTC;
+            # 'from' с миллисекундами (без .000 API даёт HTTP 400). Операции фильтруем
+            # по нужному дню (day) уже на нашей стороне.
+            _now_utc = _dtm.datetime.now(_dtm.timezone.utc)
+            _to = _now_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z")
             ops = _sb._call("tinkoff.public.invest.api.contract.v1.SandboxService",
                             "GetSandboxOperations",
-                            {"accountId": acc, "from": f"{day}T00:00:00Z",
-                             "to": f"{day}T23:59:59Z", "state": "OPERATION_STATE_EXECUTED"},
+                            {"accountId": acc, "from": f"{day}T00:00:00.000Z",
+                             "to": _to, "state": "OPERATION_STATE_EXECUTED"},
                             token=_sb._account_token(acc)).get("operations", [])
+            ops = [o for o in ops if str(o.get("date", "")).startswith(day)]
             afee = -sum(_sb._q_to_float(o.get("payment")) for o in ops
                         if o.get("operationType") == "OPERATION_TYPE_BROKER_FEE")
             aops = sum(1 for o in ops if o.get("operationType") in
