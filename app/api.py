@@ -215,6 +215,10 @@ def _daily_ledger_recon(day: str, MSK):
         ("ST7", ST7.cfg.account_id, ST7.cfg.mode, ST7.trades),
     ]
     for eng in ST4S.values():
+        # только ЖИВЫЕ пары st4 — остановленные (rtkm/tatn) висят на общем счёте 614c441c
+        # с чужими операциями (/opt/trade), сверка дала бы ложное расхождение
+        if not eng.state.get("live"):
+            continue
         engines.append((f"ST4-{eng.pair}", getattr(eng.cfg.connector, "account_id", None),
                         eng.cfg.connector.mode,
                         [{"exit_ts": t.exit_ts, "fees_rub": t.fees_rub} for t in eng.engine.trades]))
