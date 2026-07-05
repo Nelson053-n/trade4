@@ -200,6 +200,52 @@ def _run_backtest_tbank(stop_sigma: float | None, ST4: St4Session) -> dict:
     return res
 
 
+def _daily_ledger_recon(day: str, MSK):
+    """Посделочная сверка каждого движка с леджером его sandbox-счёта за день.
+    Сравнивает: комиссии журнала vs broker_fee операций счёта, число сделок vs операций.
+    Возвращает список (движок, строка-факт|None, journal_fee) для дайджеста. Расхождение
+    комиссий/числа = скрытые издержки или незалогированные филлы."""
+    import datetime as _dtm
+    from .st4 import tbank_sandbox as _sb
+    out = []
+    engines = [
+        ("ST5", getattr(ST5.cfg.connector, "account_id", None),
+         ST5.cfg.connector.mode, ST5.trades),
+        ("ST6", ST6.cfg.account_id, ST6.cfg.mode, ST6.trades),
+        ("ST7", ST7.cfg.account_id, ST7.cfg.mode, ST7.trades),
+    ]
+    for eng in ST4S.values():
+        engines.append((f"ST4-{eng.pair}", getattr(eng.cfg.connector, "account_id", None),
+                        eng.cfg.connector.mode,
+                        [{"exit_ts": t.exit_ts, "fees_rub": t.fees_rub} for t in eng.engine.trades]))
+    for name, acc, mode, trades in engines:
+        if mode != "tbank_sandbox" or not acc:
+            out.append((f"{name}: paper (сверка не требуется)", None, 0.0))
+            continue
+        jfee = sum(t.get("fees_rub", 0) or 0 for t in (trades or [])
+                   if t.get("exit_ts") and _dtm.datetime.fromtimestamp(
+                       t["exit_ts"] / 1000, MSK).strftime("%Y-%m-%d") == day)
+        jn = sum(1 for t in (trades or []) if t.get("exit_ts")
+                 and _dtm.datetime.fromtimestamp(t["exit_ts"] / 1000, MSK).strftime("%Y-%m-%d") == day)
+        try:
+            ops = _sb._call("tinkoff.public.invest.api.contract.v1.SandboxService",
+                            "GetSandboxOperations",
+                            {"accountId": acc, "from": f"{day}T00:00:00Z",
+                             "to": f"{day}T23:59:59Z", "state": "OPERATION_STATE_EXECUTED"},
+                            token=_sb._account_token(acc)).get("operations", [])
+            afee = -sum(_sb._q_to_float(o.get("payment")) for o in ops
+                        if o.get("operationType") == "OPERATION_TYPE_BROKER_FEE")
+            aops = sum(1 for o in ops if o.get("operationType") in
+                       ("OPERATION_TYPE_BUY", "OPERATION_TYPE_SELL"))
+            delta = afee - jfee
+            flag = " ⚠️" if abs(delta) > 50 else " ✓"
+            acc_str = f"{aops} опер, комис {afee:+.0f}₽ (Δ{delta:+.0f}){flag}"
+        except Exception as e:  # noqa: BLE001
+            acc_str = f"леджер недоступен: {str(e)[:40]}"
+        out.append((f"{name} ({jn}сд)", acc_str, jfee))
+    return out
+
+
 async def _daily_digest_loop():
     """Вечерний Telegram-дайджест по ВСЕМ движкам (23:55 МСК, раз в день).
     Шлётся через notifier st5 (общий бот/чат); выключен вместе с notify.enabled."""
@@ -249,6 +295,11 @@ async def _daily_digest_loop():
                              if _dtm.datetime.fromtimestamp(m["ts"] / 1000, MSK).strftime("%Y-%m-%d") == day)
             if miss_today:
                 lines.append(f"⏭ упущенных входов st5: {miss_today}")
+            # ── ПОСДЕЛОЧНАЯ СВЕРКА журнал↔счёт по каждому движку (боевая песочная торговля) ──
+            lines.append("— <b>сверка сделок ↔ счёт</b> —")
+            for name, acc, jfee in _daily_ledger_recon(day, MSK):
+                lines.append(name if acc is None else
+                             f"{name}: журнал комис {jfee:+.0f}₽ · счёт {acc}")
             await ST5.notifier.send("\n".join(lines))
             sent_for = day
         except Exception:  # noqa: BLE001  дайджест не должен ронять сервис
@@ -763,6 +814,18 @@ async def st5_backtest(pair: str = "sber", days: int = 180):
                      "win_rate_pct": res["win_rate_pct"], "net_pnl_rub": res["net_pnl_rub"],
                      "sharpe": res["sharpe"], "max_drawdown_pct": res["max_drawdown_pct"]})
     return res
+
+
+@app.get("/reconcile/daily")
+async def reconcile_daily(day: str | None = None):
+    """Посделочная сверка журнал↔счёт по всем движкам за день (по умолчанию сегодня МСК).
+    Ручной вызов той же сверки, что уходит в вечерний TG-дайджест."""
+    import datetime as _dtm
+    MSK = _dtm.timezone(_dtm.timedelta(hours=3))
+    d = day or _dtm.datetime.now(MSK).strftime("%Y-%m-%d")
+    rows = await asyncio.to_thread(_daily_ledger_recon, d, MSK)
+    return {"day": d, "engines": [{"engine": n, "account_fact": a, "journal_fee": jf}
+                                  for n, a, jf in rows]}
 
 
 @app.get("/st5/daily")
