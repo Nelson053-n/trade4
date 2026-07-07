@@ -1754,3 +1754,34 @@ def test_pair_interval_per_pair():
     assert s._pair_interval("sngr") == 30
     # candle_interval_minutes в OVERRIDE_KEYS (проходит через apply_overrides)
     assert "candle_interval_minutes" in s.OVERRIDE_KEYS
+
+
+def test_real_day_pnl_from_account_not_journal():
+    """Дневной P&L для риск-гейта — по РЕАЛЬНОМУ капиталу счёта, не по журналу (журнал
+    завышал вдвое на band-разворотах). real_day_pnl = капитал − капитал_на_старте_дня."""
+    from app.st5.config import St5Config
+    from app.st5.service import St5Portfolio
+    p = St5Portfolio(St5Config())
+    # нет старта дня → None (paper)
+    assert p.real_day_pnl() is None
+    # зафиксировали старт дня 1М, капитал упал до 997к → реальный день −3к
+    p.day_start_capital = 1_000_000.0
+    p.capital_rub = 997_000.0
+    assert p.real_day_pnl() == -3_000.0
+    # журнал говорит +5000 (фикция band), но реальный −3000 → риск-гейт берёт худшее
+    p.day_pnl_rub = 5_000.0
+    worst = min(p.day_pnl_rub, p.real_day_pnl())
+    assert worst == -3_000.0
+
+
+def test_on_trade_fixes_day_start_capital():
+    """on_trade при смене дня фиксирует капитал на начало дня для реального day P&L."""
+    from app.st5.config import St5Config
+    from app.st5.service import St5Portfolio
+    p = St5Portfolio(St5Config())
+    p.capital_rub = 500_000.0
+    p.on_trade(100.0, ts_ms=1_783_000_000_000)   # первый день
+    assert p.day_start_capital == 500_000.0
+    p.capital_rub = 505_000.0
+    p.on_trade(50.0, ts_ms=1_783_200_000_000)    # след. день (>сутки) → рефикс старта
+    assert p.day_start_capital == 505_000.0

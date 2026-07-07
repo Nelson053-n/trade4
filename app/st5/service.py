@@ -67,6 +67,7 @@ class St5Portfolio:
         self.capital_rub: float = cfg.paper.start_balance_rub   # обновляется реальным портфелем в live
         self.day_pnl_rub: float = 0.0
         self._day: str = ""           # текущий торговый день (YYYY-MM-DD МСК) — для сброса day_pnl
+        self.day_start_capital: float | None = None   # капитал счёта на начало дня (реальный day P&L)
         self.consecutive_errors: int = 0
         self.halted: bool = False
         self.halt_reason: str = ""
@@ -144,10 +145,21 @@ class St5Portfolio:
         port_cap = r.max_go_portfolio_rub if r.max_go_portfolio_rub > 0 else r.risk_per_portfolio_pct * self.capital_rub
         if cur + risk_real > port_cap:
             return False, f"портфельный лимит ГО {port_cap:.0f}₽ превышен ({cur+risk_real:.0f}₽)"
-        # дневной лимит убытка
-        if self.day_pnl_rub <= -r.max_daily_loss_rub:
+        # дневной лимит убытка — по ХУДШЕМУ из журнального и РЕАЛЬНОГО (со счёта) P&L.
+        # Журнальный завышал прибыль вдвое на band-разворотах (баг двойного счёта _legs_pnl)
+        # → риск-гейт был слеп к реальным потерям. Реальный = капитал − капитал_на_старте_дня.
+        real_day = self.real_day_pnl()
+        worst = min(self.day_pnl_rub, real_day) if real_day is not None else self.day_pnl_rub
+        if worst <= -r.max_daily_loss_rub:
             return False, "дневной лимит убытка"
         return True, ""
+
+    def real_day_pnl(self) -> float | None:
+        """Реальный дневной P&L = капитал счёта − капитал на начало дня. None если нет
+        реального капитала (paper) или старт дня не зафиксирован. Не зависит от журнала."""
+        if self.day_start_capital is None:
+            return None
+        return self.capital_rub - self.day_start_capital
 
     # кэш ГО ног пары (leg_margin, ₽ за 1 лот КАЖДОЙ ноги) — меняется редко, биржа раз в день
     _go_cache: dict = {}
@@ -210,6 +222,8 @@ class St5Portfolio:
         if day != self._day:
             self._day = day
             self.day_pnl_rub = 0.0
+            # фиксируем капитал на начало дня для РЕАЛЬНОГО day P&L (не журнального)
+            self.day_start_capital = self.capital_rub if self.capital_rub > 0 else None
         self.day_pnl_rub += net_pnl_rub
 
     def on_error(self) -> None:

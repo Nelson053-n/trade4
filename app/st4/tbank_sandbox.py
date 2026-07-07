@@ -209,6 +209,16 @@ def find_future(ticker: str) -> dict:
     raise TBankError(f"фьючерс {ticker} не найден в справочнике")
 
 
+def future_by_uid(uid: str) -> dict:
+    """Найти фьючерс по UID (в справочнике коды СЕРИЙ, а не asset-коды). Нужен для
+    резолва minPriceIncrement по uid — asset-код в find_future не находится."""
+    resp = _call(_INSTRUMENTS, "Futures", {"instrumentStatus": "INSTRUMENT_STATUS_ALL"})
+    for it in resp.get("instruments", []):
+        if it.get("uid") == uid:
+            return it
+    raise TBankError(f"фьючерс uid={uid} не найден в справочнике")
+
+
 def find_share(ticker: str) -> dict:
     """Найти АКЦИЮ по тикеру через InstrumentsService.Shares + фильтр (для st6).
 

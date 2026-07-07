@@ -74,12 +74,14 @@ class St5PairExecutor:
         return self._uid_ord, self._uid_pref
 
     def _tick(self, uid: str) -> float | None:
-        """Шаг цены инструмента (для кратности лимит-цены). None — не узнали."""
+        """Шаг цены инструмента по UID (для кратности лимит-цены). None — не узнали.
+        БАГ до 07.07: резолвил через find_future(asset-код 'SNGR'), а в справочнике коды
+        СЕРИЙ 'SNU6' → исключение → tick None → ВСЕ ордера маркетом (лимитки не работали).
+        Теперь future_by_uid(uid) — резолв по тому же uid, что и ордера."""
         if uid not in self._tick_cache:
             try:
-                for it in (_sb.find_future(self.ord_ticker), _sb.find_future(self.pref_ticker)):
-                    if it.get("uid"):
-                        self._tick_cache[it["uid"]] = _sb._q_to_float(it.get("minPriceIncrement"))
+                it = _sb.future_by_uid(uid)
+                self._tick_cache[uid] = _sb._q_to_float(it.get("minPriceIncrement"))
             except Exception:  # noqa: BLE001
                 return None
         return self._tick_cache.get(uid) or None
