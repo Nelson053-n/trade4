@@ -23,6 +23,10 @@ def _trade_dict(tr) -> dict:
     """St8Trade → dict для журнала (net_pnl_rub ключ для аудита/сверки)."""
     return asdict(tr)
 
+
+def eng_side_label(side: str) -> str:
+    return "шорт" if side == "short" else "лонг"
+
 # ── РЕЕСТР ВСЕЛЕННОЙ (мой бэктест 08.07: N=10, без июля, t=8.2, ~23 сд/год) ──
 # ядро 16 бумаг (t>1.5, >=5 событий) + lot_size (акций в лоте FORTS-спота, для нотионала).
 # lot_size здесь = лотность спота TQBR (уточняется из ISS при live; дефолт 1 для дорогих).
@@ -328,22 +332,47 @@ class St8Session:
             eng = self._engine(tk)
             q = self.market.get(tk, {})
             stock_px = q.get("offer") or q.get("last")   # вход по ask (реализм)
-            # ── ВЫХОД (приоритет: стоп, потом плановый) ──
+            # ── ВЫХОД (приоритет: стоп, потом плановый; лонг и шорт) ──
             if eng.position is not None:
-                sell_px = q.get("bid") or q.get("last") or eng.position.stock_entry
-                stop = eng.check_stop(sell_px, self.hedge_px or eng.position.hedge_entry)
-                out_day = eng.exit_day(self._trading_days)
+                is_short = eng.position.side == "short"
+                # лонг закрываем по bid (продаём), шорт выкупаем по offer (покупаем)
+                close_px = ((q.get("offer") if is_short else q.get("bid"))
+                            or q.get("last") or eng.position.stock_entry)
+                stop = eng.check_stop(close_px, self.hedge_px or eng.position.hedge_entry)
+                out_day = (eng.short_exit_day(self._trading_days) if is_short
+                           else eng.exit_day(self._trading_days))
                 if stop or (out_day and today >= out_day):
                     if not market_open:
                         continue
                     reason = "stop" if stop else "exit"
-                    self._exec().close(tk, eng.position.lots, sell_px,
-                                       eng.position.hedge_lots, self.hedge_px or 0)
-                    tr = eng.close(today, sell_px, self.hedge_px or eng.position.hedge_entry, reason)
+                    if is_short:
+                        self._exec().close_short(tk, eng.position.lots, close_px)
+                    else:
+                        self._exec().close(tk, eng.position.lots, close_px,
+                                           eng.position.hedge_lots, self.hedge_px or 0)
+                    tr = eng.close(today, close_px, self.hedge_px or eng.position.hedge_entry, reason)
                     self.trades.append(_trade_dict(tr))
                     acted["exited"].append(tk)
-                    self.log_event("exit", f"{tk}: выход ({reason}) net {tr.net_pnl_rub:+.0f}₽")
+                    self.log_event("exit", f"{tk}: выход {eng_side_label(tr.side)} ({reason}) "
+                                           f"net {tr.net_pnl_rub:+.0f}₽")
                 continue
+            # ── ШОРТ-ВХОД (день гэпа = ex, после гэпа на закрытии) ──
+            sev = eng.short_entry_signal(today, events, self._trading_days)
+            if sev is not None and self.cfg.trading_enabled and market_open:
+                short_px = q.get("bid") or q.get("last")   # шорт продаёт по bid (реализм)
+                sp = q.get("spread_pct")
+                max_sp = self.cfg.strategy.max_spread_pct
+                if short_px and not (max_sp > 0 and sp is not None and sp > max_sp):
+                    try:
+                        r = self._exec().open_short(tk, self.cfg.strategy.quantity_lots, short_px)
+                        eng.open(today, sev, short_px, 0.0, 0, side="short")
+                        acted["entered"].append(tk + ":short")
+                        self.log_event("position", f"{tk}: ШОРТ {r['stock_filled']}лот @ {short_px} "
+                                                   f"(сдувание после отсечки {sev.ex_date})")
+                        continue
+                    except Exception as e:  # noqa: BLE001
+                        self.log_missed(tk, today, sev.ex_date, f"шорт брокер: {str(e)[:80]}")
+                        acted["missed"] += 1
             # ── ВХОД (день входа = ex−N) ──
             ev = eng.entry_signal(today, events, self._trading_days)
             if ev is None:

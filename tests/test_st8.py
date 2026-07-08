@@ -278,3 +278,59 @@ def test_tick_skips_wide_spread(monkeypatch):
     r = s.tick()
     assert r["missed"] == 1
     assert any("спред" in m["reason"] for m in s.missed)
+
+
+# ============================ шорт-нога «пост-дивидендное сдувание» ============================
+
+def test_short_entry_on_ex_day():
+    """Шорт входит ровно в день гэпа (ex_date), июль ТОРГУЕТСЯ (лучший месяц шорта)."""
+    days_jul = [f"2026-07-{d:02d}" for d in range(1, 29)]
+    e = _eng(short_enabled=True)
+    ev = DivEvent("TATN", ex_date="2026-07-15", div=35.0, div_yield_pct=5.0)
+    assert e.short_entry_signal("2026-07-15", [ev], days_jul) is ev   # день гэпа → сигнал
+    assert e.short_entry_signal("2026-07-14", [ev], days_jul) is None # накануне — нет
+    assert e.short_entry_signal("2026-07-16", [ev], days_jul) is None # после — нет
+
+
+def test_short_skips_december():
+    """Декабрь (−0.56%, новогоднее ралли) — шорт не входит."""
+    days_dec = [f"2026-12-{d:02d}" for d in range(1, 29)]
+    e = _eng(short_enabled=True, short_skip_months=[8, 12])
+    ev = DivEvent("TATN", ex_date="2026-12-15", div=35.0, div_yield_pct=5.0)
+    assert e.short_entry_signal("2026-12-15", [ev], days_dec) is None
+
+
+def test_short_pnl_profits_on_fall():
+    """Шорт: прибыль при падении акции (сдувание после отсечки)."""
+    e = _eng(short_enabled=True, fee_rate=0.0)
+    ev = DivEvent("TATN", ex_date="2026-05-15", div=35.0, div_yield_pct=5.0)
+    e.open("2026-05-15", ev, stock_px=700.0, hedge_px=0.0, hedge_lots=0, side="short")
+    assert e.position.side == "short"
+    # акция упала 700 → 680: шорт зарабатывает +20/акцию
+    tr = e.close("2026-05-22", stock_px=680.0, hedge_px=0.0, reason="exit")
+    assert abs(tr.stock_pnl_rub - 20.0) < 0.01
+    assert tr.side == "short"
+    # и наоборот: рост акции = убыток шорта
+    e.open("2026-05-15", ev, stock_px=700.0, hedge_px=0.0, hedge_lots=0, side="short")
+    tr2 = e.close("2026-05-22", stock_px=720.0, hedge_px=0.0, reason="stop")
+    assert abs(tr2.stock_pnl_rub - (-20.0)) < 0.01
+
+
+def test_short_exit_after_hold_days():
+    """Выкуп шорта через short_hold_days торговых дней после ex."""
+    e = _eng(short_enabled=True, short_hold_days=5)
+    ev = DivEvent("TATN", ex_date="2026-05-15", div=35.0, div_yield_pct=5.0)
+    e.open("2026-05-15", ev, stock_px=700.0, hedge_px=0.0, hedge_lots=0, side="short")
+    ex_i = DAYS.index("2026-05-15")
+    assert e.short_exit_day(DAYS) == DAYS[ex_i + 5]
+    # а лонг-выход для шорта не срабатывает
+    assert e.exit_day(DAYS) is None
+
+
+def test_short_stop_on_rise():
+    """Стоп шорта: акция ВЫРОСЛА сильнее stop_loss_pct → стоп бьёт."""
+    e = _eng(short_enabled=True, stop_loss_pct=5.0, fee_rate=0.0)
+    ev = DivEvent("TATN", ex_date="2026-05-15", div=35.0, div_yield_pct=5.0)
+    e.open("2026-05-15", ev, stock_px=700.0, hedge_px=0.0, hedge_lots=0, side="short")
+    assert e.check_stop(720.0, 0.0) is False   # +2.9% — в пределах
+    assert e.check_stop(740.0, 0.0) is True    # +5.7% против шорта — стоп

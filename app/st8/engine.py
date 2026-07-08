@@ -31,6 +31,7 @@ class St8Position:
     hedge_entry: float = 0.0           # цена входа хедж-фьючерса
     fees_rub: float = 0.0
     div_yield_pct: float = 0.0
+    side: str = "long"                 # long = набег до отсечки; short = сдувание после
 
 
 @dataclass
@@ -46,6 +47,7 @@ class St8Trade:
     reason: str                        # exit | stop | expiry
     days_held: int = 0
     div_yield_pct: float = 0.0
+    side: str = "long"
 
 
 class St8Engine:
@@ -86,13 +88,43 @@ class St8Engine:
         return None
 
     def exit_day(self, trading_days: list[str]) -> str | None:
-        """Плановый день выхода текущей позиции: ex − exit_offset_days (накануне гэпа)."""
+        """Плановый день выхода ЛОНГА: ex − exit_offset_days (накануне гэпа)."""
         p = self.position
-        if p is None or p.ex_date not in trading_days:
+        if p is None or p.side != "long" or p.ex_date not in trading_days:
             return None
         ex_i = trading_days.index(p.ex_date)
         out_i = ex_i - self.strat.exit_offset_days
         if out_i < 0:
+            return None
+        return trading_days[out_i]
+
+    def short_entry_signal(self, day: str, events: list[DivEvent],
+                           trading_days: list[str]) -> DivEvent | None:
+        """Шорт-нога «пост-дивидендное сдувание»: вход в день гэпа (day == ex_date),
+        на ЗАКРЫТИИ — после гэпа, дивиденд шорт не платит. Июль торгуется (лучший месяц);
+        месяцы из short_skip_months (декабрь-ралли, август) — фильтр."""
+        if self.position is not None or not getattr(self.strat, "short_enabled", False):
+            return None
+        s = self.strat
+        for ev in events:
+            if ev.ticker != self.ticker:
+                continue
+            if int(ev.ex_date[5:7]) in (s.short_skip_months or []):
+                continue
+            if ev.div_yield_pct < s.min_div_yield_pct:
+                continue
+            if ev.ex_date == day:
+                return ev
+        return None
+
+    def short_exit_day(self, trading_days: list[str]) -> str | None:
+        """Плановый выкуп шорта: ex + short_hold_days торговых дней."""
+        p = self.position
+        if p is None or p.side != "short" or p.ex_date not in trading_days:
+            return None
+        ex_i = trading_days.index(p.ex_date)
+        out_i = ex_i + self.strat.short_hold_days
+        if out_i >= len(trading_days):
             return None
         return trading_days[out_i]
 
@@ -110,9 +142,11 @@ class St8Engine:
 
     # ---------- P&L (по фактическим ценам) ----------
     def _pnl(self, stock_exit: float, hedge_exit: float) -> tuple[float, float, float]:
-        """(stock_pnl, hedge_pnl, sum) в ₽. Акция long, хедж IMOEXF short."""
+        """(stock_pnl, hedge_pnl, sum) в ₽. long: прибыль при росте; short: при падении."""
         p = self.position
         stock = (stock_exit - p.stock_entry) * p.lots * self.lot_size
+        if p.side == "short":
+            stock = -stock
         hedge = 0.0
         if p.hedge_lots > 0:
             # шорт IMOEXF: прибыль при падении фьючерса
@@ -124,7 +158,7 @@ class St8Engine:
 
     # ---------- исполнение (мутирует состояние) ----------
     def open(self, day: str, ev: DivEvent, stock_px: float,
-             hedge_px: float, hedge_lots: int) -> None:
+             hedge_px: float, hedge_lots: int, side: str = "long") -> None:
         s = self.strat
         lots = s.quantity_lots
         notional = stock_px * lots * self.lot_size
@@ -134,7 +168,7 @@ class St8Engine:
         self.position = St8Position(
             ticker=self.ticker, entry_date=day, ex_date=ev.ex_date, lots=lots,
             stock_entry=stock_px, hedge_lots=hedge_lots, hedge_entry=hedge_px,
-            fees_rub=fee, div_yield_pct=ev.div_yield_pct)
+            fees_rub=fee, div_yield_pct=ev.div_yield_pct, side=side)
 
     def close(self, day: str, stock_px: float, hedge_px: float, reason: str) -> St8Trade:
         p = self.position
@@ -149,7 +183,7 @@ class St8Engine:
         tr = St8Trade(ticker=self.ticker, entry_date=p.entry_date, exit_date=day, lots=p.lots,
                       stock_pnl_rub=round(stock_pnl, 2), hedge_pnl_rub=round(hedge_pnl, 2),
                       fees_rub=round(fees, 2), net_pnl_rub=round(net, 2), reason=reason,
-                      div_yield_pct=p.div_yield_pct)
+                      div_yield_pct=p.div_yield_pct, side=p.side)
         self.trades.append(tr)
         self.position = None
         return tr

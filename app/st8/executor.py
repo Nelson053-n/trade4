@@ -119,6 +119,23 @@ class St8Executor:
                 raise St8ExecError(f"{ticker}: хедж не исполнен → акция откачена: {str(e)[:80]}")
         return {"ok": True, "stock_filled": stock_lots, "hedge_filled": hedge_filled}
 
+    # ---------- шорт-нога: продать без покрытия / выкупить ----------
+    def open_short(self, ticker: str, stock_lots: int, stock_px: float) -> dict:
+        """Шорт акции (пост-дивидендное сдувание): SELL на открытие. Без хеджа (сама
+        нога — ставка на падение). sandbox: маржинальный шорт; paper: виртуально."""
+        s_uid = self._share(ticker)["uid"]
+        r = self._order(s_uid, stock_lots, "SELL", "short_entry", stock_px)
+        got = self._filled(r, stock_lots)
+        if got == 0:
+            raise St8ExecError(f"{ticker}: шорт не налился (0 лотов)")
+        return {"ok": True, "stock_filled": got}
+
+    def close_short(self, ticker: str, stock_lots: int, stock_px: float) -> dict:
+        """Выкуп шорта: BUY мелкими ордерами (ёмкость)."""
+        s_uid = self._share(ticker)["uid"]
+        self._close_small(s_uid, stock_lots, "BUY", "short_exit", stock_px)
+        return {"ok": True}
+
     # ---------- выход: продать акцию + откупить хедж ----------
     def close(self, ticker: str, stock_lots: int, stock_px: float,
               hedge_lots: int, hedge_px: float) -> dict:
