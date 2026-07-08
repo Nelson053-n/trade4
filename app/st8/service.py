@@ -433,14 +433,36 @@ class St8Session:
                     status = "предстоит"
                 else:
                     status = "—"
+                # цены входа/выхода (close на день входа/выхода — какой была бы сделка)
+                entry_px = self._price_on(tk, entry_d) if entry_d and entry_d <= today else None
+                exit_px = self._price_on(tk, exit_d) if exit_d and exit_d <= today else None
+                run_pct = (round((exit_px - entry_px) / entry_px * 100, 2)
+                           if entry_px and exit_px else None)   # набег до гэпа, %
                 rows.append({
                     "ticker": tk, "name": name, "ex_date": ex,
                     "entry_date": entry_d, "exit_date": exit_d,
+                    "entry_px": entry_px, "exit_px": exit_px, "run_pct": run_pct,
                     "div": div, "div_yield_pct": dy,
                     "july": is_july, "status": status,
                 })
         rows.sort(key=lambda r: (r["entry_date"] or r["ex_date"]))
         return rows
+
+    def price_series(self, ticker: str, ex_date: str, pad: int = 20) -> list[dict]:
+        """Дневные close вокруг события (для мини-графика при наведении): от entry−pad до
+        ex+5 дней. Возвращает [{date, close}]. Помечает вход/выход/ex через build_calendar."""
+        try:
+            frm = (datetime.fromisoformat(ex_date) - timedelta(days=45)).date().isoformat()
+            to = (datetime.fromisoformat(ex_date) + timedelta(days=10)).date().isoformat()
+            r = _iss(f"{ISS}/history/engines/stock/markets/shares/securities/{ticker}.json"
+                     f"?iss.meta=off&from={frm}&till={to}&history.columns=TRADEDATE,CLOSE")
+            out = []
+            for row in r["history"]["data"]:
+                if row and row[0] and row[1]:
+                    out.append({"date": row[0], "close": float(row[1])})
+            return out
+        except Exception:  # noqa: BLE001
+            return []
 
     # ---------- снимок ----------
     def snapshot(self) -> dict:

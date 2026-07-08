@@ -1632,8 +1632,14 @@ def st8_state():
 @app.get("/st8/calendar")
 def st8_calendar(days_ahead: int = 120, days_back: int = 30):
     """НАГЛЯДНЫЙ календарь точек входа/выхода: для каждого дивидендного события —
-    тикер, ex-дата, день входа (ex−N), день выхода (ex−1), дивдоходность, статус."""
+    тикер, ex-дата, день входа (ex−N), день выхода (ex−1), цены входа/выхода, набег%, статус."""
     return _clean({"calendar": ST8.build_calendar(days_ahead=days_ahead, days_back=days_back)})
+
+
+@app.get("/st8/price-series")
+async def st8_price_series(ticker: str, ex_date: str):
+    """Дневные close вокруг события (для мини-графика при наведении на строку календаря)."""
+    return _clean({"series": await asyncio.to_thread(ST8.price_series, ticker, ex_date)})
 
 
 @app.post("/st8/config")

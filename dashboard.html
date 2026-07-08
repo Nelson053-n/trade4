@@ -926,7 +926,8 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
       <div class="card">
         <h2>📅 Календарь входов/выходов <span class="em">купить за 10д до отсечки · продать накануне гэпа · июль пропускаем</span>
           <button id="s8-refresh" style="float:right;font:inherit;font-size:11px;padding:3px 10px;cursor:pointer;background:var(--panel);color:var(--ink-dim);border:1px solid var(--line);border-radius:6px">обновить из ISS</button></h2>
-        <table id="s8-calendar"><thead><tr><th>тикер</th><th>бумага</th><th>ex (гэп)</th><th>ВХОД</th><th>ВЫХОД</th><th>див ₽</th><th>дох%</th><th>статус</th></tr></thead><tbody></tbody></table>
+        <table id="s8-calendar"><thead><tr><th>тикер</th><th>бумага</th><th>ex (гэп)</th><th>ВХОД</th><th>цена вх.</th><th>ВЫХОД</th><th>цена вых.</th><th>набег</th><th>дох%</th><th>статус</th></tr></thead><tbody></tbody></table>
+        <canvas id="s8-tip-chart" width="260" height="130" style="display:none;position:fixed;z-index:99;background:var(--panel);border:1px solid var(--chart-line);border-radius:8px;box-shadow:0 6px 24px rgba(0,0,0,.4);pointer-events:none"></canvas>
         <div style="margin-top:8px;font-size:11px;color:var(--ink-dim)">бэктест 373 события 2020-2026 (0.10% комиссия): портфель 16 бумаг ядра t=8.2, ~23 сд/год, ~78%/год сырых на задействованный капитал; 3-way пройден, контроль на случайной дате = ноль. Хедж шортом IMOEXF убирает бету (2022 без хеджа −45%)</div>
       </div>
       <div class="card">
@@ -2538,15 +2539,71 @@ async function s8LoadCalendar(){
     const d=await s8api('/calendar?days_ahead=120&days_back=500');
     const tb=$('s8-calendar').querySelector('tbody'); tb.innerHTML='';
     const cal=(d.calendar||[]).slice(-30);
-    if(!cal.length){ tb.innerHTML='<tr><td colspan="8" style="color:var(--ink-dim)">нет объявленных дивидендов в окне (межсезонье — эмитенты объявляют весной)</td></tr>'; return; }
+    if(!cal.length){ tb.innerHTML='<tr><td colspan="10" style="color:var(--ink-dim)">нет объявленных дивидендов в окне (межсезонье — эмитенты объявляют весной)</td></tr>'; return; }
+    const px=v=>v==null?'—':(v>=100?v.toFixed(1):v.toFixed(3));
     cal.forEach(r=>{ const tr=document.createElement('tr');
       const jul=r.july?'style="opacity:.5"':'';
       const stColor = r.status.includes('В ОКНЕ')?'color:var(--chart-line);font-weight:600' : (r.status.includes('пропуск')?'color:var(--ink-dim)':'');
+      const runColor = r.run_pct==null?'':(r.run_pct>=0?'color:var(--signal,#41b884)':'color:var(--loss,#e5674f)');
+      const run = r.run_pct==null?'—':(r.run_pct>=0?'+':'')+r.run_pct+'%';
       tr.innerHTML=`<td ${jul}><b>${r.ticker}</b></td><td ${jul}>${r.name}</td><td ${jul}>${r.ex_date}</td>`
-        +`<td ${jul}>${r.entry_date||'—'}</td><td ${jul}>${r.exit_date||'—'}</td>`
-        +`<td ${jul}>${r.div}</td><td ${jul}>${r.div_yield_pct}%</td><td style="${stColor}">${r.status}</td>`;
+        +`<td ${jul}>${r.entry_date||'—'}</td><td ${jul} style="font-variant-numeric:tabular-nums">${px(r.entry_px)}</td>`
+        +`<td ${jul}>${r.exit_date||'—'}</td><td ${jul} style="font-variant-numeric:tabular-nums">${px(r.exit_px)}</td>`
+        +`<td style="${runColor};font-variant-numeric:tabular-nums">${run}</td>`
+        +`<td ${jul}>${r.div_yield_pct}%</td><td style="${stColor}">${r.status}</td>`;
+      // мини-график при наведении (дневные close вокруг события)
+      tr.style.cursor='crosshair';
+      tr.onmouseenter=e=>s8ShowChart(r.ticker, r.ex_date, e, r);
+      tr.onmousemove=e=>s8MoveChart(e);
+      tr.onmouseleave=()=>{ $('s8-tip-chart').style.display='none'; };
       tb.appendChild(tr); });
-  }catch(e){ $('s8-calendar').querySelector('tbody').innerHTML='<tr><td colspan="8" style="color:var(--warn,#a33)">ошибка: '+e.message+'</td></tr>'; }
+  }catch(e){ $('s8-calendar').querySelector('tbody').innerHTML='<tr><td colspan="10" style="color:var(--warn,#a33)">ошибка: '+e.message+'</td></tr>'; }
+}
+const _s8chartCache={};
+async function s8ShowChart(ticker, exDate, e, row){
+  const cv=$('s8-tip-chart'); cv.style.display='block'; s8MoveChart(e);
+  const key=ticker+exDate;
+  let series=_s8chartCache[key];
+  if(!series){
+    try{ const d=await s8api(`/price-series?ticker=${ticker}&ex_date=${exDate}`); series=d.series||[]; _s8chartCache[key]=series; }
+    catch(err){ series=[]; }
+  }
+  s8DrawTipChart(cv, series, ticker, row);
+}
+function s8MoveChart(e){
+  const cv=$('s8-tip-chart'); const w=260,h=130,m=14;
+  let x=e.clientX+m, y=e.clientY+m;
+  if(x+w>innerWidth) x=e.clientX-w-m;
+  if(y+h>innerHeight) y=e.clientY-h-m;
+  cv.style.left=x+'px'; cv.style.top=y+'px';
+}
+function s8DrawTipChart(cv, series, ticker, row){
+  const c=cv.getContext('2d'); const W=260,H=130,pad={l:6,r:6,t:20,b:16};
+  c.clearRect(0,0,W,H);
+  c.fillStyle=getComputedStyle(document.documentElement).getPropertyValue('--ink').trim();
+  c.font='600 11px ui-sans-serif'; c.textAlign='left';
+  c.fillText(ticker+' · дневной график', pad.l, 13);
+  if(!series.length){ c.fillStyle='#889'; c.font='11px ui-sans-serif'; c.fillText('нет данных (межсезонье)', pad.l, 70); return; }
+  const vals=series.map(p=>p.close), mn=Math.min(...vals), mx=Math.max(...vals);
+  const X=i=>pad.l+i/(series.length-1)*(W-pad.l-pad.r);
+  const Y=v=>pad.t+(1-(v-mn)/((mx-mn)||1))*(H-pad.t-pad.b);
+  // вертикали входа/выхода/ex
+  const mark=(dt,col)=>{ const i=series.findIndex(p=>p.date>=dt); if(i<0)return;
+    c.strokeStyle=col; c.setLineDash([3,2]); c.beginPath(); c.moveTo(X(i),pad.t); c.lineTo(X(i),H-pad.b); c.stroke(); c.setLineDash([]); };
+  const sig=getComputedStyle(document.documentElement).getPropertyValue('--signal').trim()||'#41b884';
+  const loss=getComputedStyle(document.documentElement).getPropertyValue('--loss').trim()||'#e5674f';
+  const acc=getComputedStyle(document.documentElement).getPropertyValue('--chart-line').trim()||'#4a9fd4';
+  if(row.entry_date) mark(row.entry_date, sig);
+  if(row.exit_date) mark(row.exit_date, loss);
+  mark(row.ex_date, '#889');
+  // линия цены
+  c.beginPath(); series.forEach((p,i)=>{ const x=X(i),y=Y(p.close); i?c.lineTo(x,y):c.moveTo(x,y); });
+  c.strokeStyle=acc; c.lineWidth=1.6; c.lineJoin='round'; c.stroke();
+  // подпись входа/выхода
+  c.font='9px ui-sans-serif'; c.textAlign='left';
+  c.fillStyle=sig; c.fillText('вход', pad.l, H-4);
+  c.fillStyle=loss; c.fillText('выход', 42, H-4);
+  c.fillStyle='#889'; c.fillText('ex', 88, H-4);
 }
 async function s8Poll(){ if(_s5strat!=='st8') return; try{ s8Render(await s8api('/state')); }catch(e){} }
 function s8Init(){
