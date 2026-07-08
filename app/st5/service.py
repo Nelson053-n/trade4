@@ -616,6 +616,10 @@ class St5Session:
             v = data.get(k)
             if isinstance(v, (int, float)) and v >= 0:
                 setattr(self.cfg.risk, k, float(v))
+        # тумблер торговли — оператор выключал (09.07 st5 свёрнута), рестарт не должен включать
+        te = ((data.get("config") or {}).get("risk") or {}).get("trading_enabled")
+        if isinstance(te, bool):
+            self.cfg.risk.trading_enabled = te
         # базовый объём (юнитов на вход) — оператор менял в UI, восстанавливаем в движки
         ql = data.get("quantity_lots")
         if isinstance(ql, (int, float)) and 1 <= ql <= 100:
