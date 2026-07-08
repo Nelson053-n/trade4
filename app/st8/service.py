@@ -154,6 +154,8 @@ class St8Session:
         торг.день (T+1 гэп). div_yield по последней close перед ex."""
         if tk in self._div_cache:
             return self._div_cache[tk]
+        if not self._trading_days:
+            return []   # торговый календарь ещё не загружен — считать нельзя, НЕ кэшируем
         try:
             d = _iss(f"{ISS}/securities/{tk}/dividends.json?iss.meta=off")
             dv = d.get("dividends", d)
@@ -169,7 +171,10 @@ class St8Session:
                 px = self._price_on(tk, ex)     # close на день гэпа (для дивдоходности)
                 dy = (val / px * 100) if px else 0.0
                 out.append((ex, float(val), round(dy, 2)))
-            self._div_cache[tk] = out
+            # пустоту НЕ кэшируем: могла быть гонка/сбой загрузки торговых дней (баг 09.07 —
+            # первый tick после рестарта при упавшем ISS кэшировал [] для всех навсегда)
+            if out:
+                self._div_cache[tk] = out
             return out
         except Exception as e:  # noqa: BLE001
             self.log_event("warn", f"{tk}: дивиденды не получены: {str(e)[:80]}")
