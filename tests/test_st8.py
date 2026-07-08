@@ -101,3 +101,76 @@ def test_fees_round_trip():
     # нотионал 700, комиссия 0.1% × 2 (вход+выход) = 1.4₽
     assert abs(tr.fees_rub - 1.4) < 0.01
     assert abs(tr.net_pnl_rub - (-1.4)) < 0.01   # цена не изменилась → минус комиссии
+
+
+# ============================ St8Executor (paper + защиты) ============================
+
+def _exec_paper(monkeypatch, audit=None):
+    from app.st8.executor import St8Executor
+    from app.st4 import tbank_sandbox as sb
+    monkeypatch.setattr(sb, "find_share", lambda tk: {"uid": "sh_"+tk, "lot": 10 if tk=="NLMK" else 1})
+    monkeypatch.setattr(sb, "find_future", lambda tk: {"uid": "fut_"+tk})
+    return St8Executor("acc", paper=True, audit_cb=audit)
+
+
+def test_executor_paper_open_close(monkeypatch):
+    """Paper: вход акция+хедж и выход — виртуальные филлы, аудит фиксирует ордера."""
+    orders = []
+    e = _exec_paper(monkeypatch, audit=orders.append)
+    r = e.open("SBER", stock_lots=5, stock_px=300.0, hedge_lots=1, hedge_px=2800.0)
+    assert r["ok"] and r["stock_filled"] == 5 and r["hedge_filled"] == 1
+    # 2 ордера входа: акция BUY + хедж SELL
+    entries = [o for o in orders if o["op"].startswith("entry")]
+    assert len(entries) == 2
+    assert any(o["direction"] == "BUY" and o["op"] == "entry" for o in entries)
+    assert any(o["direction"] == "SELL" and o["op"] == "entry_hedge" for o in entries)
+    orders.clear()
+    e.close("SBER", stock_lots=5, stock_px=310.0, hedge_lots=1, hedge_px=2820.0)
+    # выход мелкими: 5 SELL акции + 1 BUY хедж
+    assert sum(1 for o in orders if o["op"] == "exit") == 5
+    assert sum(1 for o in orders if o["op"] == "exit_hedge") == 1
+
+
+def test_executor_share_lot_size(monkeypatch):
+    """Лотность акции берётся из справочника (NLMK=10, SBER=1)."""
+    e = _exec_paper(monkeypatch)
+    assert e.share_lot("NLMK") == 10
+    assert e.share_lot("SBER") == 1
+
+
+def test_executor_hedge_fail_rolls_back_stock(monkeypatch):
+    """Если хедж не исполнился — акция откатывается (не оставлять голую бету)."""
+    from app.st8.executor import St8Executor, St8ExecError
+    from app.st4 import tbank_sandbox as sb
+    monkeypatch.setattr(sb, "find_share", lambda tk: {"uid": "sh_"+tk, "lot": 1})
+    monkeypatch.setattr(sb, "find_future", lambda tk: {"uid": "fut_"+tk})
+    orders = []
+    e = St8Executor("acc", paper=False, audit_cb=orders.append)
+    # акция налилась, хедж бросает ошибку
+    def _post(acc, uid, lots, direction, oid):
+        if uid.startswith("fut_"):
+            raise RuntimeError("Not enough balance")
+        return {"lotsExecuted": lots}
+    monkeypatch.setattr(sb, "post_order", _post)
+    try:
+        e.open("SBER", stock_lots=3, stock_px=300.0, hedge_lots=1, hedge_px=2800.0)
+        assert False, "должно бросить St8ExecError"
+    except St8ExecError:
+        pass
+    # акция откачена мелкими SELL (unwind)
+    unwinds = [o for o in orders if o["op"] == "unwind"]
+    assert len(unwinds) == 3  # 3 лота по 1
+
+
+def test_executor_partial_stock_fill_hedges_actual(monkeypatch):
+    """Частичный филл акции (3 из 5) → хеджируем реально налитое, не откатываем."""
+    from app.st8.executor import St8Executor
+    from app.st4 import tbank_sandbox as sb
+    monkeypatch.setattr(sb, "find_share", lambda tk: {"uid": "sh_"+tk, "lot": 1})
+    monkeypatch.setattr(sb, "find_future", lambda tk: {"uid": "fut_"+tk})
+    def _post(acc, uid, lots, direction, oid):
+        return {"lotsExecuted": 3 if uid.startswith("sh_") else lots}
+    monkeypatch.setattr(sb, "post_order", _post)
+    e = St8Executor("acc", paper=False)
+    r = e.open("SBER", stock_lots=5, stock_px=300.0, hedge_lots=1, hedge_px=2800.0)
+    assert r["stock_filled"] == 3  # работаем с реально налитым
