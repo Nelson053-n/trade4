@@ -287,6 +287,7 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
   <button class="strat-tab" data-strat="st5" style="background:var(--panel);color:var(--ink-dim);border:1px solid var(--line);border-bottom:none;border-radius:8px 8px 0 0;padding:8px 18px;cursor:pointer;font:inherit">ST5 · statarb (β/коинтеграция)</button>
   <button class="strat-tab" data-strat="st6" style="background:var(--panel);color:var(--ink-dim);border:1px solid var(--line);border-bottom:none;border-radius:8px 8px 0 0;padding:8px 18px;cursor:pointer;font:inherit">ST6 · фандинг-арбитраж</button>
   <button class="strat-tab" data-strat="st7" style="background:var(--panel);color:var(--ink-dim);border:1px solid var(--line);border-bottom:none;border-radius:8px 8px 0 0;padding:8px 18px;cursor:pointer;font:inherit">ST7 · фандинг-давление</button>
+  <button class="strat-tab" data-strat="st8" style="background:var(--panel);color:var(--ink-dim);border:1px solid var(--line);border-bottom:none;border-radius:8px 8px 0 0;padding:8px 18px;cursor:pointer;font:inherit">ST8 · дивидендный набег</button>
 </div>
 
 <div id="tab-st4">
@@ -910,6 +911,64 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
   </div>
   </div>
 </div><!-- /tab-st7 -->
+
+<div id="tab-st8" hidden>
+  <div class="sessbar" style="margin-top:8px">
+    <span class="sb-dot" id="s8-dot"></span>
+    <span class="sb-state" id="s8-state">ST8 остановлен</span>
+    <span class="sb-count" id="s8-mode"></span>
+    <span style="flex:1"></span>
+    <span class="sb-count" id="s8-net"></span>
+  </div>
+  <div class="wrap">
+  <div class="grid">
+    <div>
+      <div class="card">
+        <h2>📅 Календарь входов/выходов <span class="em">купить за 10д до отсечки · продать накануне гэпа · июль пропускаем</span>
+          <button id="s8-refresh" style="float:right;font:inherit;font-size:11px;padding:3px 10px;cursor:pointer;background:var(--panel);color:var(--ink-dim);border:1px solid var(--line);border-radius:6px">обновить из ISS</button></h2>
+        <table id="s8-calendar"><thead><tr><th>тикер</th><th>бумага</th><th>ex (гэп)</th><th>ВХОД</th><th>ВЫХОД</th><th>див ₽</th><th>дох%</th><th>статус</th></tr></thead><tbody></tbody></table>
+        <div style="margin-top:8px;font-size:11px;color:var(--ink-dim)">бэктест 373 события 2020-2026 (0.10% комиссия): портфель 16 бумаг ядра t=8.2, ~23 сд/год, ~78%/год сырых на задействованный капитал; 3-way пройден, контроль на случайной дате = ноль. Хедж шортом IMOEXF убирает бету (2022 без хеджа −45%)</div>
+      </div>
+      <div class="card">
+        <h2>Открытые позиции</h2>
+        <table id="s8-pos"><thead><tr><th>тикер</th><th>вход</th><th>ex-дата</th><th>лотов</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="card">
+        <h2>Журнал сделок</h2>
+        <table id="s8-trades"><thead><tr><th>тикер</th><th>период</th><th>лотов</th><th>P&amp;L акции</th><th>P&amp;L хеджа</th><th>комиссии</th><th>net</th><th>причина</th></tr></thead><tbody></tbody></table>
+      </div>
+    </div>
+    <div>
+      <div class="card">
+        <h2>Управление</h2>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+          <button id="s8-trading" class="btn">торговля: ?</button>
+        </div>
+        <div id="s8-c-msg" style="font-size:11px;color:var(--ink-dim);margin-top:6px"></div>
+      </div>
+      <div class="card">
+        <h2>Параметры стратегии</h2>
+        <div class="fld"><label>вход за (торг. дней до отсечки)</label><input id="s8-p-entry" type="number" min="1" max="30"></div>
+        <div class="fld"><label>выход за (дней до отсечки)</label><input id="s8-p-exit" type="number" min="0" max="5"></div>
+        <div class="fld"><label>мин. дивдоходность (%)</label><input id="s8-p-yield" type="number" step="0.5"></div>
+        <div class="fld"><label>стоп-лосс (% нотионала)</label><input id="s8-p-stop" type="number" step="1"></div>
+        <div class="fld"><label><input id="s8-p-july" type="checkbox"> пропускать июль (переразогрет)</label></div>
+        <div class="fld"><label><input id="s8-p-hedge" type="checkbox"> хедж шортом IMOEXF</label></div>
+        <button id="s8-p-save" class="btn" style="margin-top:6px">сохранить параметры</button>
+        <div id="s8-p-msg" style="font-size:11px;color:var(--ink-dim);margin-top:6px"></div>
+      </div>
+      <div class="card">
+        <h2>Бумаги вселенной <span class="em">16 ядро + 4 опц.</span></h2>
+        <div id="s8-tickers" style="font-size:11px;line-height:1.9"></div>
+      </div>
+      <div class="card">
+        <h2>События</h2>
+        <div id="s8-events" style="font-size:11px;font-family:var(--mono);max-height:220px;overflow-y:auto"></div>
+      </div>
+    </div>
+  </div>
+  </div>
+</div><!-- /tab-st8 -->
 
 <!-- модальное подтверждение «закрыть всё» (st5) -->
 <div class="modal-ov" id="s5-flat-modal">
@@ -1747,9 +1806,11 @@ function s5Switch(strat){
   $('tab-st5').hidden = strat!=='st5';
   $('tab-st6').hidden = strat!=='st6';
   $('tab-st7').hidden = strat!=='st7';
+  $('tab-st8').hidden = strat!=='st8';
   if(strat==='st5'){ s5Poll(); s5LoadWeekly(); s5LoadStrategies(); if(!_s5dailyLoaded){ _s5dailyLoaded=true; s5LoadDaily(); s5LoadGoInfo(); s5LoadMarginTimeline(); } }
   if(strat==='st6'){ s6Poll(); if(!_s6chartLoaded){ _s6chartLoaded=true; s6LoadChart(); } }
   if(strat==='st7'){ s7Poll(); }
+  if(strat==='st8'){ s8Poll(); s8LoadCalendar(); }
 }
 function s5Render(s){
   _s5snap=s;
@@ -2414,6 +2475,71 @@ function s7Init(){
 }
 setInterval(s7Poll, 5000);
 
+// ── ST8 · дивидендный набег ──
+let _s8snap=null;
+async function s8api(path, method='GET', body=null){
+  const o={method,headers:{}}; if(body){o.headers['Content-Type']='application/json'; o.body=JSON.stringify(body);}
+  const r=await fetch('/st8'+path,o); if(!r.ok) throw new Error((await r.json().catch(()=>({}))).detail||r.status); return r.json();
+}
+function s8Render(s){
+  _s8snap=s;
+  const dot=$('s8-dot'), st=$('s8-state');
+  st.textContent = s.trading_enabled ? 'ST8 торговля вкл' : 'ST8 торговля выкл';
+  dot.style.background = s.trading_enabled ? 'var(--ok,#3a3)' : 'var(--ink-dim)';
+  $('s8-mode').textContent = (s.mode||'paper') + ' · бумаг ' + (s.tickers_enabled||[]).length;
+  $('s8-net').textContent = 'net '+(s.net_pnl_rub>=0?'+':'')+(s.net_pnl_rub||0)+' ₽ · сделок '+(s.trades_count||0);
+  $('s8-trading').textContent = 'торговля: '+(s.trading_enabled?'ВКЛ':'выкл');
+  // позиции
+  const pb=$('s8-pos').querySelector('tbody'); pb.innerHTML='';
+  (s.open_positions||[]).forEach(p=>{ const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${p.ticker}</td><td>${p.entry}</td><td>${p.ex}</td><td>${p.lots}</td>`; pb.appendChild(tr); });
+  if(!(s.open_positions||[]).length) pb.innerHTML='<tr><td colspan="4" style="color:var(--ink-dim)">нет открытых</td></tr>';
+  // параметры (если не в фокусе)
+  const cfg=s.strategy_cfg||{};
+  const setv=(id,v)=>{ const el=$(id); if(el&&document.activeElement!==el) el.value=v; };
+  setv('s8-p-entry',cfg.entry_days_before); setv('s8-p-exit',cfg.exit_offset_days);
+  setv('s8-p-yield',cfg.min_div_yield_pct); setv('s8-p-stop',cfg.stop_loss_pct);
+  if(document.activeElement!==$('s8-p-july')) $('s8-p-july').checked=!!cfg.skip_july;
+  if(document.activeElement!==$('s8-p-hedge')) $('s8-p-hedge').checked=!!cfg.hedge_imoexf;
+  // вселенная бумаг
+  const en=new Set(s.tickers_enabled||[]);
+  const CORE=['MOEX','BSPB','IRAO','ROSN','MRKC','MGNT','GMKN','TATN','SIBN','TATNP','MRKP','PLZL','MAGN','NLMK','BELU','PHOR'];
+  const OPT=['RTKM','PIKK','FEES','KZOS'];
+  $('s8-tickers').innerHTML = 'ядро: '+CORE.map(t=>`<span style="color:${en.has(t)?'var(--chart-line)':'var(--ink-dim)'}">${t}</span>`).join(' ')
+    + '<br>опц.: '+OPT.map(t=>`<span style="color:${en.has(t)?'var(--chart-line)':'var(--ink-dim)'}">${t}</span>`).join(' ');
+  // события
+  $('s8-events').innerHTML=(s.events||[]).slice().reverse().map(e=>{
+    const d=new Date(e.ts).toLocaleTimeString('ru',{hour:'2-digit',minute:'2-digit'});
+    return `<div>${d} [${e.kind}] ${e.message}</div>`; }).join('');
+}
+async function s8LoadCalendar(){
+  try{
+    const d=await s8api('/calendar?days_ahead=120&days_back=500');
+    const tb=$('s8-calendar').querySelector('tbody'); tb.innerHTML='';
+    const cal=(d.calendar||[]).slice(-30);
+    if(!cal.length){ tb.innerHTML='<tr><td colspan="8" style="color:var(--ink-dim)">нет объявленных дивидендов в окне (межсезонье — эмитенты объявляют весной)</td></tr>'; return; }
+    cal.forEach(r=>{ const tr=document.createElement('tr');
+      const jul=r.july?'style="opacity:.5"':'';
+      const stColor = r.status.includes('В ОКНЕ')?'color:var(--chart-line);font-weight:600' : (r.status.includes('пропуск')?'color:var(--ink-dim)':'');
+      tr.innerHTML=`<td ${jul}><b>${r.ticker}</b></td><td ${jul}>${r.name}</td><td ${jul}>${r.ex_date}</td>`
+        +`<td ${jul}>${r.entry_date||'—'}</td><td ${jul}>${r.exit_date||'—'}</td>`
+        +`<td ${jul}>${r.div}</td><td ${jul}>${r.div_yield_pct}%</td><td style="${stColor}">${r.status}</td>`;
+      tb.appendChild(tr); });
+  }catch(e){ $('s8-calendar').querySelector('tbody').innerHTML='<tr><td colspan="8" style="color:var(--warn,#a33)">ошибка: '+e.message+'</td></tr>'; }
+}
+async function s8Poll(){ if(_s5strat!=='st8') return; try{ s8Render(await s8api('/state')); }catch(e){} }
+function s8Init(){
+  $('s8-trading').onclick=async()=>{ try{ const on=!(_s8snap&&_s8snap.trading_enabled); await s8api('/control/trading?on='+on,'POST'); s8Poll(); }catch(e){alert(e.message);} };
+  $('s8-refresh').onclick=async()=>{ $('s8-refresh').textContent='…'; try{ await s8LoadCalendar(); }catch(e){} $('s8-refresh').textContent='обновить из ISS'; };
+  $('s8-p-save').onclick=async()=>{ try{
+    await s8api('/config','POST',{entry_days_before:+$('s8-p-entry').value, exit_offset_days:+$('s8-p-exit').value,
+      min_div_yield_pct:+$('s8-p-yield').value, stop_loss_pct:+$('s8-p-stop').value,
+      skip_july:$('s8-p-july').checked, hedge_imoexf:$('s8-p-hedge').checked});
+    $('s8-p-msg').textContent='сохранено'; s8Poll(); s8LoadCalendar();
+  }catch(e){ $('s8-p-msg').textContent='ошибка: '+e.message; } };
+}
+setInterval(s8Poll, 8000);
+
 function s5Init(){
   document.querySelectorAll('.strat-tab').forEach(b=> b.onclick=()=>s5Switch(b.dataset.strat));
   $('s5-btn-start').onclick=async()=>{ try{ await s5api('/control/start','POST'); s5Poll(); }catch(e){alert(e.message);} };
@@ -2621,6 +2747,7 @@ async function s5ApplyStrategy(id,name){
 s5Init();
 s6Init();
 s7Init();
+s8Init();
 setInterval(s5Poll, 2500);
 </script>
 </body>
