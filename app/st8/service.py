@@ -344,6 +344,13 @@ class St8Session:
                                 "торговля выкл" if not self.cfg.trading_enabled else "рынок закрыт/нет цены")
                 acted["missed"] += 1
                 continue
+            # фильтр ликвидности: широкий спред съедает edge (MRKC/MRKP/BELU дороги)
+            max_sp = self.cfg.strategy.max_spread_pct
+            sp = q.get("spread_pct")
+            if max_sp > 0 and sp is not None and sp > max_sp:
+                self.log_missed(tk, today, ev.ex_date, f"спред {sp:.2f}% > {max_sp}% (дорогое исполнение)")
+                acted["missed"] += 1
+                continue
             hlots = self._hedge_lots_for(tk, stock_px, self.cfg.strategy.quantity_lots)
             try:
                 r = self._exec().open(tk, self.cfg.strategy.quantity_lots, stock_px,

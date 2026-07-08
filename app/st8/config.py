@@ -37,6 +37,10 @@ class St8StrategyConfig(BaseModel):
     daily_loss_limit_rub: float = 0.0
     fee_rate: float = 0.0005          # комиссия брокера, доля нотионала за операцию (0.05%)
     quantity_lots: int = 1            # базовый размер (лотов акции на событие)
+    # фильтр ликвидности исполнения: не входить, если bid/ask спред > max_spread_pct.
+    # Замер живых спредов 08.07: медиана ядра 0.043% (крупные <0.02%), НО тонкие
+    # MRKC 0.56%/MRKP 0.27%/BELU 0.17% дороги в исполнении → съедают edge. Порог отсекает их.
+    max_spread_pct: float = 0.25      # 0 = выключен
 
 
 class St8Config(BaseModel):

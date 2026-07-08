@@ -250,3 +250,31 @@ def test_st8_in_ledger_recon():
     rows = _daily_ledger_recon("2026-05-20", MSK)
     st8_row = [r for r in rows if "ST8" in r[0]]
     assert st8_row and "paper" in st8_row[0][0]
+
+
+def test_tick_skips_wide_spread(monkeypatch):
+    """Широкий спред (> max_spread_pct) → вход пропущен, залогирован как дорогое исполнение."""
+    import app.st8.service as svc
+    from app.st8.service import St8Session
+    import datetime as _dt
+    s = St8Session()
+    s.cfg.mode = "paper"; s.cfg.strategy.max_spread_pct = 0.25
+    s.enabled = {tk: (tk == "MRKC") for tk in s.enabled}
+    days = [f"2026-05-{d:02d}" for d in range(1, 31)]
+    s._trading_days = days
+    monkeypatch.setattr(s, "_load_trading_days", lambda since: None)
+    monkeypatch.setattr(s, "scan_new_dividends", lambda: [])
+    monkeypatch.setattr(s, "_fetch_divs", lambda tk: [("2026-05-20", 0.05, 10.0)] if tk == "MRKC" else [])
+    # MRKC широкий спред 0.56%
+    monkeypatch.setattr(s, "refresh_market", lambda: setattr(s, "market",
+        {"MRKC": {"last": 0.5, "offer": 0.5014, "bid": 0.4986, "spread_pct": 0.56}}) or setattr(s, "hedge_px", 2800.0))
+    monkeypatch.setattr(s, "refresh_capital", lambda: None)
+    monkeypatch.setattr(s, "save_session", lambda: None)
+    ex_i = days.index("2026-05-20"); entry_day = days[ex_i - 10]
+    class _FD(_dt.date):
+        @classmethod
+        def today(cls): return _dt.date.fromisoformat(entry_day)
+    monkeypatch.setattr(svc, "date", _FD)
+    r = s.tick()
+    assert r["missed"] == 1
+    assert any("спред" in m["reason"] for m in s.missed)

@@ -1653,6 +1653,7 @@ def st8_config(payload: dict):
     s.min_div_yield_pct = _num("min_div_yield_pct", 0, 20, s.min_div_yield_pct)
     s.stop_loss_pct = _num("stop_loss_pct", 0, 30, s.stop_loss_pct)
     s.hedge_ratio = _num("hedge_ratio", 0, 2, s.hedge_ratio)
+    s.max_spread_pct = _num("max_spread_pct", 0, 5, s.max_spread_pct)
     s.quantity_lots = int(_num("quantity_lots", 1, 1000, s.quantity_lots))
     if "skip_july" in payload:
         s.skip_july = bool(payload["skip_july"])
