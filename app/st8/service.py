@@ -13,8 +13,15 @@ import urllib.request
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+from dataclasses import asdict
+
 from .config import St8Config
 from .engine import St8Engine, DivEvent
+
+
+def _trade_dict(tr) -> dict:
+    """St8Trade → dict для журнала (net_pnl_rub ключ для аудита/сверки)."""
+    return asdict(tr)
 
 # ── РЕЕСТР ВСЕЛЕННОЙ (мой бэктест 08.07: N=10, без июля, t=8.2, ~23 сд/год) ──
 # ядро 16 бумаг (t>1.5, >=5 событий) + lot_size (акций в лоте FORTS-спота, для нотионала).
@@ -96,12 +103,33 @@ class St8Session:
         self.exec_anchor: dict | None = None         # якорь аудита журнал↔счёт (кэш-истина)
         self.capital_rub: float = 0.0                # капитал sandbox-счёта (для аудита)
         self._div_seen: dict[str, str] = {}          # tk -> последняя известная ex-date (детект новых)
+        self.missed: list[dict] = []                 # упущенные входы (событие было, входа нет)
+        self._executor = None                        # St8Executor (ленивая инициализация)
         self._task = None
 
     def _engine(self, tk: str) -> St8Engine:
         if tk not in self.engines:
-            self.engines[tk] = St8Engine(tk, self.cfg.strategy, lot_size=1)
+            lot = self._lot(tk) if self.cfg.mode == "tbank_sandbox" else 1
+            self.engines[tk] = St8Engine(tk, self.cfg.strategy, lot_size=lot)
         return self.engines[tk]
+
+    def _exec(self):
+        """Ленивый St8Executor под текущий режим/счёт."""
+        from .executor import St8Executor
+        if self._executor is None or self._executor.account_id != self.cfg.account_id:
+            self._executor = St8Executor(
+                self.cfg.account_id, paper=(self.cfg.mode != "tbank_sandbox"),
+                audit_cb=lambda a: self.log_event("order",
+                    f"{a['op']} {a['direction']} {a['lots']}лот → {a.get('status')}"))
+        return self._executor
+
+    def log_missed(self, tk: str, day: str, ex_date: str, reason: str) -> None:
+        if any(m["ticker"] == tk and m["ex_date"] == ex_date for m in self.missed):
+            return
+        self.missed.append({"ts": int(time.time() * 1000), "date": day,
+                            "ticker": tk, "ex_date": ex_date, "reason": reason})
+        if len(self.missed) > 100:
+            del self.missed[0]
 
     def log_event(self, kind: str, message: str) -> None:
         self.events.append({"ts": int(time.time() * 1000), "kind": kind, "message": message})
@@ -203,8 +231,7 @@ class St8Session:
         """Проверить, не объявили ли эмитенты НОВЫЕ дивиденды (свежие ex-даты). Ключевое для
         событийной стратегии: эмитенты объявляют за 1-2 мес до отсечки, надо ловить сразу,
         чтобы успеть к окну входа (−10 дней). Возвращает список новых событий."""
-        from datetime import date as _d
-        today = _d.today().isoformat()
+        today = date.today().isoformat()
         found = []
         for tk in ST8_TICKERS:
             if not self.enabled.get(tk, False):
@@ -255,6 +282,108 @@ class St8Session:
             return None
         net = sum(t.get("net_pnl_rub", 0) for t in self.trades)
         return round((self.capital_rub - a.get("capital", 0.0)) - (net - a.get("net", 0.0)))
+
+    # ---------- DAILY-TICK ЦИКЛ (событийная торговля) ----------
+    def _hedge_lots_for(self, tk: str, stock_px: float, stock_lots: int) -> int:
+        """Сколько лотов IMOEXF шортить под нотионал позиции × hedge_ratio.
+        Нотионал акции = stock_px × stock_lots × lot_size; IMOEXF пункт 10₽."""
+        if not self.cfg.strategy.hedge_imoexf or not self.hedge_px:
+            return 0
+        eng = self._engine(tk)
+        notional = stock_px * stock_lots * eng.lot_size * self.cfg.strategy.hedge_ratio
+        hedge_notional = self.hedge_px * 10.0   # пункт-стоимость IMOEXF = 10₽
+        return max(0, round(notional / hedge_notional)) if hedge_notional > 0 else 0
+
+    def tick(self) -> dict:
+        """Один daily-тик: скан дивидендов → котировки → для каждой бумаги проверить
+        вход (ex−N) / выход (ex−1 или стоп) → исполнить. Возвращает сводку действий."""
+        today = date.today().isoformat()
+        acted = {"entered": [], "exited": [], "missed": 0}
+        if not self._trading_days or self._trading_days[-1] < today:
+            self._load_trading_days((date.today() - timedelta(days=400)).isoformat())
+        self.scan_new_dividends()
+        self.refresh_market()
+        # все объявленные события в горизонте (для сигналов)
+        events = []
+        for tk in ST8_TICKERS:
+            if not self.enabled.get(tk, False):
+                continue
+            for ex, div, dy in self._fetch_divs(tk):
+                if ex >= today or (self.engines.get(tk) and self.engines[tk].position):
+                    events.append(DivEvent(tk, ex, div, dy))
+        # market открыт? (есть свежие котировки)
+        market_open = any(q.get("last") for q in self.market.values())
+        for tk in ST8_TICKERS:
+            if not self.enabled.get(tk, False):
+                continue
+            eng = self._engine(tk)
+            q = self.market.get(tk, {})
+            stock_px = q.get("offer") or q.get("last")   # вход по ask (реализм)
+            # ── ВЫХОД (приоритет: стоп, потом плановый) ──
+            if eng.position is not None:
+                sell_px = q.get("bid") or q.get("last") or eng.position.stock_entry
+                stop = eng.check_stop(sell_px, self.hedge_px or eng.position.hedge_entry)
+                out_day = eng.exit_day(self._trading_days)
+                if stop or (out_day and today >= out_day):
+                    if not market_open:
+                        continue
+                    reason = "stop" if stop else "exit"
+                    self._exec().close(tk, eng.position.lots, sell_px,
+                                       eng.position.hedge_lots, self.hedge_px or 0)
+                    tr = eng.close(today, sell_px, self.hedge_px or eng.position.hedge_entry, reason)
+                    self.trades.append(_trade_dict(tr))
+                    acted["exited"].append(tk)
+                    self.log_event("exit", f"{tk}: выход ({reason}) net {tr.net_pnl_rub:+.0f}₽")
+                continue
+            # ── ВХОД (день входа = ex−N) ──
+            ev = eng.entry_signal(today, events, self._trading_days)
+            if ev is None:
+                continue
+            if not (self.cfg.trading_enabled and market_open and stock_px):
+                self.log_missed(tk, today, ev.ex_date,
+                                "торговля выкл" if not self.cfg.trading_enabled else "рынок закрыт/нет цены")
+                acted["missed"] += 1
+                continue
+            hlots = self._hedge_lots_for(tk, stock_px, self.cfg.strategy.quantity_lots)
+            try:
+                r = self._exec().open(tk, self.cfg.strategy.quantity_lots, stock_px,
+                                      hlots, self.hedge_px or 0)
+                eng.open(today, ev, stock_px, self.hedge_px or 0, r.get("hedge_filled", 0))
+                acted["entered"].append(tk)
+                self.log_event("position", f"{tk}: ВХОД {r['stock_filled']}лот @ {stock_px} "
+                                           f"+ хедж {r.get('hedge_filled',0)} IMOEXF (отсечка {ev.ex_date})")
+            except Exception as e:  # noqa: BLE001
+                self.log_missed(tk, today, ev.ex_date, f"брокер: {str(e)[:80]}")
+                acted["missed"] += 1
+        self.refresh_capital()
+        self.save_session()
+        return acted
+
+    async def run_live(self) -> None:
+        import asyncio
+        self.state["live"] = True
+        while self.state["live"]:
+            try:
+                await asyncio.to_thread(self.tick)
+            except Exception as e:  # noqa: BLE001
+                self.log_event("warn", f"тик не удался: {str(e)[:100]}")
+            await asyncio.sleep(self.cfg.poll_seconds)
+
+    def start_live(self) -> None:
+        import asyncio
+        if self.state["live"]:
+            return
+        self.state["live"] = True
+        self.state["live_intent"] = True
+        self._task = asyncio.create_task(self.run_live())
+        self.log_event("info", f"ST8 live запущен ({self.cfg.mode}, дивидендный набег)")
+        self.save_session()
+
+    def stop_live(self) -> None:
+        self.state["live"] = False
+        self.state["live_intent"] = False
+        self.log_event("info", "ST8 остановлен")
+        self.save_session()
 
     # ---------- КАЛЕНДАРЬ ВХОДОВ/ВЫХОДОВ (наглядно) ----------
     def build_calendar(self, days_ahead: int = 120, days_back: int = 30) -> list[dict]:
@@ -326,6 +455,7 @@ class St8Session:
             "new_dividends": self.new_dividends[-15:],        # свежеобъявленные (мониторинг)
             "hedge_px": self.hedge_px,
             "market_quotes": len(self.market),
+            "missed": self.missed[-15:],
             "strategy_cfg": self.cfg.strategy.model_dump(),
             "events": self.events[-20:],
         }
@@ -349,7 +479,7 @@ class St8Session:
             data = {"config": self.cfg.model_dump(), "trades": self.trades,
                     "enabled": self.enabled, "state": self.state,
                     "exec_anchor": self.exec_anchor, "new_dividends": self.new_dividends[-100:],
-                    "div_seen": self._div_seen}
+                    "div_seen": self._div_seen, "missed": self.missed[-100:]}
             self._session_file.write_text(json.dumps(data, ensure_ascii=False))
         except Exception:  # noqa: BLE001
             pass
@@ -368,6 +498,7 @@ class St8Session:
         self.exec_anchor = d.get("exec_anchor") or None
         self.new_dividends = list(d.get("new_dividends") or [])
         self._div_seen = dict(d.get("div_seen") or {})
+        self.missed = list(d.get("missed") or [])
         cfg = d.get("config")
         if cfg:
             try:

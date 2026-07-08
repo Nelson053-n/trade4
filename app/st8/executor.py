@@ -29,11 +29,15 @@ class St8Executor:
 
     # ---------- резолв инструментов ----------
     def _share(self, ticker: str) -> dict:
+        if self.paper:
+            return {"uid": "paper_" + ticker, "lot": 1}   # paper: реальный резолв не нужен
         if ticker not in self._share_cache:
             self._share_cache[ticker] = _sb.find_share(ticker)
         return self._share_cache[ticker]
 
     def _hedge(self) -> str:
+        if self.paper:
+            return "paper_IMOEXF"
         if self._hedge_uid is None:
             self._hedge_uid = _sb.find_future("IMOEXF")["uid"]
         return self._hedge_uid

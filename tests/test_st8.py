@@ -132,8 +132,11 @@ def test_executor_paper_open_close(monkeypatch):
 
 
 def test_executor_share_lot_size(monkeypatch):
-    """Лотность акции берётся из справочника (NLMK=10, SBER=1)."""
-    e = _exec_paper(monkeypatch)
+    """Лотность акции берётся из справочника в sandbox (NLMK=10, SBER=1)."""
+    from app.st8.executor import St8Executor
+    from app.st4 import tbank_sandbox as sb
+    monkeypatch.setattr(sb, "find_share", lambda tk: {"uid": "sh_"+tk, "lot": 10 if tk=="NLMK" else 1})
+    e = St8Executor("acc", paper=False)   # sandbox: реальный резолв лотности
     assert e.share_lot("NLMK") == 10
     assert e.share_lot("SBER") == 1
 
@@ -174,3 +177,64 @@ def test_executor_partial_stock_fill_hedges_actual(monkeypatch):
     e = St8Executor("acc", paper=False)
     r = e.open("SBER", stock_lots=5, stock_px=300.0, hedge_lots=1, hedge_px=2800.0)
     assert r["stock_filled"] == 3  # работаем с реально налитым
+
+
+# ============================ daily-tick цикл (paper, end-to-end) ============================
+
+def test_tick_enters_on_entry_day(monkeypatch):
+    """Daily-tick в день входа (ex−10): вход в позицию с хеджем (paper)."""
+    from app.st8.service import St8Session
+    s = St8Session()
+    s.cfg.mode = "paper"
+    s.cfg.strategy.hedge_imoexf = True
+    # только одна бумага для чистоты
+    s.enabled = {tk: (tk == "TATN") for tk in s.enabled}
+    # мокаем ISS: торговые дни, дивиденды, живые цены
+    days = [f"2026-05-{d:02d}" for d in range(1, 31)]
+    monkeypatch.setattr(s, "_load_trading_days", lambda since: setattr(s, "_trading_days", days))
+    s._trading_days = days
+    monkeypatch.setattr(s, "scan_new_dividends", lambda: [])
+    monkeypatch.setattr(s, "_fetch_divs", lambda tk: [("2026-05-20", 35.0, 5.0)] if tk == "TATN" else [])
+    # рынок открыт, цены есть
+    def _refresh():
+        s.market = {"TATN": {"last": 700.0, "bid": 699.5, "offer": 700.5, "spread_pct": 0.14}}
+        s.hedge_px = 2800.0
+    monkeypatch.setattr(s, "refresh_market", _refresh)
+    monkeypatch.setattr(s, "refresh_capital", lambda: None)
+    monkeypatch.setattr(s, "save_session", lambda: None)
+    # день входа = 2026-05-20 минус 10 торговых = days[index-10]
+    ex_i = days.index("2026-05-20"); entry_day = days[ex_i - 10]
+    import app.st8.service as svc, datetime as _dt
+    class _FakeDate(_dt.date):
+        @classmethod
+        def today(cls): return _dt.date.fromisoformat(entry_day)
+    monkeypatch.setattr(svc, "date", _FakeDate)
+    r = s.tick()
+    assert "TATN" in r["entered"]
+    assert s.engines["TATN"].position is not None
+    assert s.engines["TATN"].position.stock_entry == 700.5   # вход по ask (реализм)
+
+
+def test_tick_missed_when_trading_off(monkeypatch):
+    """Торговля выключена в день входа → упущенный вход залогирован."""
+    from app.st8.service import St8Session
+    s = St8Session()
+    s.cfg.mode = "paper"; s.cfg.trading_enabled = False
+    s.enabled = {tk: (tk == "TATN") for tk in s.enabled}
+    days = [f"2026-05-{d:02d}" for d in range(1, 31)]
+    s._trading_days = days
+    monkeypatch.setattr(s, "_load_trading_days", lambda since: None)
+    monkeypatch.setattr(s, "scan_new_dividends", lambda: [])
+    monkeypatch.setattr(s, "_fetch_divs", lambda tk: [("2026-05-20", 35.0, 5.0)] if tk == "TATN" else [])
+    monkeypatch.setattr(s, "refresh_market", lambda: setattr(s, "market", {"TATN": {"last": 700.0, "offer": 700.5}}) or setattr(s, "hedge_px", 2800.0))
+    monkeypatch.setattr(s, "refresh_capital", lambda: None)
+    monkeypatch.setattr(s, "save_session", lambda: None)
+    ex_i = days.index("2026-05-20"); entry_day = days[ex_i - 10]
+    import app.st8.service as svc, datetime as _dt
+    class _FakeDate2(_dt.date):
+        @classmethod
+        def today(cls): return _dt.date.fromisoformat(entry_day)
+    monkeypatch.setattr(svc, "date", _FakeDate2)
+    r = s.tick()
+    assert r["missed"] == 1
+    assert any(m["ticker"] == "TATN" and "выкл" in m["reason"] for m in s.missed)

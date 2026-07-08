@@ -379,6 +379,8 @@ async def lifespan(app: FastAPI):
     if ST7.state.get("live_intent"):
         ST7.start_live()
     ST8.load_session()                                  # st8 — дивидендный набег (событийный)
+    if ST8.state.get("live_intent"):
+        ST8.start_live()
     _watchdog_task = asyncio.create_task(ST5.watchdog_loop())  # самовосстановление зависшего live-цикла
     _auto_bt_task = asyncio.create_task(_auto_backtest_loop())
     _digest_task = asyncio.create_task(_daily_digest_loop())   # вечерний TG-дайджест (23:55)
@@ -1649,6 +1651,44 @@ def st8_trading(on: bool = True):
     ST8.cfg.trading_enabled = on
     ST8.save_session()
     return {"ok": True, "trading_enabled": on}
+
+
+@app.post("/st8/control/start")
+def st8_start():
+    ST8.start_live()
+    return {"ok": True, "live": True}
+
+
+@app.post("/st8/control/stop")
+def st8_stop():
+    ST8.stop_live()
+    return {"ok": True, "live": False}
+
+
+@app.post("/st8/tick")
+async def st8_tick():
+    """Ручной daily-тик: скан дивидендов + котировки + проверка календаря вход/выход +
+    исполнение + аудит. Для теста без ожидания цикла."""
+    return _clean(await asyncio.to_thread(ST8.tick))
+
+
+@app.post("/st8/connector")
+def st8_connector(payload: dict):
+    """paper | tbank_sandbox (+account_id). Гейт по открытым позициям."""
+    if any(e.position is not None for e in ST8.engines.values()):
+        raise HTTPException(409, "смена коннектора: закрой позиции st8")
+    mode = payload.get("mode")
+    if mode not in ("paper", "tbank_sandbox"):
+        raise HTTPException(400, "mode: paper | tbank_sandbox")
+    from .st4 import tbank_sandbox as _sb
+    ST8.cfg.mode = mode
+    if "account_id" in payload:
+        ST8.cfg.account_id = str(payload["account_id"]).strip()
+    if payload.get("account_token") and ST8.cfg.account_id:
+        _sb.set_account_token(ST8.cfg.account_id, str(payload["account_token"]).strip())
+    ST8._executor = None   # пересоздать под новый счёт
+    ST8.save_session()
+    return {"ok": True, "mode": mode, "account_id": ST8.cfg.account_id or None}
 
 
 @app.get("/st8/market")
