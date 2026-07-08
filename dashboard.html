@@ -2526,10 +2526,15 @@ function s8Render(s){
   if(document.activeElement!==$('s8-p-hedge')) $('s8-p-hedge').checked=!!cfg.hedge_imoexf;
   // вселенная бумаг
   const en=new Set(s.tickers_enabled||[]);
+  const slp=new Set(s.sleeping||[]);
   const CORE=['MOEX','BSPB','IRAO','ROSN','MRKC','MGNT','GMKN','TATN','SIBN','TATNP','MRKP','PLZL','MAGN','NLMK','BELU','PHOR'];
   const OPT=['RTKM','PIKK','FEES','KZOS'];
-  $('s8-tickers').innerHTML = 'ядро: '+CORE.map(t=>`<span style="color:${en.has(t)?'var(--chart-line)':'var(--ink-dim)'}">${t}</span>`).join(' ')
-    + '<br>опц.: '+OPT.map(t=>`<span style="color:${en.has(t)?'var(--chart-line)':'var(--ink-dim)'}">${t}</span>`).join(' ');
+  const EXT=['SELG','LSNGP','LKOH','NVTK','ALRS'];
+  const badge=t=>slp.has(t)?`<span style="color:var(--ink-dim);opacity:.65" title="дивиденды заморожены >года">${t}💤</span>`:`<span style="color:${en.has(t)?'var(--chart-line)':'var(--ink-dim)'}">${t}</span>`;
+  $('s8-tickers').innerHTML = 'ядро: '+CORE.map(badge).join(' ')
+    + '<br>расш.: '+EXT.map(badge).join(' ')
+    + '<br>опц.: '+OPT.map(badge).join(' ')
+    + (slp.size?'<br><span style="color:var(--ink-dim);font-size:10px">💤 = дивиденды заморожены >года, не торгуется</span>':'');
   // события
   $('s8-events').innerHTML=(s.events||[]).slice().reverse().map(e=>{
     const d=new Date(e.ts).toLocaleTimeString('ru',{hour:'2-digit',minute:'2-digit'});

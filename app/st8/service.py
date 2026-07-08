@@ -34,8 +34,15 @@ ST8_CORE = {
 }
 # опциональные (сильные, но мало событий n<5 — малый вес, мониторинг)
 ST8_OPTIONAL = {"RTKM": "Ростелеком", "PIKK": "ПИК", "FEES": "Россети", "KZOS": "Казаньоргсинтез"}
+# расширение 08.07 (широкий анализ 55 бумаг 2020-2025, выход ex-2, t>1.5 без июля):
+# SELG +4.31% t=2.71, LSNGP +3.04% t=2.28, LKOH +2.29% t=1.89, NVTK +2.11% t=1.62,
+# ALRS +1.34% t=1.73. Портфель 18 бумаг: n=138, +3.49%/сд, t=9.54, win 78%, ~27 сд/год.
+# ВСЕ 6 ЛЕТ В ПЛЮСЕ (2020-2025). Отвергнуты: CHMF −1.23, RASP −1.30, AKRN +0.05 (шум),
+# DIAS +5.13 (n=4, мониторить). TRMK/MRKU/MSRS/UPRO/SFIN/LSRG — t<1.5.
+ST8_EXTENDED = {"SELG": "Селигдар", "LSNGP": "Ленэнерго-п", "LKOH": "ЛУКОЙЛ",
+                "NVTK": "НОВАТЭК", "ALRS": "АЛРОСА"}
 
-ST8_TICKERS = {**ST8_CORE, **ST8_OPTIONAL}
+ST8_TICKERS = {**ST8_CORE, **ST8_OPTIONAL, **ST8_EXTENDED}
 HEDGE_SECID = "IMOEXF"        # фьючерс индекса для хеджа беты
 ISS = "https://iss.moex.com/iss"
 EVENTS_LEN = 60
@@ -90,7 +97,7 @@ class St8Session:
         self.engines: dict[str, St8Engine] = {}
         self.trades: list[dict] = []
         self.events: list[dict] = []
-        self.enabled = {tk: (tk in ST8_CORE) for tk in ST8_TICKERS}  # ядро вкл, опц. выкл
+        self.enabled = {tk: (tk in ST8_CORE or tk in ST8_EXTENDED) for tk in ST8_TICKERS}  # ядро+расширение вкл, опц. выкл
         self.state = {"live": False, "live_intent": False}
         self.signal_view: dict[str, dict] = {}
         self._session_file = Path(__file__).resolve().parent.parent.parent / "session_state_8.json"
@@ -104,6 +111,7 @@ class St8Session:
         self.capital_rub: float = 0.0                # капитал sandbox-счёта (для аудита)
         self._div_seen: dict[str, str] = {}          # tk -> последняя известная ex-date (детект новых)
         self.missed: list[dict] = []                 # упущенные входы (событие было, входа нет)
+        self._sleeping: list[str] = []               # кэш спящих бумаг (обновляется в tick)
         self._executor = None                        # St8Executor (ленивая инициализация)
         self._task = None
 
@@ -302,6 +310,7 @@ class St8Session:
         if not self._trading_days or self._trading_days[-1] < today:
             self._load_trading_days((date.today() - timedelta(days=400)).isoformat())
         self.scan_new_dividends()
+        self._sleeping = self.sleeping_tickers()
         self.refresh_market()
         # все объявленные события в горизонте (для сигналов)
         events = []
@@ -391,6 +400,22 @@ class St8Session:
         self.state["live_intent"] = False
         self.log_event("info", "ST8 остановлен")
         self.save_session()
+
+    def sleeping_tickers(self) -> list[str]:
+        """Бумаги без дивидендов >365 дней (заморожены, напр. GMKN с 2023 — конфликт
+        акционеров). Физически не могут торговаться в стратегии, пока не возобновят.
+        Требует загруженных _trading_days (иначе пустой список — не пугаемся)."""
+        if not self._trading_days:
+            return []
+        cutoff = (date.today() - timedelta(days=365)).isoformat()
+        out = []
+        for tk in ST8_TICKERS:
+            if not self.enabled.get(tk, False):
+                continue
+            divs = self._fetch_divs(tk)
+            if not divs or divs[-1][0] < cutoff:
+                out.append(tk)
+        return out
 
     # ---------- КАЛЕНДАРЬ ВХОДОВ/ВЫХОДОВ (наглядно) ----------
     def build_calendar(self, days_ahead: int = 120, days_back: int = 30) -> list[dict]:
@@ -485,6 +510,7 @@ class St8Session:
             "hedge_px": self.hedge_px,
             "market_quotes": len(self.market),
             "missed": self.missed[-15:],
+            "sleeping": self._sleeping,          # без дивидендов >года (не торгуются)
             "strategy_cfg": self.cfg.strategy.model_dump(),
             "events": self.events[-20:],
         }
@@ -522,7 +548,7 @@ class St8Session:
             return False
         self.trades = d.get("trades", [])
         en = d.get("enabled") or {}
-        self.enabled = {tk: bool(en.get(tk, tk in ST8_CORE)) for tk in ST8_TICKERS}
+        self.enabled = {tk: bool(en.get(tk, tk in ST8_CORE or tk in ST8_EXTENDED)) for tk in ST8_TICKERS}
         self.state.update(d.get("state") or {})
         self.exec_anchor = d.get("exec_anchor") or None
         self.new_dividends = list(d.get("new_dividends") or [])
