@@ -942,9 +942,21 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
       <div class="card">
         <h2>Управление</h2>
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+          <button id="s8-start" class="btn">▶ старт live</button>
+          <button id="s8-stop" class="btn">⏸ стоп</button>
           <button id="s8-trading" class="btn">торговля: ?</button>
+          <button id="s8-tick" class="btn">тик сейчас</button>
         </div>
+        <div class="fld"><label>режим</label>
+          <select id="s8-c-mode"><option value="paper">paper</option><option value="tbank_sandbox">tbank_sandbox</option></select></div>
+        <div class="fld"><label>account_id (sandbox)</label><input id="s8-c-acc" placeholder="пусто = не менять"></div>
+        <div class="fld"><label>account_token</label><input id="s8-c-tok" type="password" placeholder="пусто = не менять"></div>
+        <button id="s8-c-save" class="btn" style="margin-top:6px">применить коннектор</button>
         <div id="s8-c-msg" style="font-size:11px;color:var(--ink-dim);margin-top:6px"></div>
+      </div>
+      <div class="card">
+        <h2>Упущенные входы <span class="em">событие было — входа нет, с причиной</span></h2>
+        <table id="s8-missed"><thead><tr><th>день</th><th>тикер</th><th>отсечка</th><th>почему</th></tr></thead><tbody></tbody></table>
       </div>
       <div class="card">
         <h2>Параметры стратегии</h2>
@@ -2484,16 +2496,25 @@ async function s8api(path, method='GET', body=null){
 function s8Render(s){
   _s8snap=s;
   const dot=$('s8-dot'), st=$('s8-state');
-  st.textContent = s.trading_enabled ? 'ST8 торговля вкл' : 'ST8 торговля выкл';
-  dot.style.background = s.trading_enabled ? 'var(--ok,#3a3)' : 'var(--ink-dim)';
-  $('s8-mode').textContent = (s.mode||'paper') + ' · бумаг ' + (s.tickers_enabled||[]).length;
-  $('s8-net').textContent = 'net '+(s.net_pnl_rub>=0?'+':'')+(s.net_pnl_rub||0)+' ₽ · сделок '+(s.trades_count||0);
+  const live=!!s.live;
+  st.textContent = live ? 'ST8 live идёт' : (s.trading_enabled ? 'ST8 остановлен (торговля вкл)' : 'ST8 остановлен');
+  dot.style.background = live ? 'var(--ok,#3a3)' : 'var(--ink-dim)';
+  $('s8-mode').textContent = (s.mode||'paper') + ' · бумаг ' + (s.tickers_enabled||[]).length
+    + (s.hedge_px ? ' · IMOEXF '+s.hedge_px : '');
+  $('s8-net').textContent = 'net '+(s.net_pnl_rub>=0?'+':'')+(s.net_pnl_rub||0)+' ₽ · сделок '+(s.trades_count||0)
+    + (s.execution_gap_rub!=null ? ' · сверка '+(s.execution_gap_rub>=0?'+':'')+s.execution_gap_rub+'₽' : '');
   $('s8-trading').textContent = 'торговля: '+(s.trading_enabled?'ВКЛ':'выкл');
+  const mo=$('s8-c-mode'); if(mo&&document.activeElement!==mo) mo.value=s.mode||'paper';
   // позиции
   const pb=$('s8-pos').querySelector('tbody'); pb.innerHTML='';
   (s.open_positions||[]).forEach(p=>{ const tr=document.createElement('tr');
     tr.innerHTML=`<td>${p.ticker}</td><td>${p.entry}</td><td>${p.ex}</td><td>${p.lots}</td>`; pb.appendChild(tr); });
   if(!(s.open_positions||[]).length) pb.innerHTML='<tr><td colspan="4" style="color:var(--ink-dim)">нет открытых</td></tr>';
+  // упущенные входы
+  const mb=$('s8-missed').querySelector('tbody'); mb.innerHTML='';
+  (s.missed||[]).slice().reverse().forEach(m=>{ const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${m.date}</td><td class="tick">${m.ticker}</td><td>${m.ex_date}</td><td class="name">${m.reason}</td>`; mb.appendChild(tr); });
+  if(!(s.missed||[]).length) mb.innerHTML='<tr><td colspan="4" style="color:var(--ink-dim)">нет</td></tr>';
   // параметры (если не в фокусе)
   const cfg=s.strategy_cfg||{};
   const setv=(id,v)=>{ const el=$(id); if(el&&document.activeElement!==el) el.value=v; };
@@ -2530,6 +2551,15 @@ async function s8LoadCalendar(){
 async function s8Poll(){ if(_s5strat!=='st8') return; try{ s8Render(await s8api('/state')); }catch(e){} }
 function s8Init(){
   $('s8-trading').onclick=async()=>{ try{ const on=!(_s8snap&&_s8snap.trading_enabled); await s8api('/control/trading?on='+on,'POST'); s8Poll(); }catch(e){alert(e.message);} };
+  $('s8-start').onclick=async()=>{ try{ await s8api('/control/start','POST'); s8Poll(); }catch(e){alert(e.message);} };
+  $('s8-stop').onclick=async()=>{ try{ await s8api('/control/stop','POST'); s8Poll(); }catch(e){alert(e.message);} };
+  $('s8-tick').onclick=async()=>{ $('s8-tick').textContent='…'; try{ const r=await s8api('/tick','POST'); $('s8-c-msg').textContent='тик: вход '+(r.entered||[]).length+', выход '+(r.exited||[]).length+', упущено '+(r.missed||0); s8Poll(); s8LoadCalendar(); }catch(e){alert(e.message);} $('s8-tick').textContent='тик сейчас'; };
+  $('s8-c-save').onclick=async()=>{ try{
+    const body={mode:$('s8-c-mode').value};
+    if($('s8-c-acc').value.trim()) body.account_id=$('s8-c-acc').value.trim();
+    if($('s8-c-tok').value.trim()) body.account_token=$('s8-c-tok').value.trim();
+    await s8api('/connector','POST',body); $('s8-c-msg').textContent='применено'; $('s8-c-tok').value=''; s8Poll();
+  }catch(e){ $('s8-c-msg').textContent='ошибка: '+e.message; } };
   $('s8-refresh').onclick=async()=>{ $('s8-refresh').textContent='…'; try{ await s8LoadCalendar(); }catch(e){} $('s8-refresh').textContent='обновить из ISS'; };
   $('s8-p-save').onclick=async()=>{ try{
     await s8api('/config','POST',{entry_days_before:+$('s8-p-entry').value, exit_offset_days:+$('s8-p-exit').value,
