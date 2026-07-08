@@ -253,7 +253,7 @@ function drawTimeline(){
 }
 async function loadCal(){
   try{
-    const d=await api('/calendar?days_ahead=150&days_back=200');
+    const d=await api('/calendar?days_ahead=150&days_back=400');
     CAL=d.calendar||[];
     drawTimeline();
     const tb=$('cal').querySelector('tbody'); tb.innerHTML='';
