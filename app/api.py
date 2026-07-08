@@ -709,6 +709,7 @@ def st5_pair_enabled(pair: str, on: bool = True):
 def st5_trading(on: bool = True):
     ST5.cfg.risk.trading_enabled = on
     ST5.log_event("info", f"торговля {'включена' if on else 'выключена'}")
+    ST5.save_session()   # иначе тумблер не переживает рестарт (всплывал 09.07)
     return {"ok": True, "trading_enabled": on}
 
 
