@@ -101,6 +101,10 @@ ST6 = St6Session()
 from .st7.service import ST7_PAIRS, St7Session  # noqa: E402
 ST7 = St7Session()
 
+# ST8 — «дивидендный набег»: покупка за 10д до отсечки, продажа накануне гэпа (+хедж IMOEXF)
+from .st8.service import St8Session, ST8_TICKERS  # noqa: E402
+ST8 = St8Session()
+
 _server_started = 0.0
 
 
@@ -374,6 +378,7 @@ async def lifespan(app: FastAPI):
     ST7.load_session()                                  # st7 — фандинг-давление (дневной)
     if ST7.state.get("live_intent"):
         ST7.start_live()
+    ST8.load_session()                                  # st8 — дивидендный набег (событийный)
     _watchdog_task = asyncio.create_task(ST5.watchdog_loop())  # самовосстановление зависшего live-цикла
     _auto_bt_task = asyncio.create_task(_auto_backtest_loop())
     _digest_task = asyncio.create_task(_daily_digest_loop())   # вечерний TG-дайджест (23:55)
@@ -1588,6 +1593,62 @@ def st7_connector(payload: dict):
         _sb.set_account_token(ST7.cfg.account_id, str(payload["account_token"]).strip())
     ST7.save_session()
     return {"ok": True, "mode": mode, "account_id": ST7.cfg.account_id or None}
+
+
+# ── st8 — «дивидендный набег» (событийная, дневная) ──
+@app.get("/st8/state")
+def st8_state():
+    return _clean(ST8.snapshot())
+
+
+@app.get("/st8/calendar")
+def st8_calendar(days_ahead: int = 120, days_back: int = 30):
+    """НАГЛЯДНЫЙ календарь точек входа/выхода: для каждого дивидендного события —
+    тикер, ex-дата, день входа (ex−N), день выхода (ex−1), дивдоходность, статус."""
+    return _clean({"calendar": ST8.build_calendar(days_ahead=days_ahead, days_back=days_back)})
+
+
+@app.post("/st8/config")
+def st8_config(payload: dict):
+    s = ST8.cfg.strategy
+
+    def _num(key, lo, hi, cur):
+        if key not in payload or payload[key] is None:
+            return cur
+        v = float(payload[key])
+        if not (lo <= v <= hi):
+            raise HTTPException(400, f"{key}: вне [{lo}, {hi}]")
+        return v
+
+    s.entry_days_before = int(_num("entry_days_before", 1, 30, s.entry_days_before))
+    s.exit_offset_days = int(_num("exit_offset_days", 0, 5, s.exit_offset_days))
+    s.min_div_yield_pct = _num("min_div_yield_pct", 0, 20, s.min_div_yield_pct)
+    s.stop_loss_pct = _num("stop_loss_pct", 0, 30, s.stop_loss_pct)
+    s.hedge_ratio = _num("hedge_ratio", 0, 2, s.hedge_ratio)
+    s.quantity_lots = int(_num("quantity_lots", 1, 1000, s.quantity_lots))
+    if "skip_july" in payload:
+        s.skip_july = bool(payload["skip_july"])
+    if "hedge_imoexf" in payload:
+        s.hedge_imoexf = bool(payload["hedge_imoexf"])
+    ST8.save_session()
+    return {"ok": True, "strategy": s.model_dump()}
+
+
+@app.post("/st8/ticker-enabled")
+def st8_ticker_enabled(payload: dict):
+    tk = payload.get("ticker")
+    if tk not in ST8_TICKERS:
+        raise HTTPException(400, "ticker: " + " | ".join(ST8_TICKERS))
+    ST8.enabled[tk] = bool(payload.get("enabled", True))
+    ST8.save_session()
+    return {"ok": True, "enabled": {t: v for t, v in ST8.enabled.items() if v}}
+
+
+@app.post("/st8/control/trading")
+def st8_trading(on: bool = True):
+    ST8.cfg.trading_enabled = on
+    ST8.save_session()
+    return {"ok": True, "trading_enabled": on}
 
 
 @app.post("/st5/connector")

@@ -1,0 +1,160 @@
+"""St8Engine — «дивидендный набег»: событийная логика входа/выхода по календарю отсечек.
+
+Чистые функции сигналов (без сети/исполнения) — тестируемы изолированно. Сервис вызывает
+signal_for_day() каждый торговый день и получает действие 'enter'|'exit'|'stop'|'hold'|'none'.
+P&L считается по ФАКТИЧЕСКИМ ценам исполнения (акция + опц. хедж-нога IMOEXF), учёт round-trip
+комиссий. Хедж: одновременный шорт IMOEXF на hedge_ratio×нотионал — убирает рыночную бету
+удержания (её вклад в 2022 был −45%).
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+
+@dataclass
+class DivEvent:
+    """Одно дивидендное событие для тикера: ex_date (день гэпа) и дивиденд."""
+    ticker: str
+    ex_date: str          # YYYY-MM-DD — день дивидендного гэпа (registryclosedate − 1 торг.день)
+    div: float            # дивиденд на акцию, ₽
+    div_yield_pct: float  # дивдоходность к цене cum-day, %
+
+
+@dataclass
+class St8Position:
+    ticker: str
+    entry_date: str
+    ex_date: str                       # плановый выход накануне (ex − exit_offset)
+    lots: int
+    stock_entry: float                 # цена входа акции
+    hedge_lots: int = 0                # шорт IMOEXF-фьючерса (0 если хедж выкл)
+    hedge_entry: float = 0.0           # цена входа хедж-фьючерса
+    fees_rub: float = 0.0
+    div_yield_pct: float = 0.0
+
+
+@dataclass
+class St8Trade:
+    ticker: str
+    entry_date: str
+    exit_date: str
+    lots: int
+    stock_pnl_rub: float               # P&L ноги акции
+    hedge_pnl_rub: float               # P&L хедж-ноги IMOEXF (гасит бету)
+    fees_rub: float
+    net_pnl_rub: float
+    reason: str                        # exit | stop | expiry
+    days_held: int = 0
+    div_yield_pct: float = 0.0
+
+
+class St8Engine:
+    """Один тикер. Хранит текущую позицию и журнал. Логика — по календарю событий."""
+
+    def __init__(self, ticker: str, strat, lot_size: int = 1, pv_hedge: float = 10.0):
+        self.ticker = ticker
+        self.strat = strat
+        self.lot_size = lot_size            # акций в лоте (для нотионала)
+        self.pv_hedge = pv_hedge            # пункт-стоимость IMOEXF (10₽)
+        self.position: St8Position | None = None
+        self.trades: list[St8Trade] = []
+
+    # ---------- сигналы (чистые) ----------
+    def entry_signal(self, day: str, events: list[DivEvent], trading_days: list[str]) -> DivEvent | None:
+        """Есть ли сегодня вход: day == (ex − entry_days_before) для какого-то события,
+        июль не пропущен, дивдоходность достаточна. trading_days — упорядоченный список
+        торговых дней (для отсчёта N дней до ex). Возвращает событие или None."""
+        if self.position is not None:
+            return None
+        s = self.strat
+        for ev in events:
+            if ev.ticker != self.ticker:
+                continue
+            if s.skip_july and ev.ex_date[5:7] == "07":
+                continue
+            if ev.div_yield_pct < s.min_div_yield_pct:
+                continue
+            # день входа = торговый день за entry_days_before до ex
+            if ev.ex_date not in trading_days:
+                continue
+            ex_i = trading_days.index(ev.ex_date)
+            entry_i = ex_i - s.entry_days_before
+            if entry_i < 0:
+                continue
+            if trading_days[entry_i] == day:
+                return ev
+        return None
+
+    def exit_day(self, trading_days: list[str]) -> str | None:
+        """Плановый день выхода текущей позиции: ex − exit_offset_days (накануне гэпа)."""
+        p = self.position
+        if p is None or p.ex_date not in trading_days:
+            return None
+        ex_i = trading_days.index(p.ex_date)
+        out_i = ex_i - self.strat.exit_offset_days
+        if out_i < 0:
+            return None
+        return trading_days[out_i]
+
+    def check_stop(self, stock_px: float, hedge_px: float) -> bool:
+        """Стоп-лосс: чистый (акция − хедж) убыток позиции > stop_loss_pct нотионала входа."""
+        p = self.position
+        pct = getattr(self.strat, "stop_loss_pct", 0.0)
+        if p is None or pct <= 0:
+            return False
+        notional = abs(p.stock_entry * p.lots * self.lot_size)
+        if notional <= 0:
+            return False
+        unreal = self._pnl(stock_px, hedge_px)[2]   # net без комиссий выхода
+        return unreal < -(pct / 100.0) * notional
+
+    # ---------- P&L (по фактическим ценам) ----------
+    def _pnl(self, stock_exit: float, hedge_exit: float) -> tuple[float, float, float]:
+        """(stock_pnl, hedge_pnl, sum) в ₽. Акция long, хедж IMOEXF short."""
+        p = self.position
+        stock = (stock_exit - p.stock_entry) * p.lots * self.lot_size
+        hedge = 0.0
+        if p.hedge_lots > 0:
+            # шорт IMOEXF: прибыль при падении фьючерса
+            hedge = -(hedge_exit - p.hedge_entry) * p.hedge_lots * self.pv_hedge
+        return stock, hedge, stock + hedge
+
+    def _fee(self, notional: float) -> float:
+        return abs(notional) * self.strat.fee_rate
+
+    # ---------- исполнение (мутирует состояние) ----------
+    def open(self, day: str, ev: DivEvent, stock_px: float,
+             hedge_px: float, hedge_lots: int) -> None:
+        s = self.strat
+        lots = s.quantity_lots
+        notional = stock_px * lots * self.lot_size
+        fee = self._fee(notional)
+        if hedge_lots > 0:
+            fee += self._fee(hedge_px * hedge_lots * self.pv_hedge)
+        self.position = St8Position(
+            ticker=self.ticker, entry_date=day, ex_date=ev.ex_date, lots=lots,
+            stock_entry=stock_px, hedge_lots=hedge_lots, hedge_entry=hedge_px,
+            fees_rub=fee, div_yield_pct=ev.div_yield_pct)
+
+    def close(self, day: str, stock_px: float, hedge_px: float, reason: str) -> St8Trade:
+        p = self.position
+        stock_pnl, hedge_pnl, _ = self._pnl(stock_px, hedge_px)
+        # комиссия выхода: обе ноги
+        exit_fee = self._fee(stock_px * p.lots * self.lot_size)
+        if p.hedge_lots > 0:
+            exit_fee += self._fee(hedge_px * p.hedge_lots * self.pv_hedge)
+        fees = p.fees_rub + exit_fee
+        net = stock_pnl + hedge_pnl - fees
+        # дни удержания = позиция в календаре; простая разница индексов недоступна тут → 0-заглушка
+        tr = St8Trade(ticker=self.ticker, entry_date=p.entry_date, exit_date=day, lots=p.lots,
+                      stock_pnl_rub=round(stock_pnl, 2), hedge_pnl_rub=round(hedge_pnl, 2),
+                      fees_rub=round(fees, 2), net_pnl_rub=round(net, 2), reason=reason,
+                      div_yield_pct=p.div_yield_pct)
+        self.trades.append(tr)
+        self.position = None
+        return tr
+
+    def unrealized_rub(self, stock_px: float, hedge_px: float) -> float:
+        if self.position is None:
+            return 0.0
+        return self._pnl(stock_px, hedge_px)[2] - self.position.fees_rub
