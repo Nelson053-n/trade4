@@ -212,11 +212,24 @@ def _daily_ledger_recon(day: str, MSK):
     import datetime as _dtm
     from .st4 import tbank_sandbox as _sb
     out = []
+    # st8-сделки имеют exit_date (строка) → конвертируем в exit_ts (мс) для единой сверки
+    _st8_trades = []
+    for t in ST8.trades:
+        exd = t.get("exit_date")
+        ts = None
+        if exd:
+            try:
+                ts = int(_dtm.datetime.strptime(exd, "%Y-%m-%d")
+                         .replace(tzinfo=MSK).timestamp() * 1000)
+            except Exception:  # noqa: BLE001
+                ts = None
+        _st8_trades.append({"exit_ts": ts, "fees_rub": t.get("fees_rub", 0)})
     engines = [
         ("ST5", getattr(ST5.cfg.connector, "account_id", None),
          ST5.cfg.connector.mode, ST5.trades),
         ("ST6", ST6.cfg.account_id, ST6.cfg.mode, ST6.trades),
         ("ST7", ST7.cfg.account_id, ST7.cfg.mode, ST7.trades),
+        ("ST8", ST8.cfg.account_id, ST8.cfg.mode, _st8_trades),
     ]
     for eng in ST4S.values():
         # только ЖИВЫЕ пары st4 — остановленные (rtkm/tatn) висят на общем счёте 614c441c
@@ -314,10 +327,23 @@ async def _daily_digest_loop():
             lines.append(f"ST7: позиций {sum(1 for e in ST7.engines.values() if e.position)}"
                          f" · net {sum(t.get('net_pnl_rub', 0) for t in ST7.trades):+.0f}₽"
                          + (f" · фандинг: {sig7}" if sig7 else ""))
+            # ST8 — дивидендный набег (сделки за день, открытые позиции, свежие дивиденды)
+            n8 = sum(t.get("net_pnl_rub", 0) for t in ST8.trades
+                     if t.get("exit_date") == day)
+            c8 = sum(1 for t in ST8.trades if t.get("exit_date") == day)
+            open8 = sum(1 for e in ST8.engines.values() if e.position is not None)
+            newdiv = len([d for d in ST8.new_dividends if d.get("detected") == day])
+            gap8 = ST8.execution_gap()
+            lines.append(f"ST8: {c8} сд, {n8:+.0f}₽ · открыто {open8}"
+                         + (f" · 🆕 дивидендов {newdiv}" if newdiv else "")
+                         + (f" · сверка {gap8:+.0f}₽" if gap8 is not None else ""))
             miss_today = sum(1 for m in ST5.missed
                              if _dtm.datetime.fromtimestamp(m["ts"] / 1000, MSK).strftime("%Y-%m-%d") == day)
             if miss_today:
                 lines.append(f"⏭ упущенных входов st5: {miss_today}")
+            miss8 = sum(1 for m in ST8.missed if m.get("date") == day)
+            if miss8:
+                lines.append(f"⏭ упущенных входов st8: {miss8}")
             # ── ПОСДЕЛОЧНАЯ СВЕРКА журнал↔счёт по каждому движку (боевая песочная торговля) ──
             lines.append("— <b>сверка сделок ↔ счёт</b> —")
             for name, acc, jfee in _daily_ledger_recon(day, MSK):

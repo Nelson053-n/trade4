@@ -238,3 +238,15 @@ def test_tick_missed_when_trading_off(monkeypatch):
     r = s.tick()
     assert r["missed"] == 1
     assert any(m["ticker"] == "TATN" and "выкл" in m["reason"] for m in s.missed)
+
+
+def test_st8_in_ledger_recon():
+    """ST8 включён в посделочную сверку (_daily_ledger_recon) — exit_date→exit_ts конверсия."""
+    import datetime as _dtm
+    from app.api import _daily_ledger_recon, ST8
+    MSK = _dtm.timezone(_dtm.timedelta(hours=3))
+    # paper st8 → должен пометиться "сверка не требуется"
+    ST8.cfg.mode = "paper"; ST8.cfg.account_id = ""
+    rows = _daily_ledger_recon("2026-05-20", MSK)
+    st8_row = [r for r in rows if "ST8" in r[0]]
+    assert st8_row and "paper" in st8_row[0][0]
