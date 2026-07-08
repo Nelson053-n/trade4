@@ -1651,6 +1651,39 @@ def st8_trading(on: bool = True):
     return {"ok": True, "trading_enabled": on}
 
 
+@app.get("/st8/market")
+async def st8_market(refresh: bool = False):
+    """Живые котировки включённых бумаг (last/bid/offer/спред/оборот) для анализа.
+    refresh=true — подтянуть свежие с ISS перед отдачей."""
+    if refresh:
+        await asyncio.to_thread(ST8.refresh_market)
+    return _clean({"market": ST8.market_view(), "hedge_px": ST8.hedge_px})
+
+
+@app.post("/st8/scan-dividends")
+async def st8_scan_dividends():
+    """Проверить объявление НОВЫХ дивидендов эмитентами (мониторинг для событийной стратегии).
+    Ловит свежие отсечки, чтобы успеть к окну входа (−10 дней)."""
+    found = await asyncio.to_thread(ST8.scan_new_dividends)
+    ST8.save_session()
+    return _clean({"new": found, "total_upcoming": len(ST8.new_dividends)})
+
+
+@app.get("/st8/audit")
+async def st8_audit():
+    """Аудит журнал↔счёт: капитал sandbox-счёта, execution_gap (кэш-истина), число сделок.
+    Δ<0 = скрытые издержки/расхождение журнала с реальностью (главный урок проекта)."""
+    await asyncio.to_thread(ST8.refresh_capital)
+    return _clean({
+        "mode": ST8.cfg.mode, "account_id": ST8.cfg.account_id or None,
+        "capital_rub": round(ST8.capital_rub) or None,
+        "journal_net_rub": round(sum(t.get("net_pnl_rub", 0) for t in ST8.trades)),
+        "execution_gap_rub": ST8.execution_gap(),
+        "anchor": ST8.exec_anchor,
+        "note": "execution_gap<0 = журнал завышает vs реальный счёт (кэш-истина)",
+    })
+
+
 @app.post("/st5/connector")
 def st5_connector(payload: dict):
     """Режим исполнителя st5: paper | tbank_sandbox | tbank_real (+account_id для real).
