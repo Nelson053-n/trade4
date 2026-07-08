@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ST8 · Дивидендный сэндвич</title>
+<style>
+  :root{
+    --bg:#0e151d; --panel:#17212c; --panel2:#1d2a37; --line:#26333f;
+    --ink:#e9eef3; --ink-dim:#8a99a8; --ink-faint:#5e6d7b;
+    --up:#41b884; --down:#e5674f; --accent:#4a9fd4; --gold:#d4a24a;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1280px;margin:0 auto;padding:0 20px 40px}
+  header{display:flex;align-items:center;gap:14px;padding:16px 0;border-bottom:1px solid var(--line);margin-bottom:16px;flex-wrap:wrap}
+  header h1{font-size:19px;margin:0;font-weight:650}
+  .dot{width:10px;height:10px;border-radius:50%;background:var(--ink-dim)}
+  .dot.on{background:var(--up);box-shadow:0 0 8px var(--up)}
+  .muted{color:var(--ink-dim);font-size:12px}
+  .num{font-variant-numeric:tabular-nums}
+  .grid{display:grid;grid-template-columns:2fr 1fr;gap:14px;align-items:start}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:14px}
+  .card h2{font-size:14px;margin:0 0 12px;font-weight:650}
+  .card h2 .em{font-weight:400;color:var(--ink-faint);font-size:11px;margin-left:6px}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th{text-align:left;font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-faint);padding:5px 8px;border-bottom:1px solid var(--line)}
+  td{padding:5px 8px;border-bottom:1px solid #1f2a35;font-variant-numeric:tabular-nums}
+  tr:last-child td{border-bottom:none}
+  .btn{font:inherit;font-size:12px;padding:6px 14px;cursor:pointer;background:var(--panel2);color:var(--ink);border:1px solid var(--line);border-radius:7px}
+  .btn:hover{border-color:var(--accent)}
+  .fld{margin:7px 0;font-size:12px}
+  .fld label{display:block;color:var(--ink-dim);margin-bottom:3px;font-size:11px}
+  .fld input,.fld select{width:100%;font:inherit;font-size:12px;background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 8px}
+  canvas{display:block;max-width:100%}
+  .chart-wrap{overflow-x:auto}
+  .legend{display:flex;gap:16px;font-size:11px;color:var(--ink-dim);margin-top:8px;flex-wrap:wrap}
+  .legend span{display:inline-flex;align-items:center;gap:5px}
+  .sw{width:11px;height:11px;border-radius:3px;display:inline-block}
+  .up{color:var(--up)} .down{color:var(--down)}
+  #tip{display:none;position:fixed;z-index:99;background:var(--panel2);border:1px solid var(--accent);border-radius:8px;padding:8px 12px;font-size:12px;pointer-events:none;box-shadow:0 6px 24px rgba(0,0,0,.4)}
+  @media(max-width:900px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <span class="dot" id="dot"></span>
+  <h1>ST8 · Дивидендный сэндвич</h1>
+  <span class="muted" id="mode"></span>
+  <span style="flex:1"></span>
+  <span class="muted num" id="net"></span>
+  <a href="/" class="muted" style="color:var(--ink-faint);text-decoration:none">← все стратегии</a>
+</header>
+
+<div class="card">
+  <h2>📈 График следующих сделок <span class="em">лонг-набег до отсечки · шорт-сдувание после · сегодня — вертикаль</span>
+    <button class="btn" id="reload" style="float:right;font-size:11px;padding:3px 10px">обновить</button></h2>
+  <div class="chart-wrap"><canvas id="timeline" width="1200" height="380"></canvas></div>
+  <div class="legend">
+    <span><span class="sw" style="background:var(--up)"></span>лонг: вход −10д → выход −2д (+3.49%/сд)</span>
+    <span><span class="sw" style="background:var(--down)"></span>шорт: день гэпа → +5д (+2.65%/сд)</span>
+    <span><span class="sw" style="background:var(--gold)"></span>ex-дата (гэп)</span>
+    <span><span class="sw" style="background:var(--accent);opacity:.5"></span>сегодня</span>
+  </div>
+</div>
+
+<div class="grid">
+<div>
+  <div class="card">
+    <h2>Календарь событий <span class="em">лонг и шорт-окна каждой отсечки</span></h2>
+    <div class="chart-wrap">
+    <table id="cal"><thead><tr><th>тикер</th><th>ex (гэп)</th><th>лонг вход</th><th>лонг выход</th><th>набег</th><th>шорт вход</th><th>шорт выкуп</th><th>дох%</th><th>статус</th></tr></thead><tbody></tbody></table>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Открытые позиции</h2>
+    <table id="pos"><thead><tr><th>тикер</th><th>сторона</th><th>вход</th><th>ex</th><th>лотов</th></tr></thead><tbody></tbody></table>
+  </div>
+  <div class="card">
+    <h2>Журнал сделок</h2>
+    <table id="trades"><thead><tr><th>тикер</th><th>сторона</th><th>период</th><th>P&L акции</th><th>P&L хеджа</th><th>комиссии</th><th>net</th><th>причина</th></tr></thead><tbody></tbody></table>
+  </div>
+  <div class="card">
+    <h2>Упущенные входы <span class="em">с причиной</span></h2>
+    <table id="missed"><thead><tr><th>день</th><th>тикер</th><th>отсечка</th><th>почему</th></tr></thead><tbody></tbody></table>
+  </div>
+</div>
+<div>
+  <div class="card">
+    <h2>Управление</h2>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+      <button class="btn" id="b-start">▶ старт</button>
+      <button class="btn" id="b-stop">⏸ стоп</button>
+      <button class="btn" id="b-trading">торговля: ?</button>
+      <button class="btn" id="b-tick">тик</button>
+    </div>
+    <div class="fld"><label>режим</label><select id="c-mode"><option value="paper">paper</option><option value="tbank_sandbox">tbank_sandbox</option></select></div>
+    <div class="fld"><label>account_id (sandbox)</label><input id="c-acc" placeholder="пусто = не менять"></div>
+    <div class="fld"><label>account_token</label><input id="c-tok" type="password" placeholder="пусто = не менять"></div>
+    <button class="btn" id="c-save">применить коннектор</button>
+    <div class="muted" id="c-msg" style="margin-top:6px"></div>
+  </div>
+  <div class="card">
+    <h2>Аудит <span class="em">кэш счёта = истина</span></h2>
+    <div class="muted num" id="audit">—</div>
+  </div>
+  <div class="card">
+    <h2>Параметры · лонг</h2>
+    <div class="fld"><label>вход за (торг. дней до отсечки)</label><input id="p-entry" type="number" min="1" max="30"></div>
+    <div class="fld"><label>выход за (дней до отсечки)</label><input id="p-exit" type="number" min="0" max="5"></div>
+    <div class="fld"><label>мин. дивдоходность %</label><input id="p-yield" type="number" step="0.5"></div>
+    <div class="fld"><label>стоп-лосс %</label><input id="p-stop" type="number" step="1"></div>
+    <div class="fld"><label><input id="p-july" type="checkbox" style="width:auto"> пропускать июль (лонг)</label></div>
+    <div class="fld"><label><input id="p-hedge" type="checkbox" style="width:auto"> хедж IMOEXF (лонг)</label></div>
+    <h2 style="margin-top:14px">Параметры · шорт</h2>
+    <div class="fld"><label><input id="p-short" type="checkbox" style="width:auto"> шорт-нога включена</label></div>
+    <div class="fld"><label>выкуп через (торг. дней)</label><input id="p-shold" type="number" min="1" max="15"></div>
+    <button class="btn" id="p-save" style="margin-top:8px">сохранить</button>
+    <div class="muted" id="p-msg" style="margin-top:6px"></div>
+  </div>
+  <div class="card">
+    <h2>Вселенная</h2>
+    <div id="uni" class="muted" style="line-height:1.9;font-size:12px"></div>
+  </div>
+  <div class="card">
+    <h2>События</h2>
+    <div id="log" style="font-size:11px;font-family:var(--mono);max-height:260px;overflow-y:auto"></div>
+  </div>
+</div>
+</div>
+</div>
+<div id="tip"></div>
+
+<script>
+const $=id=>document.getElementById(id);
+let SNAP=null, CAL=[];
+async function api(path, method='GET', body=null){
+  const o={method,headers:{}}; if(body){o.headers['Content-Type']='application/json'; o.body=JSON.stringify(body);}
+  const r=await fetch('/st8'+path,o);
+  if(r.status===401||r.status===403||r.redirected){location.href='/login';throw new Error('auth');}
+  if(!r.ok) throw new Error((await r.json().catch(()=>({}))).detail||r.status);
+  return r.json();
+}
+function render(s){
+  SNAP=s;
+  $('dot').className='dot'+(s.live?' on':'');
+  $('mode').textContent=(s.live?'live · ':'остановлен · ')+(s.mode||'paper')
+    +(s.account_id?' · '+s.account_id.slice(0,8):'')+' · бумаг '+(s.tickers_enabled||[]).length
+    +(s.hedge_px?' · IMOEXF '+s.hedge_px:'');
+  $('net').textContent='net '+(s.net_pnl_rub>=0?'+':'')+(s.net_pnl_rub||0)+' ₽ · сделок '+(s.trades_count||0)
+    +(s.execution_gap_rub!=null?' · сверка '+(s.execution_gap_rub>=0?'+':'')+s.execution_gap_rub+'₽':'');
+  $('b-trading').textContent='торговля: '+(s.trading_enabled?'ВКЛ':'выкл');
+  const mo=$('c-mode'); if(document.activeElement!==mo) mo.value=s.mode||'paper';
+  // позиции
+  const pb=$('pos').querySelector('tbody'); pb.innerHTML='';
+  (s.open_positions||[]).forEach(p=>{const tr=document.createElement('tr');
+    tr.innerHTML=`<td><b>${p.ticker}</b></td><td>${p.side==='short'?'<span class="down">шорт</span>':'<span class="up">лонг</span>'}</td><td>${p.entry}</td><td>${p.ex}</td><td>${p.lots}</td>`;pb.appendChild(tr);});
+  if(!(s.open_positions||[]).length) pb.innerHTML='<tr><td colspan="5" class="muted">нет открытых</td></tr>';
+  // журнал
+  const tb=$('trades').querySelector('tbody'); tb.innerHTML='';
+  (s.trades_tail||[]).slice().reverse().forEach(t=>{const tr=document.createElement('tr');
+    const col=t.net_pnl_rub>=0?'up':'down';
+    tr.innerHTML=`<td><b>${t.ticker}</b></td><td>${t.side==='short'?'<span class="down">шорт</span>':'<span class="up">лонг</span>'}</td><td>${t.entry_date} → ${t.exit_date}</td>`
+      +`<td>${(t.stock_pnl_rub>=0?'+':'')+t.stock_pnl_rub}</td><td>${(t.hedge_pnl_rub>=0?'+':'')+t.hedge_pnl_rub}</td><td>${t.fees_rub}</td>`
+      +`<td class="${col}">${(t.net_pnl_rub>=0?'+':'')+t.net_pnl_rub}₽</td><td class="muted">${t.reason}</td>`;tb.appendChild(tr);});
+  if(!(s.trades_tail||[]).length) tb.innerHTML='<tr><td colspan="8" class="muted">сделок ещё нет</td></tr>';
+  // упущенные
+  const mb=$('missed').querySelector('tbody'); mb.innerHTML='';
+  (s.missed||[]).slice().reverse().forEach(m=>{const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${m.date}</td><td><b>${m.ticker}</b></td><td>${m.ex_date}</td><td class="muted">${m.reason}</td>`;mb.appendChild(tr);});
+  if(!(s.missed||[]).length) mb.innerHTML='<tr><td colspan="4" class="muted">нет</td></tr>';
+  // параметры
+  const c=s.strategy_cfg||{};
+  const setv=(id,v)=>{const el=$(id); if(el&&document.activeElement!==el) el.value=v;};
+  setv('p-entry',c.entry_days_before); setv('p-exit',c.exit_offset_days);
+  setv('p-yield',c.min_div_yield_pct); setv('p-stop',c.stop_loss_pct); setv('p-shold',c.short_hold_days);
+  if(document.activeElement!==$('p-july')) $('p-july').checked=!!c.skip_july;
+  if(document.activeElement!==$('p-hedge')) $('p-hedge').checked=!!c.hedge_imoexf;
+  if(document.activeElement!==$('p-short')) $('p-short').checked=!!c.short_enabled;
+  // вселенная
+  const en=new Set(s.tickers_enabled||[]), slp=new Set(s.sleeping||[]);
+  const CORE=['MOEX','BSPB','IRAO','ROSN','MRKC','MGNT','GMKN','TATN','SIBN','TATNP','MRKP','PLZL','MAGN','NLMK','BELU','PHOR'];
+  const EXT=['SELG','LSNGP','LKOH','NVTK','ALRS'];
+  const b=t=>slp.has(t)?`<span style="opacity:.5" title="дивиденды заморожены">${t}💤</span>`:`<span style="color:${en.has(t)?'var(--accent)':'var(--ink-faint)'}">${t}</span>`;
+  $('uni').innerHTML='ядро: '+CORE.map(b).join(' ')+'<br>расш.: '+EXT.map(b).join(' ');
+  // события
+  $('log').innerHTML=(s.events||[]).slice().reverse().map(e=>{
+    const d=new Date(e.ts).toLocaleTimeString('ru',{hour:'2-digit',minute:'2-digit'});
+    return `<div><span class="muted">${d}</span> [${e.kind}] ${e.message}</div>`;}).join('');
+}
+// ── ГРАФИК СЛЕДУЮЩИХ СДЕЛОК (таймлайн) ──
+function drawTimeline(){
+  const cv=$('timeline'); const dpr=window.devicePixelRatio||1;
+  const W=1200,H=380; cv.width=W*dpr; cv.height=H*dpr; cv.style.width=W+'px'; cv.style.height=H+'px';
+  const c=cv.getContext('2d'); c.scale(dpr,dpr); c.clearRect(0,0,W,H);
+  const css=k=>getComputedStyle(document.documentElement).getPropertyValue(k).trim();
+  const UP=css('--up'),DOWN=css('--down'),GOLD=css('--gold'),ACC=css('--accent'),LINE=css('--line'),DIM=css('--ink-dim'),FAINT=css('--ink-faint');
+  // события с окнами (последние + предстоящие), максимум 14 строк
+  const rows=CAL.filter(r=>r.entry_date&&r.exit_date).slice(-14);
+  if(!rows.length){
+    c.fillStyle=DIM;c.font='13px ui-sans-serif';c.textAlign='center';
+    c.fillText('нет объявленных дивидендов — межсезонье (эмитенты объявляют за 1-2 мес до отсечки)',W/2,H/2-10);
+    c.fillStyle=FAINT;c.font='11px ui-sans-serif';
+    c.fillText('график заполнится автоматически: сканер дивидендов ловит новые отсечки каждый час',W/2,H/2+14);
+    return;
+  }
+  const pad={l:150,r:20,t:26,b:30};
+  const dates=[];
+  rows.forEach(r=>{dates.push(r.entry_date, r.short_exit_date||r.exit_date);});
+  const today=new Date().toISOString().slice(0,10);
+  dates.push(today);
+  const t0=new Date(Math.min(...dates.map(d=>+new Date(d))))-86400e3*2;
+  const t1=+new Date(Math.max(...dates.map(d=>+new Date(d))))+86400e3*2;
+  const X=d=>pad.l+(+new Date(d)-t0)/(t1-t0)*(W-pad.l-pad.r);
+  const rowH=(H-pad.t-pad.b)/rows.length;
+  // месячная сетка
+  c.strokeStyle=LINE;c.lineWidth=1;c.fillStyle=FAINT;c.font='10px ui-sans-serif';c.textAlign='left';
+  let m=new Date(t0); m.setDate(1);
+  while(+m<t1){
+    const x=X(m.toISOString().slice(0,10));
+    if(x>pad.l-5){c.beginPath();c.moveTo(x,pad.t);c.lineTo(x,H-pad.b);c.stroke();
+      c.fillText(m.toLocaleDateString('ru',{month:'short',year:'2-digit'}),x+3,H-14);}
+    m.setMonth(m.getMonth()+1);
+  }
+  // сегодня
+  const tx=X(today);
+  c.strokeStyle=ACC;c.globalAlpha=.6;c.lineWidth=1.5;c.setLineDash([5,4]);
+  c.beginPath();c.moveTo(tx,pad.t-8);c.lineTo(tx,H-pad.b);c.stroke();c.setLineDash([]);c.globalAlpha=1;
+  c.fillStyle=ACC;c.font='600 10px ui-sans-serif';c.textAlign='center';c.fillText('сегодня',tx,pad.t-12);
+  // строки событий
+  rows.forEach((r,i)=>{
+    const y=pad.t+i*rowH+rowH/2;
+    c.fillStyle=css('--ink');c.font='600 11px ui-sans-serif';c.textAlign='left';
+    c.fillText(r.ticker+' · '+r.div_yield_pct+'%',8,y+4);
+    c.fillStyle=FAINT;c.font='10px ui-sans-serif';c.fillText(r.ex_date,78,y+4);
+    // лонг-окно
+    const x1=X(r.entry_date),x2=X(r.exit_date);
+    c.fillStyle=UP;c.globalAlpha=.75;
+    c.beginPath();c.roundRect(x1,y-7,Math.max(x2-x1,3),14,4);c.fill();c.globalAlpha=1;
+    // ex-дата
+    const xe=X(r.ex_date);
+    c.strokeStyle=GOLD;c.lineWidth=2;
+    c.beginPath();c.moveTo(xe,y-11);c.lineTo(xe,y+11);c.stroke();
+    // шорт-окно
+    if(r.short_entry_date&&r.short_exit_date){
+      const x3=X(r.short_entry_date),x4=X(r.short_exit_date);
+      c.fillStyle=DOWN;c.globalAlpha=.75;
+      c.beginPath();c.roundRect(x3,y-7,Math.max(x4-x3,3),14,4);c.fill();c.globalAlpha=1;
+    }
+  });
+}
+async function loadCal(){
+  try{
+    const d=await api('/calendar?days_ahead=150&days_back=200');
+    CAL=d.calendar||[];
+    drawTimeline();
+    const tb=$('cal').querySelector('tbody'); tb.innerHTML='';
+    const px=v=>v==null?'—':(v>=100?(+v).toFixed(1):(+v).toFixed(3));
+    if(!CAL.length){tb.innerHTML='<tr><td colspan="9" class="muted">нет объявленных дивидендов (межсезонье)</td></tr>';return;}
+    CAL.slice(-25).forEach(r=>{const tr=document.createElement('tr');
+      const dimStyle=r.status.includes('пропуск')?'opacity:.55':'';
+      const runCol=r.run_pct==null?'':(r.run_pct>=0?'up':'down');
+      tr.innerHTML=`<td style="${dimStyle}"><b>${r.ticker}</b></td><td style="${dimStyle}">${r.ex_date}</td>`
+        +`<td style="${dimStyle}" class="up">${r.entry_date||'—'}</td><td style="${dimStyle}" class="up">${r.exit_date||'—'}</td>`
+        +`<td class="${runCol}">${r.run_pct==null?'—':(r.run_pct>=0?'+':'')+r.run_pct+'%'}</td>`
+        +`<td style="${dimStyle}" class="down">${r.short_entry_date||'—'}</td><td style="${dimStyle}" class="down">${r.short_exit_date||'—'}</td>`
+        +`<td style="${dimStyle}">${r.div_yield_pct}%</td><td class="muted">${r.status}</td>`;
+      tb.appendChild(tr);});
+  }catch(e){}
+}
+async function loadAudit(){
+  try{const a=await api('/audit');
+    $('audit').textContent=`капитал ${a.capital_rub?a.capital_rub.toLocaleString('ru'):'—'} ₽ · журнал ${a.journal_net_rub>=0?'+':''}${a.journal_net_rub} ₽ · gap ${a.execution_gap_rub==null?'— (paper)':a.execution_gap_rub+' ₽'}`;
+  }catch(e){}
+}
+async function poll(){try{render(await api('/state'));}catch(e){}}
+$('b-start').onclick=async()=>{try{await api('/control/start','POST');poll();}catch(e){alert(e.message);}};
+$('b-stop').onclick=async()=>{try{await api('/control/stop','POST');poll();}catch(e){alert(e.message);}};
+$('b-trading').onclick=async()=>{try{const on=!(SNAP&&SNAP.trading_enabled);await api('/control/trading?on='+on,'POST');poll();}catch(e){alert(e.message);}};
+$('b-tick').onclick=async()=>{$('b-tick').textContent='…';try{const r=await api('/tick','POST');$('c-msg').textContent='тик: вход '+(r.entered||[]).length+', выход '+(r.exited||[]).length+', упущено '+(r.missed||0);poll();loadCal();}catch(e){alert(e.message);}$('b-tick').textContent='тик';};
+$('c-save').onclick=async()=>{try{
+  const body={mode:$('c-mode').value};
+  if($('c-acc').value.trim())body.account_id=$('c-acc').value.trim();
+  if($('c-tok').value.trim())body.account_token=$('c-tok').value.trim();
+  await api('/connector','POST',body);$('c-msg').textContent='применено';$('c-tok').value='';poll();
+}catch(e){$('c-msg').textContent='ошибка: '+e.message;}};
+$('p-save').onclick=async()=>{try{
+  await api('/config','POST',{entry_days_before:+$('p-entry').value,exit_offset_days:+$('p-exit').value,
+    min_div_yield_pct:+$('p-yield').value,stop_loss_pct:+$('p-stop').value,
+    skip_july:$('p-july').checked,hedge_imoexf:$('p-hedge').checked,
+    short_enabled:$('p-short').checked,short_hold_days:+$('p-shold').value});
+  $('p-msg').textContent='сохранено';poll();loadCal();
+}catch(e){$('p-msg').textContent='ошибка: '+e.message;}};
+$('reload').onclick=()=>loadCal();
+poll();loadCal();loadAudit();
+setInterval(poll,8000);setInterval(loadAudit,60000);
+</script>
+</body>
+</html>

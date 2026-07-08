@@ -466,14 +466,16 @@ class St8Session:
                 if not (lo <= ex <= hi):
                     continue
                 is_july = ex[5:7] == "07"
-                # дни входа/выхода по торговому календарю
-                entry_d = exit_d = None
+                # дни входа/выхода по торговому календарю (лонг + шорт-нога)
+                entry_d = exit_d = short_exit_d = None
                 if ex in self._trading_days:
                     ex_i = self._trading_days.index(ex)
                     if ex_i - s.entry_days_before >= 0:
                         entry_d = self._trading_days[ex_i - s.entry_days_before]
                     if ex_i - s.exit_offset_days >= 0:
                         exit_d = self._trading_days[ex_i - s.exit_offset_days]
+                    if ex_i + s.short_hold_days < len(self._trading_days):
+                        short_exit_d = self._trading_days[ex_i + s.short_hold_days]
                 # статус
                 if is_july and s.skip_july:
                     status = "пропуск (июль)"
@@ -492,10 +494,14 @@ class St8Session:
                 exit_px = self._price_on(tk, exit_d) if exit_d and exit_d <= today else None
                 run_pct = (round((exit_px - entry_px) / entry_px * 100, 2)
                            if entry_px and exit_px else None)   # набег до гэпа, %
+                # шорт торгуется в июле (его лучший месяц), фильтр — только skip_months
+                short_on = (s.short_enabled and int(ex[5:7]) not in (s.short_skip_months or []))
                 rows.append({
                     "ticker": tk, "name": name, "ex_date": ex,
                     "entry_date": entry_d, "exit_date": exit_d,
                     "entry_px": entry_px, "exit_px": exit_px, "run_pct": run_pct,
+                    "short_entry_date": ex if short_on else None,
+                    "short_exit_date": short_exit_d if short_on else None,
                     "div": div, "div_yield_pct": dy,
                     "july": is_july, "status": status,
                 })
@@ -540,6 +546,7 @@ class St8Session:
             "market_quotes": len(self.market),
             "missed": self.missed[-15:],
             "sleeping": self._sleeping,          # без дивидендов >года (не торгуются)
+            "trades_tail": self.trades[-20:],    # хвост журнала для страницы /st8
             "strategy_cfg": self.cfg.strategy.model_dump(),
             "events": self.events[-20:],
         }

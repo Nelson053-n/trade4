@@ -568,6 +568,15 @@ def dashboard():
     return FileResponse(DASHBOARD, headers={"Cache-Control": "no-cache, must-revalidate"})
 
 
+@app.get("/st8")
+def st8_page():
+    """Отдельная чистая страница ST8 (дивидендный сэндвич) — без старых стратегий."""
+    f = _BASE / "st8.html"
+    if not f.exists():
+        raise HTTPException(404, "st8.html не найден")
+    return FileResponse(f, headers={"Cache-Control": "no-cache, must-revalidate"})
+
+
 @app.get("/strategy.md")
 def strategy_md():
     """Описание стратегии для анализа нейросетью (STRATEGY.md). Отдаётся как markdown."""
@@ -1665,6 +1674,9 @@ def st8_config(payload: dict):
         s.skip_july = bool(payload["skip_july"])
     if "hedge_imoexf" in payload:
         s.hedge_imoexf = bool(payload["hedge_imoexf"])
+    if "short_enabled" in payload:
+        s.short_enabled = bool(payload["short_enabled"])
+    s.short_hold_days = int(_num("short_hold_days", 1, 15, s.short_hold_days))
     ST8.save_session()
     return {"ok": True, "strategy": s.model_dump()}
 
