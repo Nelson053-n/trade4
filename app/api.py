@@ -105,6 +105,10 @@ ST7 = St7Session()
 from .st8.service import St8Session, ST8_TICKERS  # noqa: E402
 ST8 = St8Session()
 
+# ST9 — «трендовая корзина»: Donchian+ATR на перпах Si/GOLD (60м), диверсификатор плана
+from .st9.service import St9Session  # noqa: E402
+ST9 = St9Session()
+
 _server_started = 0.0
 
 
@@ -407,6 +411,9 @@ async def lifespan(app: FastAPI):
     ST8.load_session()                                  # st8 — дивидендный набег (событийный)
     if ST8.state.get("live_intent"):
         ST8.start_live()
+    ST9.load_session()                                  # st9 — трендовая корзина (60м)
+    if ST9.state.get("live_intent"):
+        ST9.start_live()
     _watchdog_task = asyncio.create_task(ST5.watchdog_loop())  # самовосстановление зависшего live-цикла
     _auto_bt_task = asyncio.create_task(_auto_backtest_loop())
     _digest_task = asyncio.create_task(_daily_digest_loop())   # вечерний TG-дайджест (23:55)
@@ -1780,6 +1787,54 @@ async def st8_audit():
         "anchor": ST8.exec_anchor,
         "note": "execution_gap<0 = журнал завышает vs реальный счёт (кэш-истина)",
     })
+
+
+# ── st9 — «трендовая корзина» (Donchian+ATR, 60м перпы) ──
+@app.get("/st9/state")
+def st9_state():
+    return _clean(ST9.snapshot())
+
+
+@app.post("/st9/control/start")
+def st9_start():
+    ST9.start_live()
+    return {"ok": True, "live": True}
+
+
+@app.post("/st9/control/stop")
+def st9_stop():
+    ST9.stop_live()
+    return {"ok": True, "live": False}
+
+
+@app.post("/st9/control/trading")
+def st9_trading(on: bool = True):
+    ST9.cfg.trading_enabled = on
+    ST9.save_session()
+    return {"ok": True, "trading_enabled": on}
+
+
+@app.post("/st9/tick")
+async def st9_tick():
+    """Ручной тик: свежие 60м бары → сигналы → исполнение."""
+    return _clean(await asyncio.to_thread(ST9.tick))
+
+
+@app.post("/st9/connector")
+def st9_connector(payload: dict):
+    if any(e.position is not None for e in ST9.engines.values()):
+        raise HTTPException(409, "смена коннектора: закрой позиции st9")
+    mode = payload.get("mode")
+    if mode not in ("paper", "tbank_sandbox"):
+        raise HTTPException(400, "mode: paper | tbank_sandbox")
+    from .st4 import tbank_sandbox as _sb
+    ST9.cfg.mode = mode
+    if "account_id" in payload:
+        ST9.cfg.account_id = str(payload["account_id"]).strip()
+    if payload.get("account_token") and ST9.cfg.account_id:
+        _sb.set_account_token(ST9.cfg.account_id, str(payload["account_token"]).strip())
+    ST9.save_session()
+    return {"ok": True, "mode": mode, "account_id": ST9.cfg.account_id or None}
 
 
 @app.post("/st5/connector")
