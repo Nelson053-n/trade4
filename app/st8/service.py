@@ -655,7 +655,8 @@ class St8Session:
             "tickers_enabled": [tk for tk, on in self.enabled.items() if on],
             "open_positions": [
                 {"ticker": tk, "entry": e.position.entry_date, "ex": e.position.ex_date,
-                 "lots": e.position.lots}
+                 "lots": e.position.lots, "side": e.position.side,
+                 "instrument": e.position.instrument or None}
                 for tk, e in self.engines.items() if e.position is not None
             ],
             "net_pnl_rub": round(net),
