@@ -1724,7 +1724,9 @@ def st8_trading(on: bool = True):
 
 
 @app.post("/st8/control/start")
-def st8_start():
+async def st8_start():
+    # async: start_live делает asyncio.create_task — из sync-роута (threadpool)
+    # нет running loop → RuntimeError 500 (баг найден 09.07, интент терялся)
     ST8.start_live()
     return {"ok": True, "live": True}
 
@@ -1807,7 +1809,7 @@ def st9_state():
 
 
 @app.post("/st9/control/start")
-def st9_start():
+async def st9_start():
     ST9.start_live()
     return {"ok": True, "live": True}
 
