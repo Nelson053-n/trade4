@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ST8 · Дивидендный сэндвич</title>
+<title>Терминал · ST8 сэндвич + ST9 тренд</title>
 <style>
   :root, :root[data-theme=dark]{
     --bg:#0e151d; --panel:#16202b; --panel2:#1d2a37; --line:#26333f;
@@ -70,7 +70,7 @@
 <div class="wrap">
 <header>
   <span class="dot" id="dot"></span>
-  <h1>ST8 · Дивидендный сэндвич</h1>
+  <h1>Терминал · <span style="color:var(--accent)">ST8 сэндвич</span> + <span style="color:var(--gold)">ST9 тренд</span></h1>
   <span class="muted" id="mode"></span>
   <span style="flex:1"></span>
   <span class="muted num" id="net"></span>
@@ -140,6 +140,21 @@
     <div class="fld"><label>account_token</label><input id="c-tok" type="password" placeholder="пусто = не менять"></div>
     <button class="btn" id="c-save">применить коннектор</button>
     <div class="muted" id="c-msg" style="margin-top:6px"></div>
+  </div>
+  <div class="card" style="border-color:color-mix(in srgb,var(--gold) 40%,var(--line))">
+    <h2>ST9 · Трендовая корзина <span class="em">Donchian+ATR · 60м перпы</span>
+      <span class="dot" id="s9-dot" style="float:right;margin-top:2px"></span></h2>
+    <div class="muted num" id="s9-sum" style="margin-bottom:8px">—</div>
+    <table id="s9-instr"><thead><tr><th>перп</th><th>don</th><th>позиция</th><th>трейл</th><th>сигнал</th></tr></thead><tbody></tbody></table>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px">
+      <button class="btn" id="s9-start">▶ старт</button>
+      <button class="btn" id="s9-stop">⏸ стоп</button>
+      <button class="btn" id="s9-trading">торговля: ?</button>
+      <button class="btn" id="s9-tick">тик</button>
+    </div>
+    <div class="subhead" style="margin-top:12px">Сделки ST9</div>
+    <table id="s9-trades"><thead><tr><th>перп</th><th>сторона</th><th>вход→выход</th><th>net</th><th>причина</th></tr></thead><tbody></tbody></table>
+    <div class="muted" id="s9-msg" style="margin-top:6px"></div>
   </div>
   <div class="card">
     <h2>Параметры</h2>
@@ -331,6 +346,39 @@ async function loadLedger(){
   }catch(e){}
 }
 async function poll(){try{render(await api('/state'));}catch(e){}}
+// ── ST9 (общий терминал) ──
+let S9=null;
+async function api9(path, method='GET'){
+  const r=await fetch('/st9'+path,{method});
+  if(!r.ok) throw new Error((await r.json().catch(()=>({}))).detail||r.status);
+  return r.json();
+}
+function render9(d){
+  S9=d;
+  $('s9-dot').className='dot'+(d.live?' on':'');
+  $('s9-sum').textContent=(d.live?'live · ':'остановлен · ')+(d.mode||'paper')
+    +(d.capital_rub?' · капитал '+d.capital_rub.toLocaleString('ru')+' ₽':'')
+    +' · сделок '+(d.trades_count||0)+' · net '+((d.net_pnl_rub>=0?'+':'')+(d.net_pnl_rub||0))+' ₽';
+  $('s9-trading').textContent='торговля: '+(d.trading_enabled?'ВКЛ':'выкл');
+  const tb=$('s9-instr').querySelector('tbody'); tb.innerHTML='';
+  (d.instruments||[]).forEach(i=>{const tr=document.createElement('tr');
+    const p=i.position;
+    tr.innerHTML=`<td><b>${i.secid}</b></td><td class="muted">${i.don}</td>`
+      +`<td>${p?side(p.side)+' '+p.lots+'л @ '+p.entry:'<span class="muted">flat</span>'}</td>`
+      +`<td class="num">${p?p.trail:'—'}</td><td class="muted">${i.last_signal||'—'}</td>`;
+    tb.appendChild(tr);});
+  const tt=$('s9-trades').querySelector('tbody'); tt.innerHTML='';
+  (d.trades_tail||[]).slice().reverse().slice(0,8).forEach(t=>{const tr=document.createElement('tr');
+    tr.innerHTML=`<td><b>${t.secid}</b></td><td>${side(t.side)}</td><td class="num">${t.entry} → ${t.exit}</td>`
+      +`<td class="${t.net_pnl_rub>=0?'up':'down'}">${(t.net_pnl_rub>=0?'+':'')+t.net_pnl_rub}₽</td><td class="muted">${t.reason}</td>`;
+    tt.appendChild(tr);});
+  if(!(d.trades_tail||[]).length) tt.innerHTML='<tr><td colspan="5" class="muted">сделок ещё нет (ждёт пробоя)</td></tr>';
+}
+async function poll9(){try{render9(await api9('/state'));}catch(e){}}
+$('s9-start').onclick=async()=>{try{await api9('/control/start','POST');poll9();}catch(e){alert(e.message);}};
+$('s9-stop').onclick=async()=>{try{await api9('/control/stop','POST');poll9();}catch(e){alert(e.message);}};
+$('s9-trading').onclick=async()=>{try{const on=!(S9&&S9.trading_enabled);await api9('/control/trading?on='+on,'POST');poll9();}catch(e){alert(e.message);}};
+$('s9-tick').onclick=async()=>{$('s9-tick').textContent='…';try{const r=await api9('/tick','POST');$('s9-msg').textContent='тик: сигналов '+(r.signals||0);poll9();}catch(e){alert(e.message);}$('s9-tick').textContent='тик';};
 $('b-start').onclick=async()=>{try{await api('/control/start','POST');poll();}catch(e){alert(e.message);}};
 $('b-stop').onclick=async()=>{try{await api('/control/stop','POST');poll();}catch(e){alert(e.message);}};
 $('b-trading').onclick=async()=>{try{const on=!(SNAP&&SNAP.trading_enabled);await api('/control/trading?on='+on,'POST');poll();}catch(e){alert(e.message);}};
@@ -352,8 +400,8 @@ $('p-save').onclick=async()=>{try{
 }catch(e){$('p-msg').textContent='ошибка: '+e.message;}};
 $('reload').onclick=()=>loadCal();
 $('l-reload').onclick=()=>loadLedger();
-poll();loadCal();loadLedger();
-setInterval(poll,8000);setInterval(loadLedger,60000);
+poll();loadCal();loadLedger();poll9();
+setInterval(poll,8000);setInterval(loadLedger,60000);setInterval(poll9,10000);
 </script>
 </body>
 </html>
