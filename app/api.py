@@ -234,6 +234,7 @@ def _daily_ledger_recon(day: str, MSK):
         ("ST6", ST6.cfg.account_id, ST6.cfg.mode, ST6.trades),
         ("ST7", ST7.cfg.account_id, ST7.cfg.mode, ST7.trades),
         ("ST8", ST8.cfg.account_id, ST8.cfg.mode, _st8_trades),
+        ("ST9", ST9.cfg.account_id, ST9.cfg.mode, ST9.trades),
     ]
     for eng in ST4S.values():
         # только ЖИВЫЕ пары st4 — остановленные (rtkm/tatn) висят на общем счёте 614c441c
@@ -348,6 +349,16 @@ async def _daily_digest_loop():
             miss8 = sum(1 for m in ST8.missed if m.get("date") == day)
             if miss8:
                 lines.append(f"⏭ упущенных входов st8: {miss8}")
+            # ST9 — трендовая корзина
+            n9 = sum(t.get("net_pnl_rub", 0) for t in ST9.trades
+                     if _dtm.datetime.fromtimestamp(t.get("exit_ts", 0) / 1000, MSK)
+                     .strftime("%Y-%m-%d") == day)
+            c9 = sum(1 for t in ST9.trades
+                     if _dtm.datetime.fromtimestamp(t.get("exit_ts", 0) / 1000, MSK)
+                     .strftime("%Y-%m-%d") == day)
+            open9 = sum(1 for e in ST9.engines.values() if e.position is not None)
+            lines.append(f"ST9: {c9} сд, {n9:+.0f}₽ · открыто {open9}"
+                         f" · капитал {ST9.capital_rub:,.0f}₽".replace(",", " "))
             # ── ПОСДЕЛОЧНАЯ СВЕРКА журнал↔счёт по каждому движку (боевая песочная торговля) ──
             lines.append("— <b>сверка сделок ↔ счёт</b> —")
             for name, acc, jfee in _daily_ledger_recon(day, MSK):

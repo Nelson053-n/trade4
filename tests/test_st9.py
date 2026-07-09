@@ -86,3 +86,15 @@ def test_no_signal_until_warmup():
     e = _eng()
     for i in range(4):
         assert e.step(Bar(ts=i, o=100, h=120, l=80, c=110), lots_for_entry=1) is None
+
+
+def test_trail_protects_after_restart():
+    """После рестарта (бары пусты, окна не прогреты) открытая позиция ЗАЩИЩЕНА трейлом.
+    Дыра ревизии 09.07: старый step выходил по None-индикаторам до проверки трейла."""
+    e = _eng()
+    # имитация рестарта: позиция восстановлена из session, баров нет
+    e.open("long", 100.0, 1, 1, atr=2.0)   # трейл = 100 − 3×2 = 94
+    assert len(e.bars) == 0
+    # первый же бар после рестарта пробивает трейл — выход обязан сработать
+    sig = e.step(Bar(ts=2, o=95, h=95, l=90, c=92), lots_for_entry=1)
+    assert sig is not None and sig["act"] == "close" and sig["reason"] == "trail"

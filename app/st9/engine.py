@@ -92,35 +92,43 @@ class St9Engine:
         don_in = self._donchian(self.don_enter)
         don_out = self._donchian(self.don_exit)
         atr = self._atr()
-        if don_in is None or don_out is None or atr is None:
-            return None
-        hi_in, lo_in = don_in
-        hi_out, lo_out = don_out
         p = self.position
         if p is not None:
-            # 1) двигаем трейл в сторону позиции
+            # ── ЗАЩИТА ПОЗИЦИИ: трейл НЕ требует прогретых окон — проверяем ВСЕГДА.
+            # После рестарта бары пусты (persist только позиции), окна греются 2-3 дня;
+            # без этого блока позиция висела бы незащищённой (дыра, найдена ревизией 09.07).
             if p.side == "long":
-                p.trail = max(p.trail, bar.c - self.atr_mult * atr)
+                if atr is not None:
+                    p.trail = max(p.trail, bar.c - self.atr_mult * atr)
                 trail_hit = bar.c <= p.trail
-                counter = bar.c < lo_out          # противопробой exit-окна
             else:
-                p.trail = min(p.trail, bar.c + self.atr_mult * atr)
+                if atr is not None:
+                    p.trail = min(p.trail, bar.c + self.atr_mult * atr)
                 trail_hit = bar.c >= p.trail
-                counter = bar.c > hi_out
+            # противопробой exit-окна — только при готовых окнах
+            counter = False
+            if don_out is not None:
+                hi_out, lo_out = don_out
+                counter = (bar.c < lo_out) if p.side == "long" else (bar.c > hi_out)
             if trail_hit or counter:
                 # реверс только по противопробою ВХОДНОГО окна; трейл — просто выход
                 rev = None
-                if p.side == "long" and bar.c < lo_in and self.allow_short:
-                    rev = "short"
-                elif p.side == "short" and bar.c > hi_in:
-                    rev = "long"
+                if don_in is not None:
+                    hi_in, lo_in = don_in
+                    if p.side == "long" and bar.c < lo_in and self.allow_short:
+                        rev = "short"
+                    elif p.side == "short" and bar.c > hi_in:
+                        rev = "long"
                 reason = "trail" if trail_hit else "reverse"
                 self.last_signal = f"exit {p.side} ({reason})"
                 return {"act": "reverse" if rev else "close",
                         "close_side": p.side, "new_side": rev, "px": bar.c,
-                        "reason": reason, "atr": atr}
+                        "reason": reason, "atr": atr or 0.0}
             return None
-        # FLAT: пробой входного окна
+        # FLAT: вход требует прогретых окон
+        if don_in is None or atr is None:
+            return None
+        hi_in, lo_in = don_in
         if bar.c > hi_in:
             self.last_signal = "breakout long"
             return {"act": "open", "new_side": "long", "px": bar.c, "atr": atr,

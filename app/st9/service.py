@@ -115,11 +115,26 @@ class St9Session:
     # ---------- тик ----------
     def tick(self) -> dict:
         acted = {"signals": 0}
-        frm = (datetime.now(timezone.utc) - timedelta(days=14)).strftime("%Y-%m-%d")
         for icfg in self.cfg.instruments:
             eng = self._engine(icfg)
+            # качаем с последнего известного бара; полные 14 дней — на прогреве ИЛИ
+            # когда движок пуст после рестарта (нужен бэкфилл индикаторов)
+            last0 = self._last_bar_ts.get(icfg.secid, 0)
+            need_backfill = last0 > 0 and not eng.bars
+            frm = (datetime.fromtimestamp(last0 / 1000).strftime("%Y-%m-%d")
+                   if last0 and not need_backfill
+                   else (datetime.now(timezone.utc) - timedelta(days=14)).strftime("%Y-%m-%d"))
             bars = iss_candles_60m(icfg.secid, frm)
-            last = self._last_bar_ts.get(icfg.secid, 0)
+            last = last0
+            if need_backfill:
+                # рестарт: восстановить состояние индикаторов УЖЕ ОБРАБОТАННЫМИ барами
+                # (без step — без сигналов/сделок), иначе входы заблокированы 2-3 дня прогрева
+                hist = [b for b in bars if b.ts <= last]
+                for b in hist:
+                    eng.bars.append(b)
+                if hist:
+                    self.log_event("info", f"{icfg.secid}: индикаторы восстановлены "
+                                           f"({len(hist)} баров после рестарта)")
             fresh = [b for b in bars if b.ts > last]
             warmup = last == 0    # первый запуск: только прогрев индикаторов,
             for b in fresh:       # БЕЗ сделок (иначе журнал засоряют фиктивные входы истории)
