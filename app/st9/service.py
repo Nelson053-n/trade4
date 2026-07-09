@@ -327,6 +327,10 @@ class St9Session:
         if cfg:
             try:
                 self.cfg = St9Config(**cfg)
+                # РЕЕСТР ИНСТРУМЕНТОВ — ИЗ КОДА, не из session (как ST4_PAIRS): иначе
+                # добавленная в код ось затирается старым сохранённым списком
+                # (ловушка 09.07: GAZR исчез после рестарта — файл был от v1 с 2 осями)
+                self.cfg.instruments = St9Config().instruments
             except Exception:  # noqa: BLE001
                 pass
         # восстановление открытых позиций в движки (сами движки создаются лениво)
