@@ -178,8 +178,8 @@ class St9Session:
 
     def start_live(self) -> None:
         import asyncio
-        if self.state["live"]:
-            return
+        if self._task is not None and not self._task.done():
+            return   # цикл реально жив (проверка task, НЕ флага — флаг бывает фиктивным)
         self.state["live"] = True
         self.state["live_intent"] = True
         self._task = asyncio.create_task(self.run_live())
@@ -236,6 +236,10 @@ class St9Session:
             return False
         self.trades = d.get("trades", [])
         self.state.update(d.get("state") or {})
+        # live — РАНТАЙМ-факт (жив ли цикл СЕЙЧАС), из файла не восстанавливается:
+        # иначе start_live() видит live=True и выходит, НЕ создав task → фиктивный live
+        # с мёртвым циклом (баг найден 09.07: st9 жил без цикла после рестарта)
+        self.state["live"] = False
         self._last_bar_ts = {k: int(v) for k, v in (d.get("last_bar_ts") or {}).items()}
         self.exec_anchor = d.get("exec_anchor") or None
         cfg = d.get("config")

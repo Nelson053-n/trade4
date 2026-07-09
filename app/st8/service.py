@@ -537,8 +537,8 @@ class St8Session:
 
     def start_live(self) -> None:
         import asyncio
-        if self.state["live"]:
-            return
+        if self._task is not None and not self._task.done():
+            return   # цикл реально жив (проверка task, НЕ флага)
         self.state["live"] = True
         self.state["live_intent"] = True
         self._task = asyncio.create_task(self.run_live())
@@ -749,9 +749,12 @@ class St8Session:
         except Exception:  # noqa: BLE001
             return False
         self.trades = d.get("trades", [])
+        # live — рантайм-факт, из файла не восстанавливаем (см. st9: фиктивный live без цикла)
+        st = d.get("state") or {}
+        st["live"] = False
+        self.state.update(st)
         en = d.get("enabled") or {}
         self.enabled = {tk: bool(en.get(tk, tk in ST8_CORE or tk in ST8_EXTENDED)) for tk in ST8_TICKERS}
-        self.state.update(d.get("state") or {})
         self.exec_anchor = d.get("exec_anchor") or None
         self.new_dividends = list(d.get("new_dividends") or [])
         self._div_seen = dict(d.get("div_seen") or {})
