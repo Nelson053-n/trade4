@@ -19,11 +19,15 @@ from pydantic import BaseModel
 
 
 class St9InstrumentCfg(BaseModel):
-    secid: str                        # перпетуал FORTS (USDRUBF/GLDRUBF)
-    don_enter: int = 20               # окно пробоя входа (60м баров)
+    secid: str                        # перпетуал FORTS (USDRUBF/GLDRUBF) ИЛИ ASSETCODE
+    don_enter: int = 20               # окно пробоя входа (баров)
     don_exit: int = 10                # окно противопробоя выхода
     atr_mult: float = 3.0             # ATR(14)-трейлинг множитель
     entry_notional_rub: float = 100_000.0   # нотионал позиции на инструмент
+    # квартальники: secid = ASSETCODE (GAZR), контракт резолвится динамически + ролл
+    quarterly: bool = False
+    roll_days_before: int = 3         # ролл за N дней до экспирации
+    interval_min: int = 60            # ТФ баров: 60 (час) | 1440 (день; ISS interval=24)
 
 
 class St9StrategyConfig(BaseModel):
@@ -38,6 +42,11 @@ class St9Config(BaseModel):
     instruments: list[St9InstrumentCfg] = [
         St9InstrumentCfg(secid="USDRUBF", don_enter=20, don_exit=10),
         St9InstrumentCfg(secid="GLDRUBF", don_enter=32, don_exit=16),
+        # ТРЕТЬЯ ОСЬ (v2): РФ-акции — GAZR квартальники, ДНЕВНОЙ Donchian 20/10.
+        # Единственный трендер, живой на ПОЛНОЙ истории 7 лет: +25%/год PF 2.01,
+        # держит ex-2022 (+22.9%), corr к золоту +0.03 (независим). Ролл за 3 дня.
+        St9InstrumentCfg(secid="GAZR", don_enter=20, don_exit=10, quarterly=True,
+                         interval_min=1440, entry_notional_rub=100_000.0),
     ]
     mode: str = "paper"               # paper | tbank_sandbox
     account_id: str = ""

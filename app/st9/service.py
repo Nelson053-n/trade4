@@ -21,11 +21,12 @@ def _iss(url: str) -> dict:
     return json.load(urllib.request.urlopen(req, timeout=30))
 
 
-def iss_candles_60m(secid: str, frm: str) -> list[Bar]:
-    """ЗАКРЫТЫЕ 60м свечи фьючерса с ISS (формирующийся бар отброшен)."""
+def iss_candles(secid: str, frm: str, interval_min: int = 60) -> list[Bar]:
+    """ЗАКРЫТЫЕ свечи фьючерса с ISS (формирующийся бар отброшен). 60м или дневные."""
+    iss_iv = 24 if interval_min >= 1440 else interval_min   # ISS: 24 = дневной
     try:
         d = _iss(f"{ISS}/engines/futures/markets/forts/securities/{secid}/candles.json"
-                 f"?iss.meta=off&interval=60&from={frm}")
+                 f"?iss.meta=off&interval={iss_iv}&from={frm}")
         ci = {c: i for i, c in enumerate(d["candles"]["columns"])}
         # ISS отдаёт naive-даты в МСК → сравниваем с naive-МСК (aware vs naive = TypeError)
         now = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=3)
@@ -52,6 +53,8 @@ class St9Session:
         self._session_file = Path(__file__).resolve().parent.parent.parent / "session_state_9.json"
         self._last_bar_ts: dict[str, int] = {}
         self._pv_cache: dict[str, float] = {}
+        self._contract_cache: dict[str, tuple] = {}   # asset -> (secid, дата резолва)
+        self.contracts: dict[str, str] = {}           # asset -> контракт ОТКРЫТОЙ позиции (персист)
         self.capital_rub: float = 0.0
         self.exec_anchor: dict | None = None
         self._task = None
@@ -69,6 +72,22 @@ class St9Session:
             except Exception:  # noqa: BLE001
                 return 1.0
         return self._pv_cache[secid]
+
+    def _resolve_contract(self, icfg) -> str | None:
+        """Текущий торгуемый контракт актива: ближайший квартальник с экспирацией
+        позже чем сегодня + roll_days_before (кэш на день)."""
+        from datetime import date as _d
+        today = _d.today()
+        key = icfg.secid
+        c = self._contract_cache.get(key)
+        if c and c[1] == today.isoformat():
+            return c[0]
+        from ..st8.service import _iss_futures_for_asset
+        futs = _iss_futures_for_asset(icfg.secid)
+        min_exp = (today + timedelta(days=icfg.roll_days_before)).isoformat()
+        pick = next((sec for sec, exp in futs if exp > min_exp), None)
+        self._contract_cache[key] = (pick, today.isoformat())
+        return pick
 
     def _engine(self, icfg) -> St9Engine:
         if icfg.secid not in self.engines:
@@ -91,40 +110,100 @@ class St9Session:
             sb.post_order(self.cfg.account_id, uid, 1,
                           f"ORDER_DIRECTION_{direction}", str(_uuid.uuid4()))
 
+    def _trade_secid(self, icfg) -> str:
+        """Что реально торгуем: перп = secid; квартальник = текущий контракт."""
+        return (self._resolve_contract(icfg) or icfg.secid) if icfg.quarterly else icfg.secid
+
     def _apply_signal(self, eng: St9Engine, sig: dict, icfg) -> None:
         ts = int(time.time() * 1000)
+        sec = self._trade_secid(icfg)
         try:
             if sig["act"] in ("close", "reverse"):
                 closing = eng.position
-                self._order(eng.secid, closing.lots,
+                # закрываем на контракте, где позиция ОТКРЫВАЛАСЬ (не на свежем)
+                close_sec = self.contracts.get(icfg.secid, sec) if icfg.quarterly else sec
+                self._order(close_sec, closing.lots,
                             "SELL" if closing.side == "long" else "BUY")
                 tr = eng.close(sig["px"], ts, sig["reason"])
                 self.trades.append(tr.__dict__)
+                self.contracts.pop(icfg.secid, None)
                 self.log_event("exit", f"{eng.secid}: выход {tr.side} ({tr.reason}) "
                                        f"net {tr.net_pnl_rub:+.0f}₽")
             if sig["act"] in ("open", "reverse") and self.cfg.trading_enabled:
                 side = sig["new_side"]
+                if icfg.quarterly:
+                    eng.pv = self._pv(sec)   # pv контракта (может отличаться между сериями)
                 lots = max(1, int(icfg.entry_notional_rub / (sig["px"] * eng.pv)))
-                self._order(eng.secid, lots, "BUY" if side == "long" else "SELL")
+                self._order(sec, lots, "BUY" if side == "long" else "SELL")
                 eng.open(side, sig["px"], lots, ts, sig["atr"])
-                self.log_event("position", f"{eng.secid}: {side.upper()} {lots}лот @ {sig['px']}")
+                if icfg.quarterly:
+                    self.contracts[icfg.secid] = sec
+                self.log_event("position", f"{eng.secid}: {side.upper()} {lots}лот"
+                                           f"{' '+sec if sec!=eng.secid else ''} @ {sig['px']}")
             self.save_session()
         except Exception as e:  # noqa: BLE001
             self.log_event("warn", f"{eng.secid}: исполнение не удалось: {str(e)[:80]}")
+
+    def _roll(self, eng: St9Engine, icfg, old_sec: str, new_sec: str) -> None:
+        """Ролл квартальника: закрыть трейд на старом контракте (reason=roll),
+        переоткрыть ту же сторону на новом по его цене. Бары движка чистятся
+        (индикаторы бэкфиллятся новым контрактом на следующем тике)."""
+        ts = int(time.time() * 1000)
+        try:
+            p = eng.position
+            old_q = iss_candles(old_sec, (datetime.now(timezone.utc)
+                                          - timedelta(days=5)).strftime("%Y-%m-%d"),
+                                icfg.interval_min)
+            new_q = iss_candles(new_sec, (datetime.now(timezone.utc)
+                                          - timedelta(days=5)).strftime("%Y-%m-%d"),
+                                icfg.interval_min)
+            old_px = old_q[-1].c if old_q else p.entry
+            new_px = new_q[-1].c if new_q else old_px
+            side = p.side
+            # трейл переносим относительным отступом (та же дистанция в % от цены)
+            trail_off_pct = abs(p.entry - p.trail) / p.entry if p.entry else 0.03
+            self._order(old_sec, p.lots, "SELL" if side == "long" else "BUY")
+            tr = eng.close(old_px, ts, "roll")
+            self.trades.append(tr.__dict__)
+            eng.pv = self._pv(new_sec)
+            lots = max(1, int(icfg.entry_notional_rub / (new_px * eng.pv)))
+            self._order(new_sec, lots, "BUY" if side == "long" else "SELL")
+            atr_equiv = new_px * trail_off_pct / eng.atr_mult
+            eng.open(side, new_px, lots, ts, atr_equiv)
+            eng.bars.clear()   # индикаторы пересоберутся по новому контракту (бэкфилл)
+            self._last_bar_ts.pop(icfg.secid, None)
+            self.contracts[icfg.secid] = new_sec
+            self.log_event("info", f"{eng.secid}: РОЛЛ {old_sec}→{new_sec} "
+                                   f"{side} {lots}лот @ {new_px} (net старого {tr.net_pnl_rub:+.0f}₽)")
+            self.save_session()
+        except Exception as e:  # noqa: BLE001
+            self.log_event("warn", f"{eng.secid}: ролл не удался: {str(e)[:80]}")
 
     # ---------- тик ----------
     def tick(self) -> dict:
         acted = {"signals": 0}
         for icfg in self.cfg.instruments:
             eng = self._engine(icfg)
-            # качаем с последнего известного бара; полные 14 дней — на прогреве ИЛИ
-            # когда движок пуст после рестарта (нужен бэкфилл индикаторов)
+            # инструмент котировок: перп = сам secid; квартальник = текущий контракт
+            trade_sec = icfg.secid
+            if icfg.quarterly:
+                fresh_c = self._resolve_contract(icfg)
+                if not fresh_c:
+                    continue
+                held_c = self.contracts.get(icfg.secid)
+                if eng.position is not None and held_c and held_c != fresh_c:
+                    self._roll(eng, icfg, held_c, fresh_c)
+                trade_sec = fresh_c
+                if eng.position is not None and not held_c:
+                    self.contracts[icfg.secid] = fresh_c
+            # горизонт истории: 60м — 14 дней; дневки — 90 (окна 20д + ATR прогрев)
+            hist_days = 90 if icfg.interval_min >= 1440 else 14
             last0 = self._last_bar_ts.get(icfg.secid, 0)
             need_backfill = last0 > 0 and not eng.bars
             frm = (datetime.fromtimestamp(last0 / 1000).strftime("%Y-%m-%d")
                    if last0 and not need_backfill
-                   else (datetime.now(timezone.utc) - timedelta(days=14)).strftime("%Y-%m-%d"))
-            bars = iss_candles_60m(icfg.secid, frm)
+                   else (datetime.now(timezone.utc) - timedelta(days=hist_days)).strftime("%Y-%m-%d"))
+            bars = iss_candles(trade_sec, frm, icfg.interval_min)
             last = last0
             if need_backfill:
                 # рестарт: восстановить состояние индикаторов УЖЕ ОБРАБОТАННЫМИ барами
@@ -220,6 +299,7 @@ class St9Session:
             data = {"config": self.cfg.model_dump(), "trades": self.trades,
                     "state": self.state, "last_bar_ts": self._last_bar_ts,
                     "exec_anchor": self.exec_anchor,
+                    "contracts": self.contracts,
                     # позиции ПЕРСИСТЯТСЯ (грабли st5: рестарт терял открытые позиции)
                     "positions": {sec: e.position.__dict__
                                   for sec, e in self.engines.items() if e.position}}
@@ -242,6 +322,7 @@ class St9Session:
         self.state["live"] = False
         self._last_bar_ts = {k: int(v) for k, v in (d.get("last_bar_ts") or {}).items()}
         self.exec_anchor = d.get("exec_anchor") or None
+        self.contracts = dict(d.get("contracts") or {})
         cfg = d.get("config")
         if cfg:
             try:
