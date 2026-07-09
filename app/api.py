@@ -1678,6 +1678,12 @@ def st8_config(payload: dict):
     if "short_enabled" in payload:
         s.short_enabled = bool(payload["short_enabled"])
     s.short_hold_days = int(_num("short_hold_days", 1, 15, s.short_hold_days))
+    if "use_futures" in payload:
+        s.use_futures = bool(payload["use_futures"])
+    if payload.get("sizing_mode") in ("manual_rub", "cash_pct"):
+        s.sizing_mode = payload["sizing_mode"]
+    s.entry_notional_rub = _num("entry_notional_rub", 0, 100_000_000, s.entry_notional_rub)
+    s.entry_cash_pct = _num("entry_cash_pct", 0, 100, s.entry_cash_pct)
     ST8.save_session()
     return {"ok": True, "strategy": s.model_dump()}
 
@@ -1753,6 +1759,12 @@ async def st8_scan_dividends():
     found = await asyncio.to_thread(ST8.scan_new_dividends)
     ST8.save_session()
     return _clean({"new": found, "total_upcoming": len(ST8.new_dividends)})
+
+
+@app.get("/st8/ledger")
+async def st8_ledger(days_back: int = 30):
+    """Действия по портфелю: транзакции доходов/расходов/комиссий + баланс/свободный кэш."""
+    return _clean(await asyncio.to_thread(ST8.ledger, days_back))
 
 
 @app.get("/st8/audit")

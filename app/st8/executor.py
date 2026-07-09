@@ -35,6 +35,16 @@ class St8Executor:
             self._share_cache[ticker] = _sb.find_share(ticker)
         return self._share_cache[ticker]
 
+    def _instr_uid(self, ticker: str, fut_secid: str | None) -> str:
+        """UID исполняемого инструмента: фьючерс (если задан) или акция."""
+        if fut_secid:
+            if self.paper:
+                return "paper_" + fut_secid
+            if fut_secid not in self._share_cache:
+                self._share_cache[fut_secid] = _sb.find_future(fut_secid)
+            return self._share_cache[fut_secid]["uid"]
+        return self._share(ticker)["uid"]
+
     def _hedge(self) -> str:
         if self.paper:
             return "paper_IMOEXF"
@@ -96,10 +106,10 @@ class St8Executor:
 
     # ---------- вход: акция long + хедж-шорт IMOEXF ----------
     def open(self, ticker: str, stock_lots: int, stock_px: float,
-             hedge_lots: int, hedge_px: float) -> dict:
-        """Купить акцию (stock_lots) + шорт IMOEXF (hedge_lots). Атомарно: если хедж не встал —
-        откат акции (не оставлять голую бету). Возвращает {ok, stock_filled, hedge_filled}."""
-        s_uid = self._share(ticker)["uid"]
+             hedge_lots: int, hedge_px: float, fut_secid: str | None = None) -> dict:
+        """Купить инструмент (акцию или её фьючерс fut_secid) + шорт IMOEXF. Атомарно:
+        хедж не встал — откат (не оставлять голую бету). {ok, stock_filled, hedge_filled}."""
+        s_uid = self._instr_uid(ticker, fut_secid)
         r = self._order(s_uid, stock_lots, "BUY", "entry", stock_px)
         got_stock = self._filled(r, stock_lots)
         if got_stock == 0:
@@ -120,28 +130,30 @@ class St8Executor:
         return {"ok": True, "stock_filled": stock_lots, "hedge_filled": hedge_filled}
 
     # ---------- шорт-нога: продать без покрытия / выкупить ----------
-    def open_short(self, ticker: str, stock_lots: int, stock_px: float) -> dict:
-        """Шорт акции (пост-дивидендное сдувание): SELL на открытие. Без хеджа (сама
-        нога — ставка на падение). sandbox: маржинальный шорт; paper: виртуально."""
-        s_uid = self._share(ticker)["uid"]
+    def open_short(self, ticker: str, stock_lots: int, stock_px: float,
+                   fut_secid: str | None = None) -> dict:
+        """Шорт инструмента (пост-дивидендное сдувание): SELL на открытие. Фьючерс
+        предпочтителен (нет платы за заём); акция = маржин-шорт sandbox."""
+        s_uid = self._instr_uid(ticker, fut_secid)
         r = self._order(s_uid, stock_lots, "SELL", "short_entry", stock_px)
         got = self._filled(r, stock_lots)
         if got == 0:
             raise St8ExecError(f"{ticker}: шорт не налился (0 лотов)")
         return {"ok": True, "stock_filled": got}
 
-    def close_short(self, ticker: str, stock_lots: int, stock_px: float) -> dict:
+    def close_short(self, ticker: str, stock_lots: int, stock_px: float,
+                    fut_secid: str | None = None) -> dict:
         """Выкуп шорта: BUY мелкими ордерами (ёмкость)."""
-        s_uid = self._share(ticker)["uid"]
+        s_uid = self._instr_uid(ticker, fut_secid)
         self._close_small(s_uid, stock_lots, "BUY", "short_exit", stock_px)
         return {"ok": True}
 
     # ---------- выход: продать акцию + откупить хедж ----------
     def close(self, ticker: str, stock_lots: int, stock_px: float,
-              hedge_lots: int, hedge_px: float) -> dict:
-        """Продать акцию + откупить хедж-шорт. Мелкими ордерами (ёмкость). Best-effort:
+              hedge_lots: int, hedge_px: float, fut_secid: str | None = None) -> dict:
+        """Продать инструмент + откупить хедж-шорт. Мелкими ордерами (ёмкость). Best-effort:
         обе ноги закрываем независимо, ошибки логируются (выход не гейтить)."""
-        s_uid = self._share(ticker)["uid"]
+        s_uid = self._instr_uid(ticker, fut_secid)
         self._close_small(s_uid, stock_lots, "SELL", "exit", stock_px)
         if hedge_lots > 0:
             h_uid = self._hedge()

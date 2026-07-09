@@ -52,6 +52,18 @@ class St8StrategyConfig(BaseModel):
     short_enabled: bool = True
     short_hold_days: int = 5          # выкуп через N торговых дней (5 оптимум, 10 хуже)
     short_skip_months: list[int] = [8, 12]   # месяцы ex-даты, когда шорт не входит
+    # ── ФЬЮЧЕРСНОЕ ИСПОЛНЕНИЕ (рычаг плана 100%+: ГО 15-20% → плечо ~3× без займа) ──
+    # Валидировано 09.07 на 53 событиях: перенос набега акция→фьючерс r=0.894, ratio 0.87,
+    # win 77→75. Бумаги с квартальниками FORTS торгуются фьючерсом (резолв ближайшей серии
+    # по ASSETCODE, экспирация после окна сделки); без фьючерса — fallback на акцию.
+    use_futures: bool = True
+    # ── СУММА ВХОДА ПО НОГАМ (сайзинг позиции) ──
+    # manual_rub: фикс. нотионал entry_notional_rub на позицию (лоты = сумма/цена/пункт);
+    # cash_pct: entry_cash_pct % от СВОБОДНОГО кэша счёта (sandbox: free money API;
+    # paper: капитал − занятые нотионалы). 0/сбой → fallback на quantity_lots.
+    sizing_mode: str = "manual_rub"   # manual_rub | cash_pct
+    entry_notional_rub: float = 100_000.0
+    entry_cash_pct: float = 25.0
 
 
 class St8Config(BaseModel):

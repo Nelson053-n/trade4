@@ -187,6 +187,7 @@ def test_tick_enters_on_entry_day(monkeypatch):
     s = St8Session()
     s.cfg.mode = "paper"
     s.cfg.strategy.hedge_imoexf = True
+    s.cfg.strategy.use_futures = False   # тест акционного пути (без HTTP-резолва фьючей)
     # только одна бумага для чистоты
     s.enabled = {tk: (tk == "TATN") for tk in s.enabled}
     # мокаем ISS: торговые дни, дивиденды, живые цены
@@ -220,6 +221,7 @@ def test_tick_missed_when_trading_off(monkeypatch):
     from app.st8.service import St8Session
     s = St8Session()
     s.cfg.mode = "paper"; s.cfg.trading_enabled = False
+    s.cfg.strategy.use_futures = False
     s.enabled = {tk: (tk == "TATN") for tk in s.enabled}
     days = [f"2026-05-{d:02d}" for d in range(1, 31)]
     s._trading_days = days
@@ -259,6 +261,7 @@ def test_tick_skips_wide_spread(monkeypatch):
     import datetime as _dt
     s = St8Session()
     s.cfg.mode = "paper"; s.cfg.strategy.max_spread_pct = 0.25
+    s.cfg.strategy.use_futures = False
     s.enabled = {tk: (tk == "MRKC") for tk in s.enabled}
     days = [f"2026-05-{d:02d}" for d in range(1, 31)]
     s._trading_days = days
@@ -334,3 +337,75 @@ def test_short_stop_on_rise():
     e.open("2026-05-15", ev, stock_px=700.0, hedge_px=0.0, hedge_lots=0, side="short")
     assert e.check_stop(720.0, 0.0) is False   # +2.9% — в пределах
     assert e.check_stop(740.0, 0.0) is True    # +5.7% против шорта — стоп
+
+
+# ============================ сайзинг (сумма входа) + фьючерсы ============================
+
+def test_position_lots_manual_rub():
+    """manual_rub: лоты = сумма / (цена × пункт-стоимость)."""
+    from app.st8.service import St8Session
+    s = St8Session()
+    s.cfg.strategy.sizing_mode = "manual_rub"
+    s.cfg.strategy.entry_notional_rub = 100_000.0
+    assert s._position_lots(700.0, 1.0) == 142      # акция 700₽ → 142 лота
+    assert s._position_lots(45_000.0, 1.0) == 2     # фьючерс 45к пунктов pv=1 → 2 лота
+    assert s._position_lots(700.0, 10.0) == 14      # лотность 10 акций
+
+
+def test_position_lots_cash_pct(monkeypatch):
+    """cash_pct: лоты от % свободного кэша."""
+    from app.st8.service import St8Session
+    s = St8Session()
+    s.cfg.strategy.sizing_mode = "cash_pct"
+    s.cfg.strategy.entry_cash_pct = 25.0
+    monkeypatch.setattr(s, "free_cash_rub", lambda: 1_000_000.0)
+    assert s._position_lots(500.0, 1.0) == 500      # 250к / 500₽
+
+
+def test_free_cash_paper_subtracts_positions():
+    """paper: свободный кэш = капитал − нотионалы открытых позиций."""
+    from app.st8.service import St8Session
+    from app.st8.engine import DivEvent
+    s = St8Session()
+    s.cfg.mode = "paper"; s.capital_rub = 1_000_000.0
+    eng = s._engine("TATN")
+    eng.strat.quantity_lots = 100
+    ev = DivEvent("TATN", "2026-05-20", 35.0, 5.0)
+    eng.open("2026-05-06", ev, stock_px=700.0, hedge_px=0.0, hedge_lots=0)
+    # занято 700×100×1 = 70000
+    assert abs(s.free_cash_rub() - 930_000.0) < 1
+
+
+def test_tick_enters_via_futures(monkeypatch):
+    """use_futures: вход исполняется фьючерсом (инструмент в позиции, цена фьюча, pv)."""
+    import app.st8.service as svc
+    from app.st8.service import St8Session
+    import datetime as _dt
+    s = St8Session()
+    s.cfg.mode = "paper"
+    s.cfg.strategy.use_futures = True
+    s.cfg.strategy.hedge_imoexf = False
+    s.cfg.strategy.sizing_mode = "manual_rub"; s.cfg.strategy.entry_notional_rub = 100_000
+    s.enabled = {tk: (tk == "TATN") for tk in s.enabled}
+    days = [f"2026-05-{d:02d}" for d in range(1, 31)]
+    s._trading_days = days
+    monkeypatch.setattr(s, "_load_trading_days", lambda since: None)
+    monkeypatch.setattr(s, "scan_new_dividends", lambda: [])
+    monkeypatch.setattr(s, "sleeping_tickers", lambda: [])
+    monkeypatch.setattr(s, "_fetch_divs", lambda tk: [("2026-05-20", 35.0, 5.0)] if tk == "TATN" else [])
+    monkeypatch.setattr(s, "refresh_market", lambda: (s.market.update({"TATN": {"last": 700.0, "bid": 699.5, "offer": 700.5}}), setattr(s, "hedge_px", 2800.0))[0])
+    # мок фьючерсного резолва: TTU6 с котировками и pv=1 (пункт=1₽, цена в пунктах ≈ 10 акций)
+    monkeypatch.setattr(s, "_instrument_for", lambda tk, ex, hold_after=7: ("TTU6", {"last": 7000.0, "bid": 6995.0, "offer": 7005.0}, 1.0, 1))
+    monkeypatch.setattr(s, "refresh_capital", lambda: None)
+    monkeypatch.setattr(s, "save_session", lambda: None)
+    ex_i = days.index("2026-05-20"); entry_day = days[ex_i - 10]
+    class _FD(_dt.date):
+        @classmethod
+        def today(cls): return _dt.date.fromisoformat(entry_day)
+    monkeypatch.setattr(svc, "date", _FD)
+    r = s.tick()
+    assert "TATN" in r["entered"]
+    p = s.engines["TATN"].position
+    assert p.instrument == "TTU6"          # исполнено фьючерсом
+    assert p.stock_entry == 7005.0         # по ask фьюча
+    assert p.lots == 14                    # 100000 / 7005 / 1

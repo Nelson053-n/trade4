@@ -95,6 +95,38 @@ def _iss_lot_size(tk: str) -> int:
         return 1
 
 
+def _iss_futures_for_asset(asset: str) -> list[tuple[str, str]]:
+    """Все торгуемые фьючерсы FORTS на актив: [(SECID, LASTTRADEDATE)] по дате экспирации."""
+    try:
+        d = _iss(f"{ISS}/engines/futures/markets/forts/securities.json"
+                 "?iss.meta=off&securities.columns=SECID,ASSETCODE,LASTTRADEDATE")
+        ci = {c: i for i, c in enumerate(d["securities"]["columns"])}
+        out = []
+        for r in d["securities"]["data"]:
+            if (r[ci["ASSETCODE"]] or "").upper() == asset.upper() and r[ci["LASTTRADEDATE"]]:
+                out.append((r[ci["SECID"]], r[ci["LASTTRADEDATE"]]))
+        return sorted(out, key=lambda x: x[1])
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _iss_fut_quote(secid: str) -> dict | None:
+    """Живые котировки фьючерса FORTS: last/bid/offer (для исполнения с плечом)."""
+    try:
+        d = _iss(f"{ISS}/engines/futures/markets/forts/securities/{secid}.json"
+                 "?iss.meta=off&iss.only=marketdata&marketdata.columns=LAST,BID,OFFER,LASTSETTLEPRICE")
+        row = d["marketdata"]["data"]
+        if not row:
+            return None
+        r = row[0]
+        last = r[0] or r[3]
+        if not last:
+            return None
+        return {"last": last, "bid": r[1] or last, "offer": r[2] or last}
+    except Exception:  # noqa: BLE001
+        return None
+
+
 class St8Session:
     def __init__(self):
         self.cfg = St8Config()
@@ -116,6 +148,9 @@ class St8Session:
         self._div_seen: dict[str, str] = {}          # tk -> последняя известная ex-date (детект новых)
         self.missed: list[dict] = []                 # упущенные входы (событие было, входа нет)
         self._sleeping: list[str] = []               # кэш спящих бумаг (обновляется в tick)
+        self._fut_cache: dict[str, tuple] = {}       # tk -> (secid|None, expiry, дата_резолва)
+        self._pv_cache: dict[str, float] = {}        # secid фьюча -> пункт-стоимость ₽
+        self.fut_market: dict[str, dict] = {}        # tk -> живые котировки ЕГО фьючерса
         self._executor = None                        # St8Executor (ленивая инициализация)
         self._task = None
 
@@ -221,6 +256,70 @@ class St8Session:
             self._lot_cache[tk] = _iss_lot_size(tk)
         return self._lot_cache[tk]
 
+    # ---------- ФЬЮЧЕРСНОЕ ИСПОЛНЕНИЕ (плечо ~3× через ГО) ----------
+    def near_future(self, tk: str, min_expiry: str) -> str | None:
+        """Ближайший квартальник на актив tk с экспирацией ПОСЛЕ min_expiry (живёт всё окно
+        сделки). None = фьючерсов нет (fallback на акцию). Кэш на день."""
+        today = date.today().isoformat()
+        c = self._fut_cache.get(tk)
+        if c and c[2] == today and (c[0] is None or c[1] > min_expiry):
+            return c[0]
+        futs = _iss_futures_for_asset(tk)
+        pick = next(((sec, exp) for sec, exp in futs if exp > min_expiry), None)
+        self._fut_cache[tk] = (pick[0] if pick else None, pick[1] if pick else "", today)
+        return pick[0] if pick else None
+
+    def _pv(self, secid: str) -> float:
+        """Пункт-стоимость фьючерса ₽ (STEPPRICE/MINSTEP). Дефолт 1 при сбое."""
+        if secid not in self._pv_cache:
+            try:
+                from ..st6.data import point_value
+                self._pv_cache[secid] = float(point_value(secid))
+            except Exception:  # noqa: BLE001
+                return 1.0
+        return self._pv_cache[secid]
+
+    def _instrument_for(self, tk: str, ex_date: str, hold_after: int = 7):
+        """Инструмент исполнения события: (secid_фьюча|None, котировки, pv, lot_size).
+        use_futures и фьюч есть → фьючерс (котировки live FORTS, P&L через pv);
+        иначе акция (котировки из self.market, lot_size акции)."""
+        s = self.cfg.strategy
+        if getattr(s, "use_futures", False):
+            # экспирация должна быть позже конца окна (ex + hold_after дней с запасом)
+            min_exp = (date.fromisoformat(ex_date) + timedelta(days=hold_after)).isoformat()
+            sec = self.near_future(tk, min_exp)
+            if sec:
+                q = self.fut_market.get(tk) or _iss_fut_quote(sec)
+                if q:
+                    self.fut_market[tk] = q
+                    return sec, q, self._pv(sec), 1
+        return None, self.market.get(tk, {}), 1.0, None   # акция (lot_size возьмёт engine)
+
+    def free_cash_rub(self) -> float:
+        """Свободный кэш: sandbox — деньги счёта (API); paper — капитал − занятые нотионалы."""
+        if self.cfg.mode == "tbank_sandbox" and self.cfg.account_id:
+            try:
+                from ..st4 import tbank_sandbox as sb
+                return float(sb.free_money_rub(self.cfg.account_id))
+            except Exception:  # noqa: BLE001
+                pass
+        base = self.capital_rub or 1_000_000.0
+        used = sum(abs(e.position.stock_entry * e.position.lots * e.lot_size)
+                   for e in self.engines.values() if e.position is not None)
+        return max(0.0, base - used)
+
+    def _position_lots(self, px: float, unit_value: float) -> int:
+        """Лоты входа из целевого нотионала: manual ₽ или % свободного кэша."""
+        s = self.cfg.strategy
+        target = 0.0
+        if s.sizing_mode == "cash_pct" and s.entry_cash_pct > 0:
+            target = self.free_cash_rub() * s.entry_cash_pct / 100.0
+        if target <= 0:
+            target = s.entry_notional_rub
+        if target <= 0 or px <= 0 or unit_value <= 0:
+            return max(1, s.quantity_lots)
+        return max(1, int(target / (px * unit_value)))
+
     # ---------- ЖИВОЙ СБОР ДАННЫХ С БИРЖИ ----------
     def refresh_market(self) -> dict:
         """Подтянуть ЖИВЫЕ котировки всех включённых бумаг + фьючерс хеджа. Для анализа
@@ -301,13 +400,12 @@ class St8Session:
         return round((self.capital_rub - a.get("capital", 0.0)) - (net - a.get("net", 0.0)))
 
     # ---------- DAILY-TICK ЦИКЛ (событийная торговля) ----------
-    def _hedge_lots_for(self, tk: str, stock_px: float, stock_lots: int) -> int:
+    def _hedge_lots_for(self, stock_px: float, stock_lots: int, unit_value: float) -> int:
         """Сколько лотов IMOEXF шортить под нотионал позиции × hedge_ratio.
-        Нотионал акции = stock_px × stock_lots × lot_size; IMOEXF пункт 10₽."""
+        Нотионал = px × lots × unit_value (пункт-стоимость фьюча или лотность акции)."""
         if not self.cfg.strategy.hedge_imoexf or not self.hedge_px:
             return 0
-        eng = self._engine(tk)
-        notional = stock_px * stock_lots * eng.lot_size * self.cfg.strategy.hedge_ratio
+        notional = stock_px * stock_lots * unit_value * self.cfg.strategy.hedge_ratio
         hedge_notional = self.hedge_px * 10.0   # пункт-стоимость IMOEXF = 10₽
         return max(0, round(notional / hedge_notional)) if hedge_notional > 0 else 0
 
@@ -340,9 +438,11 @@ class St8Session:
             # ── ВЫХОД (приоритет: стоп, потом плановый; лонг и шорт) ──
             if eng.position is not None:
                 is_short = eng.position.side == "short"
+                fut = eng.position.instrument or None
+                cq = (_iss_fut_quote(fut) or {}) if fut else q   # котировки исполнителя
                 # лонг закрываем по bid (продаём), шорт выкупаем по offer (покупаем)
-                close_px = ((q.get("offer") if is_short else q.get("bid"))
-                            or q.get("last") or eng.position.stock_entry)
+                close_px = ((cq.get("offer") if is_short else cq.get("bid"))
+                            or cq.get("last") or eng.position.stock_entry)
                 stop = eng.check_stop(close_px, self.hedge_px or eng.position.hedge_entry)
                 out_day = (eng.short_exit_day(self._trading_days) if is_short
                            else eng.exit_day(self._trading_days))
@@ -351,10 +451,11 @@ class St8Session:
                         continue
                     reason = "stop" if stop else "exit"
                     if is_short:
-                        self._exec().close_short(tk, eng.position.lots, close_px)
+                        self._exec().close_short(tk, eng.position.lots, close_px, fut_secid=fut)
                     else:
                         self._exec().close(tk, eng.position.lots, close_px,
-                                           eng.position.hedge_lots, self.hedge_px or 0)
+                                           eng.position.hedge_lots, self.hedge_px or 0,
+                                           fut_secid=fut)
                     tr = eng.close(today, close_px, self.hedge_px or eng.position.hedge_entry, reason)
                     self.trades.append(_trade_dict(tr))
                     acted["exited"].append(tk)
@@ -364,15 +465,23 @@ class St8Session:
             # ── ШОРТ-ВХОД (день гэпа = ex, после гэпа на закрытии) ──
             sev = eng.short_entry_signal(today, events, self._trading_days)
             if sev is not None and self.cfg.trading_enabled and market_open:
-                short_px = q.get("bid") or q.get("last")   # шорт продаёт по bid (реализм)
-                sp = q.get("spread_pct")
+                fut, iq, pv, _lot = self._instrument_for(tk, sev.ex_date)
+                uval = pv if fut else float(eng.lot_size)
+                short_px = iq.get("bid") or iq.get("last")   # шорт продаёт по bid (реализм)
+                sp = iq.get("spread_pct")
+                if sp is None and iq.get("bid") and iq.get("offer"):
+                    sp = (iq["offer"] - iq["bid"]) / iq["bid"] * 100
                 max_sp = self.cfg.strategy.max_spread_pct
                 if short_px and not (max_sp > 0 and sp is not None and sp > max_sp):
+                    lots = self._position_lots(short_px, uval)
                     try:
-                        r = self._exec().open_short(tk, self.cfg.strategy.quantity_lots, short_px)
-                        eng.open(today, sev, short_px, 0.0, 0, side="short")
+                        r = self._exec().open_short(tk, lots, short_px, fut_secid=fut)
+                        eng.open(today, sev, short_px, 0.0, 0, side="short",
+                                 instrument=fut or "", unit_value=uval)
+                        eng.position.lots = r["stock_filled"]
                         acted["entered"].append(tk + ":short")
-                        self.log_event("position", f"{tk}: ШОРТ {r['stock_filled']}лот @ {short_px} "
+                        self.log_event("position", f"{tk}: ШОРТ {r['stock_filled']}лот"
+                                                   f"{' '+fut if fut else ''} @ {short_px} "
                                                    f"(сдувание после отсечки {sev.ex_date})")
                         continue
                     except Exception as e:  # noqa: BLE001
@@ -394,13 +503,20 @@ class St8Session:
                 self.log_missed(tk, today, ev.ex_date, f"спред {sp:.2f}% > {max_sp}% (дорогое исполнение)")
                 acted["missed"] += 1
                 continue
-            hlots = self._hedge_lots_for(tk, stock_px, self.cfg.strategy.quantity_lots)
+            fut, iq, pv, _lot = self._instrument_for(tk, ev.ex_date)
+            uval = pv if fut else float(eng.lot_size)
+            entry_px = iq.get("offer") or iq.get("last") or stock_px   # вход по ask исполнителя
+            lots = self._position_lots(entry_px, uval)
+            hlots = self._hedge_lots_for(entry_px, lots, uval)
             try:
-                r = self._exec().open(tk, self.cfg.strategy.quantity_lots, stock_px,
-                                      hlots, self.hedge_px or 0)
-                eng.open(today, ev, stock_px, self.hedge_px or 0, r.get("hedge_filled", 0))
+                r = self._exec().open(tk, lots, entry_px, hlots, self.hedge_px or 0,
+                                      fut_secid=fut)
+                eng.open(today, ev, entry_px, self.hedge_px or 0, r.get("hedge_filled", 0),
+                         instrument=fut or "", unit_value=uval)
+                eng.position.lots = r["stock_filled"]
                 acted["entered"].append(tk)
-                self.log_event("position", f"{tk}: ВХОД {r['stock_filled']}лот @ {stock_px} "
+                self.log_event("position", f"{tk}: ВХОД {r['stock_filled']}лот"
+                                           f"{' '+fut if fut else ''} @ {entry_px} "
                                            f"+ хедж {r.get('hedge_filled',0)} IMOEXF (отсечка {ev.ex_date})")
             except Exception as e:  # noqa: BLE001
                 self.log_missed(tk, today, ev.ex_date, f"брокер: {str(e)[:80]}")
@@ -555,6 +671,50 @@ class St8Session:
             "strategy_cfg": self.cfg.strategy.model_dump(),
             "events": self.events[-20:],
         }
+
+    def ledger(self, days_back: int = 30) -> dict:
+        """Все действия по портфелю: транзакции доходов/расходов/комиссий + текущий баланс.
+        sandbox — реальные операции счёта (GetSandboxOperations, кэш-истина);
+        paper — синтез из журнала: на сделку строка P&L (gross) и строка комиссии."""
+        rows = []
+        if self.cfg.mode == "tbank_sandbox" and self.cfg.account_id:
+            try:
+                from ..st4 import tbank_sandbox as sb
+                import datetime as _dtm
+                now = _dtm.datetime.now(_dtm.timezone.utc)
+                frm = (now - _dtm.timedelta(days=days_back)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                to = now.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                ops = sb._call("tinkoff.public.invest.api.contract.v1.SandboxService",
+                               "GetSandboxOperations",
+                               {"accountId": self.cfg.account_id, "from": frm, "to": to,
+                                "state": "OPERATION_STATE_EXECUTED"},
+                               token=sb._account_token(self.cfg.account_id)).get("operations", [])
+                for o in ops:
+                    amt = sb._q_to_float(o.get("payment"))
+                    rows.append({"date": str(o.get("date", ""))[:16].replace("T", " "),
+                                 "kind": o.get("operationType", "").replace("OPERATION_TYPE_", "").lower(),
+                                 "label": o.get("instrumentUid", "") and (o.get("figi") or "инструмент") or "счёт",
+                                 "amount": round(amt, 2)})
+                rows.sort(key=lambda r: r["date"], reverse=True)
+            except Exception as e:  # noqa: BLE001
+                rows.append({"date": "", "kind": "error", "label": str(e)[:80], "amount": 0})
+        else:
+            # paper: старт капитала + по сделке (gross P&L и комиссия отдельными строками)
+            for t in self.trades:
+                gross = (t.get("stock_pnl_rub", 0) or 0) + (t.get("hedge_pnl_rub", 0) or 0)
+                lbl = f"{t.get('ticker')} {eng_side_label(t.get('side','long'))} {t.get('entry_date')}→{t.get('exit_date')}"
+                rows.append({"date": t.get("exit_date", ""), "kind": "trade_pnl",
+                             "label": lbl, "amount": round(gross, 2)})
+                if t.get("fees_rub"):
+                    rows.append({"date": t.get("exit_date", ""), "kind": "fee",
+                                 "label": f"комиссия {t.get('ticker')}", "amount": -round(t["fees_rub"], 2)})
+            rows.sort(key=lambda r: r["date"], reverse=True)
+        net = sum(t.get("net_pnl_rub", 0) for t in self.trades)
+        return {"rows": rows[:200],
+                "balance_rub": round(self.capital_rub) if self.capital_rub else None,
+                "free_cash_rub": round(self.free_cash_rub()),
+                "journal_net_rub": round(net),
+                "fees_total_rub": round(sum(t.get("fees_rub", 0) for t in self.trades), 2)}
 
     def market_view(self) -> list[dict]:
         """Живые котировки включённых бумаг для анализа: last/bid/offer/спред/оборот/лот."""

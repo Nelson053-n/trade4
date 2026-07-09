@@ -32,6 +32,7 @@ class St8Position:
     fees_rub: float = 0.0
     div_yield_pct: float = 0.0
     side: str = "long"                 # long = набег до отсечки; short = сдувание после
+    instrument: str = ""               # secid фьючерса-исполнителя ("" = сама акция)
 
 
 @dataclass
@@ -48,6 +49,7 @@ class St8Trade:
     days_held: int = 0
     div_yield_pct: float = 0.0
     side: str = "long"
+    instrument: str = ""               # чем исполнено (фьючерс или акция)
 
 
 class St8Engine:
@@ -158,8 +160,13 @@ class St8Engine:
 
     # ---------- исполнение (мутирует состояние) ----------
     def open(self, day: str, ev: DivEvent, stock_px: float,
-             hedge_px: float, hedge_lots: int, side: str = "long") -> None:
+             hedge_px: float, hedge_lots: int, side: str = "long",
+             instrument: str = "", unit_value: float | None = None) -> None:
+        """unit_value — ₽ за пункт×лот (пункт-стоимость фьючерса или лотность акции).
+        Задан → перекрывает lot_size движка на время жизни позиции (одна позиция/движок)."""
         s = self.strat
+        if unit_value:
+            self.lot_size = unit_value
         lots = s.quantity_lots
         notional = stock_px * lots * self.lot_size
         fee = self._fee(notional)
@@ -168,7 +175,7 @@ class St8Engine:
         self.position = St8Position(
             ticker=self.ticker, entry_date=day, ex_date=ev.ex_date, lots=lots,
             stock_entry=stock_px, hedge_lots=hedge_lots, hedge_entry=hedge_px,
-            fees_rub=fee, div_yield_pct=ev.div_yield_pct, side=side)
+            fees_rub=fee, div_yield_pct=ev.div_yield_pct, side=side, instrument=instrument)
 
     def close(self, day: str, stock_px: float, hedge_px: float, reason: str) -> St8Trade:
         p = self.position
@@ -183,7 +190,7 @@ class St8Engine:
         tr = St8Trade(ticker=self.ticker, entry_date=p.entry_date, exit_date=day, lots=p.lots,
                       stock_pnl_rub=round(stock_pnl, 2), hedge_pnl_rub=round(hedge_pnl, 2),
                       fees_rub=round(fees, 2), net_pnl_rub=round(net, 2), reason=reason,
-                      div_yield_pct=p.div_yield_pct, side=p.side)
+                      div_yield_pct=p.div_yield_pct, side=p.side, instrument=p.instrument)
         self.trades.append(tr)
         self.position = None
         return tr
