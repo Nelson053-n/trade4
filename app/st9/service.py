@@ -57,6 +57,8 @@ class St9Session:
         self.contracts: dict[str, str] = {}           # asset -> контракт ОТКРЫТОЙ позиции (персист)
         self.capital_rub: float = 0.0
         self.exec_anchor: dict | None = None
+        self.last_tick_ts: int = 0                    # мс; наблюдаемость живости цикла
+        self._hb_ts: float = 0.0                      # heartbeat-событие раз в час
         self._task = None
 
     def log_event(self, kind: str, message: str) -> None:
@@ -227,6 +229,11 @@ class St9Session:
                 eng.position = None   # стартуем flat; вход по следующему реальному пробою
                 self.log_event("info", f"{icfg.secid}: прогрет ({len(fresh)} баров), старт flat")
         self.refresh_capital()
+        self.last_tick_ts = int(time.time() * 1000)
+        if time.time() - self._hb_ts > 3600:          # heartbeat: тики st9 тихие,
+            self._hb_ts = time.time()                 # без него живость не видна
+            npos = sum(1 for e in self.engines.values() if e.position)
+            self.log_event("info", f"цикл жив: {len(self.cfg.instruments)} осей, позиций {npos}")
         return acted
 
     def refresh_capital(self) -> None:
@@ -250,7 +257,11 @@ class St9Session:
         self.state["live"] = True
         while self.state["live"]:
             try:
-                await asyncio.to_thread(self.tick)
+                # wait_for: зависший тик (DNS-фаза вне urllib-timeout) не убивает цикл
+                await asyncio.wait_for(asyncio.to_thread(self.tick),
+                                       timeout=max(120.0, self.cfg.poll_seconds * 0.9))
+            except asyncio.TimeoutError:
+                self.log_event("warn", "тик завис (таймаут) — пропущен, цикл жив")
             except Exception as e:  # noqa: BLE001
                 self.log_event("warn", f"тик не удался: {str(e)[:100]}")
             await asyncio.sleep(self.cfg.poll_seconds)
@@ -290,6 +301,7 @@ class St9Session:
             "net_pnl_rub": round(net),
             "trades_count": len(self.trades),
             "trades_tail": self.trades[-20:],
+            "last_tick_ts": self.last_tick_ts,
             "capital_rub": round(self.capital_rub) or None,
             "events": self.events[-20:],
         }

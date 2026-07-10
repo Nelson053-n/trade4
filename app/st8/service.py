@@ -152,6 +152,7 @@ class St8Session:
         self._pv_cache: dict[str, float] = {}        # secid фьюча -> пункт-стоимость ₽
         self.fut_market: dict[str, dict] = {}        # tk -> живые котировки ЕГО фьючерса
         self._executor = None                        # St8Executor (ленивая инициализация)
+        self.last_tick_ts: int = 0                   # мс; наблюдаемость живости цикла
         self._task = None
 
     def _engine(self, tk: str) -> St8Engine:
@@ -523,6 +524,7 @@ class St8Session:
                 acted["missed"] += 1
         self.refresh_capital()
         self.save_session()
+        self.last_tick_ts = int(time.time() * 1000)
         return acted
 
     async def run_live(self) -> None:
@@ -530,7 +532,13 @@ class St8Session:
         self.state["live"] = True
         while self.state["live"]:
             try:
-                await asyncio.to_thread(self.tick)
+                # wait_for: зависший тик (DNS getaddrinfo не покрыт urllib-timeout —
+                # инцидент 09.07: цикл замер на 3+ часа) НЕ убивает цикл; поток-зомби
+                # доживёт сам, цикл продолжает следующим тиком
+                await asyncio.wait_for(asyncio.to_thread(self.tick),
+                                       timeout=max(120.0, self.cfg.poll_seconds * 0.9))
+            except asyncio.TimeoutError:
+                self.log_event("warn", "тик завис (таймаут) — пропущен, цикл жив")
             except Exception as e:  # noqa: BLE001
                 self.log_event("warn", f"тик не удался: {str(e)[:100]}")
             await asyncio.sleep(self.cfg.poll_seconds)
@@ -666,6 +674,7 @@ class St8Session:
             "new_dividends": self.new_dividends[-15:],        # свежеобъявленные (мониторинг)
             "hedge_px": self.hedge_px,
             "market_quotes": len(self.market),
+            "last_tick_ts": self.last_tick_ts,
             "missed": self.missed[-15:],
             "sleeping": self._sleeping,          # без дивидендов >года (не торгуются)
             "trades_tail": self.trades[-20:],    # хвост журнала для страницы /st8
