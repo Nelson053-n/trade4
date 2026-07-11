@@ -115,7 +115,10 @@ class St8Executor:
         if got_stock == 0:
             raise St8ExecError(f"{ticker}: акция не налилась (0 лотов)")
         if got_stock < stock_lots:
-            # частичный филл акции — работаем с реально налитым (не откатываем, набег хеджируем)
+            # частичный филл акции — работаем с реально налитым (не откатываем, набег
+            # хеджируем); хедж масштабируем к налитому, иначе перехедж
+            if hedge_lots > 0:
+                hedge_lots = max(1, round(hedge_lots * got_stock / stock_lots))
             stock_lots = got_stock
         hedge_filled = 0
         if hedge_lots > 0:

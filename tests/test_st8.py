@@ -202,6 +202,7 @@ def test_tick_enters_on_entry_day(monkeypatch):
         s.hedge_px = 2800.0
     monkeypatch.setattr(s, "refresh_market", _refresh)
     monkeypatch.setattr(s, "refresh_capital", lambda: None)
+    monkeypatch.setattr(s, "in_exec_window", lambda: True)   # план-сделки — в окне у закрытия
     monkeypatch.setattr(s, "save_session", lambda: None)
     # день входа = 2026-05-20 минус 10 торговых = days[index-10]
     ex_i = days.index("2026-05-20"); entry_day = days[ex_i - 10]
@@ -230,6 +231,7 @@ def test_tick_missed_when_trading_off(monkeypatch):
     monkeypatch.setattr(s, "_fetch_divs", lambda tk: [("2026-05-20", 35.0, 5.0)] if tk == "TATN" else [])
     monkeypatch.setattr(s, "refresh_market", lambda: setattr(s, "market", {"TATN": {"last": 700.0, "offer": 700.5}}) or setattr(s, "hedge_px", 2800.0))
     monkeypatch.setattr(s, "refresh_capital", lambda: None)
+    monkeypatch.setattr(s, "in_exec_window", lambda: True)   # план-сделки — в окне у закрытия
     monkeypatch.setattr(s, "save_session", lambda: None)
     ex_i = days.index("2026-05-20"); entry_day = days[ex_i - 10]
     import app.st8.service as svc, datetime as _dt
@@ -272,6 +274,7 @@ def test_tick_skips_wide_spread(monkeypatch):
     monkeypatch.setattr(s, "refresh_market", lambda: setattr(s, "market",
         {"MRKC": {"last": 0.5, "offer": 0.5014, "bid": 0.4986, "spread_pct": 0.56}}) or setattr(s, "hedge_px", 2800.0))
     monkeypatch.setattr(s, "refresh_capital", lambda: None)
+    monkeypatch.setattr(s, "in_exec_window", lambda: True)   # план-сделки — в окне у закрытия
     monkeypatch.setattr(s, "save_session", lambda: None)
     ex_i = days.index("2026-05-20"); entry_day = days[ex_i - 10]
     class _FD(_dt.date):
@@ -397,6 +400,7 @@ def test_tick_enters_via_futures(monkeypatch):
     # мок фьючерсного резолва: TTU6 с котировками и pv=1 (пункт=1₽, цена в пунктах ≈ 10 акций)
     monkeypatch.setattr(s, "_instrument_for", lambda tk, ex, hold_after=7: ("TTU6", {"last": 7000.0, "bid": 6995.0, "offer": 7005.0}, 1.0, 1))
     monkeypatch.setattr(s, "refresh_capital", lambda: None)
+    monkeypatch.setattr(s, "in_exec_window", lambda: True)   # план-сделки — в окне у закрытия
     monkeypatch.setattr(s, "save_session", lambda: None)
     ex_i = days.index("2026-05-20"); entry_day = days[ex_i - 10]
     class _FD(_dt.date):
@@ -409,3 +413,153 @@ def test_tick_enters_via_futures(monkeypatch):
     assert p.instrument == "TTU6"          # исполнено фьючерсом
     assert p.stock_entry == 7005.0         # по ask фьюча
     assert p.lots == 14                    # 100000 / 7005 / 1
+
+
+# ==================== регрессии ревизии 11.07 ====================
+
+def test_trading_days_projected_into_future(monkeypatch):
+    """Календарь = история + проекция будущих рабочих дней. Без проекции лонг не входил
+    НИКОГДА (будущая ex-дата отсутствовала в календаре), а _prev_trading_day для будущей
+    регдаты возвращал вчерашний день → ложный ex и преждевременный шорт."""
+    import app.st8.service as svc
+    from app.st8.service import St8Session
+    import datetime as _dt
+    s = St8Session()
+    hist = ["2026-07-08", "2026-07-09", "2026-07-10"]      # история кончается «вчера»
+    monkeypatch.setattr(svc, "_iss", lambda url: {"history": {"data": [[d] for d in hist]}})
+    class _FD(_dt.date):
+        @classmethod
+        def today(cls): return _dt.date(2026, 7, 11)       # суббота
+    monkeypatch.setattr(svc, "date", _FD)
+    s._load_trading_days("2026-07-01")
+    days = s._trading_days
+    assert days[:3] == hist
+    assert "2026-07-13" in days and "2026-07-14" in days   # будущие будни есть
+    assert "2026-07-12" not in days                        # воскресенье — нет
+    # регдата в будущем (пт 24.07) → ex = четверг 23.07, а НЕ последний исторический день
+    assert s._prev_trading_day("2026-07-24") == "2026-07-23"
+
+
+def test_entry_signal_fires_for_future_ex(monkeypatch):
+    """Интеграция: с проекцией будущего лонг-вход срабатывает за 10 торг.дней до ex."""
+    from app.st8.engine import St8Engine, DivEvent
+    from app.st8.config import St8StrategyConfig
+    # календарь: история (до 10-го) + проекция (11-е и дальше) — как строит сервис
+    days = [f"2026-06-{d:02d}" for d in range(1, 31)]
+    e = St8Engine("TATN", St8StrategyConfig(), lot_size=1)
+    ev = DivEvent("TATN", "2026-06-25", 35.0, 5.0)         # ex в «будущем» списка
+    entry_day = days[days.index("2026-06-25") - 10]
+    assert e.entry_signal(entry_day, [ev], days) is ev
+
+
+def test_open_fee_uses_actual_lots():
+    """Комиссия входа — от фактических лотов (была от quantity_lots=1 при перезаписи
+    position.lots постфактум → занижение комиссий в разы)."""
+    from app.st8.engine import St8Engine, DivEvent
+    from app.st8.config import St8StrategyConfig
+    e = St8Engine("TATN", St8StrategyConfig(fee_rate=0.001), lot_size=1)
+    ev = DivEvent("TATN", "2026-05-20", 35.0, 5.0)
+    e.open("2026-05-06", ev, stock_px=700.0, hedge_px=0.0, hedge_lots=0, lots=5)
+    assert e.position.lots == 5
+    assert abs(e.position.fees_rub - 700.0 * 5 * 0.001) < 0.01   # 3.5₽, не 0.7₽
+
+
+def test_unit_value_does_not_mutate_lot_size():
+    """unit_value живёт в позиции: после фьючерсной сделки следующий вход АКЦИЕЙ
+    использует родную лотность (мутация engine.lot_size ломала сайзинг/P&L)."""
+    from app.st8.engine import St8Engine, DivEvent
+    from app.st8.config import St8StrategyConfig
+    e = St8Engine("NLMK", St8StrategyConfig(fee_rate=0.0), lot_size=10)
+    ev = DivEvent("NLMK", "2026-05-20", 25.0, 5.0)
+    e.open("2026-05-06", ev, stock_px=20_000.0, hedge_px=0.0, hedge_lots=0,
+           instrument="NLU6", unit_value=1.0, lots=5)      # фьючерс: pv=1
+    tr = e.close("2026-05-18", 20_100.0, 0.0, "exit")
+    assert abs(tr.stock_pnl_rub - 100.0 * 5 * 1.0) < 0.01  # P&L через pv, не лотность
+    assert e.lot_size == 10                                # лотность акции НЕ тронута
+    e.open("2026-05-25", ev, stock_px=200.0, hedge_px=0.0, hedge_lots=0, lots=2)
+    tr2 = e.close("2026-05-27", 201.0, 0.0, "exit")
+    assert abs(tr2.stock_pnl_rub - 1.0 * 2 * 10) < 0.01    # акция: снова через лотность
+
+
+def test_positions_persist_roundtrip(tmp_path):
+    """Позиции st8 переживают рестарт (раньше не персистились вовсе: рестарт с открытой
+    позицией терял её, лоты оставались на счёте бесхозными)."""
+    from app.st8.service import St8Session
+    from app.st8.engine import DivEvent
+    s = St8Session()
+    s._session_file = tmp_path / "s8.json"
+    ev = DivEvent("TATN", "2026-05-20", 35.0, 5.0)
+    s._engine("TATN").open("2026-05-06", ev, stock_px=700.0, hedge_px=2800.0,
+                           hedge_lots=2, instrument="TTU6", unit_value=1.0, lots=3)
+    s.save_session()
+    s2 = St8Session()
+    s2._session_file = s._session_file
+    assert s2.load_session()
+    p = s2.engines["TATN"].position
+    assert p is not None and p.lots == 3 and p.side == "long"
+    assert p.instrument == "TTU6" and p.unit_value == 1.0 and p.hedge_lots == 2
+
+
+def test_exit_skipped_without_quote(monkeypatch):
+    """Нет котировки исполнителя → выход откладывается (прежний fallback на цену входа
+    писал в журнал фиктивный «выход в ноль»)."""
+    import app.st8.service as svc
+    from app.st8.service import St8Session
+    from app.st8.engine import DivEvent
+    import datetime as _dt
+    s = St8Session()
+    s.cfg.mode = "paper"
+    s.enabled = {tk: (tk == "TATN") for tk in s.enabled}
+    days = [f"2026-05-{d:02d}" for d in range(1, 31)]
+    s._trading_days = days; s._tdays_date = "2026-05-12"
+    monkeypatch.setattr(s, "_load_trading_days", lambda since: None)
+    monkeypatch.setattr(s, "scan_new_dividends", lambda: [])
+    monkeypatch.setattr(s, "sleeping_tickers", lambda: [])
+    monkeypatch.setattr(s, "_fetch_divs", lambda tk: [])
+    # рынок «открыт» другой бумагой, но у TATN котировок нет
+    monkeypatch.setattr(s, "refresh_market", lambda: s.market.update(
+        {"MOEX": {"last": 200.0}}))
+    monkeypatch.setattr(s, "refresh_capital", lambda: None)
+    monkeypatch.setattr(s, "save_session", lambda: None)
+    monkeypatch.setattr(s, "in_exec_window", lambda: True)
+    ev = DivEvent("TATN", "2026-05-20", 35.0, 5.0)
+    s._engine("TATN").open("2026-05-06", ev, stock_px=700.0, hedge_px=0.0, hedge_lots=0)
+    class _FD(_dt.date):
+        @classmethod
+        def today(cls): return _dt.date(2026, 5, 20)       # день давно за out_day
+    monkeypatch.setattr(svc, "date", _FD)
+    s.tick()
+    assert s.engines["TATN"].position is not None          # позиция ждёт котировку
+    assert not s.trades
+
+
+def test_daily_loss_limit_halts_entries(monkeypatch):
+    """Дневной лимит убытка: реализованный минус за день → входы HALT (missed), выходы живы."""
+    import app.st8.service as svc
+    from app.st8.service import St8Session
+    import datetime as _dt
+    s = St8Session()
+    s.cfg.mode = "paper"
+    s.cfg.strategy.daily_loss_limit_rub = 1000.0
+    s.cfg.strategy.use_futures = False
+    s.enabled = {tk: (tk == "TATN") for tk in s.enabled}
+    days = [f"2026-05-{d:02d}" for d in range(1, 31)]
+    ex_i = days.index("2026-05-20"); entry_day = days[ex_i - 10]
+    s._trading_days = days; s._tdays_date = entry_day
+    s.trades = [{"ticker": "MOEX", "exit_date": entry_day, "net_pnl_rub": -1500.0}]
+    monkeypatch.setattr(s, "_load_trading_days", lambda since: None)
+    monkeypatch.setattr(s, "scan_new_dividends", lambda: [])
+    monkeypatch.setattr(s, "sleeping_tickers", lambda: [])
+    monkeypatch.setattr(s, "_fetch_divs", lambda tk: [("2026-05-20", 35.0, 5.0)] if tk == "TATN" else [])
+    monkeypatch.setattr(s, "refresh_market", lambda: s.market.update(
+        {"TATN": {"last": 700.0, "bid": 699.5, "offer": 700.5, "spread_pct": 0.14}}))
+    monkeypatch.setattr(s, "refresh_capital", lambda: None)
+    monkeypatch.setattr(s, "save_session", lambda: None)
+    monkeypatch.setattr(s, "in_exec_window", lambda: True)
+    class _FD(_dt.date):
+        @classmethod
+        def today(cls): return _dt.date.fromisoformat(entry_day)
+    monkeypatch.setattr(svc, "date", _FD)
+    r = s.tick()
+    assert r["missed"] == 1 and not r["entered"]
+    assert any("лимит" in m["reason"] for m in s.missed)

@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import time
 import urllib.request
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from dataclasses import asdict
@@ -84,15 +84,16 @@ def _iss_hedge_price() -> float | None:
         return None
 
 
-def _iss_lot_size(tk: str) -> int:
-    """Лотность акции TQBR (для расчёта нотионала). Дефолт 1."""
+def _iss_lot_size(tk: str) -> int | None:
+    """Лотность акции TQBR (для расчёта нотионала). None при сбое ISS —
+    НЕ кэшировать сбой как «1» (ломает сайзинг 10-лотовых бумаг типа NLMK)."""
     try:
         d = _iss(f"{ISS}/engines/stock/markets/shares/boards/TQBR/securities/{tk}.json"
                  "?iss.meta=off&iss.only=securities&securities.columns=LOTSIZE")
         row = d["securities"]["data"]
         return int(row[0][0]) if row and row[0][0] else 1
     except Exception:  # noqa: BLE001
-        return 1
+        return None
 
 
 def _iss_futures_for_asset(asset: str) -> list[tuple[str, str]]:
@@ -138,7 +139,8 @@ class St8Session:
         self.signal_view: dict[str, dict] = {}
         self._session_file = Path(__file__).resolve().parent.parent.parent / "session_state_8.json"
         self._div_cache: dict[str, list] = {}       # tk -> [(ex_date, div, div_yield)]
-        self._trading_days: list[str] = []           # календарь торговых дней (из IMOEX)
+        self._trading_days: list[str] = []           # календарь: история IMOEX + проекция будущего
+        self._tdays_date: str = ""                   # дата последней загрузки календаря
         self._lot_cache: dict[str, int] = {}         # tk -> лотность (для нотионала)
         self.market: dict[str, dict] = {}            # tk -> живые котировки (last/bid/offer/время)
         self.hedge_px: float | None = None           # живая цена IMOEXF
@@ -196,6 +198,7 @@ class St8Session:
             d = _iss(f"{ISS}/securities/{tk}/dividends.json?iss.meta=off")
             dv = d.get("dividends", d)
             ci = {c: i for i, c in enumerate(dv["columns"])}
+            today = date.today().isoformat()
             out = []
             for r in dv["data"]:
                 rc = r[ci["registryclosedate"]]; val = r[ci["value"]]
@@ -204,7 +207,12 @@ class St8Session:
                 ex = self._prev_trading_day(rc)
                 if ex is None:
                     continue
-                px = self._price_on(tk, ex)     # close на день гэпа (для дивдоходности)
+                # дивдоходность: прошедшее событие — close на день гэпа; БУДУЩЕЕ — текущая
+                # цена (close на будущую дату не существует, dy=0 отсекал бы событие фильтром)
+                if ex <= today:
+                    px = self._price_on(tk, ex)
+                else:
+                    px = (self.market.get(tk) or {}).get("last") or self._recent_close(tk)
                 dy = (val / px * 100) if px else 0.0
                 out.append((ex, float(val), round(dy, 2)))
             # пустоту НЕ кэшируем: могла быть гонка/сбой загрузки торговых дней (баг 09.07 —
@@ -217,8 +225,14 @@ class St8Session:
             return []
 
     def _load_trading_days(self, since: str) -> None:
-        """Календарь торговых дней MOEX (по IMOEX-индексу) с since. ISS отдаёт по 100/страница
-        → листаем через start до конца."""
+        """Календарь торговых дней: история MOEX (IMOEX) + ПРОЕКЦИЯ будущего рабочими
+        днями (пн–пт) на 200 дней вперёд. Без проекции будущие ex-даты не попадали в
+        календарь: лонг не мог войти НИКОГДА (день ex−10 не совпадал с today), а
+        _prev_trading_day для будущей регдаты возвращал вчерашний день — ложный ex и
+        преждевременный шорт (критический баг, ревизия 11.07). Проекция самоисцеляется:
+        при ежедневной перезагрузке прошедший день либо подтверждён историей, либо исчез.
+        Риск незапланированного праздника: расчётный день сдвинется на 1, вход в закрытый
+        рынок просто не исполнится (уйдёт в missed)."""
         days, start = [], 0
         try:
             while True:
@@ -231,7 +245,16 @@ class St8Session:
                 if len(rows) < 100:
                     break
                 start += len(rows)
+            if not days:
+                return
+            cur = date.fromisoformat(days[-1]) + timedelta(days=1)
+            horizon = date.today() + timedelta(days=200)
+            while cur <= horizon:
+                if cur.weekday() < 5:
+                    days.append(cur.isoformat())
+                cur += timedelta(days=1)
             self._trading_days = days
+            self._tdays_date = date.today().isoformat()
         except Exception as e:  # noqa: BLE001
             self.log_event("warn", f"торговый календарь не получен: {str(e)[:60]}")
 
@@ -252,9 +275,24 @@ class St8Session:
         except Exception:  # noqa: BLE001
             return None
 
+    def _recent_close(self, tk: str) -> float | None:
+        """Последний close за ~10 дней (текущая цена для дивдоходности будущих событий)."""
+        try:
+            frm = (date.today() - timedelta(days=10)).isoformat()
+            r = _iss(f"{ISS}/history/engines/stock/markets/shares/securities/{tk}.json"
+                     f"?iss.meta=off&from={frm}&history.columns=TRADEDATE,CLOSE")
+            data = [x for x in r["history"]["data"] if x and x[1]]
+            return float(data[-1][1]) if data else None
+        except Exception:  # noqa: BLE001
+            return None
+
     def _lot(self, tk: str) -> int:
+        """Лотность с кэшем; сбой ISS НЕ кэшируем (дефолт 1 только на этот вызов)."""
         if tk not in self._lot_cache:
-            self._lot_cache[tk] = _iss_lot_size(tk)
+            v = _iss_lot_size(tk)
+            if v is None:
+                return 1
+            self._lot_cache[tk] = v
         return self._lot_cache[tk]
 
     # ---------- ФЬЮЧЕРСНОЕ ИСПОЛНЕНИЕ (плечо ~3× через ГО) ----------
@@ -270,14 +308,15 @@ class St8Session:
         self._fut_cache[tk] = (pick[0] if pick else None, pick[1] if pick else "", today)
         return pick[0] if pick else None
 
-    def _pv(self, secid: str) -> float:
-        """Пункт-стоимость фьючерса ₽ (STEPPRICE/MINSTEP). Дефолт 1 при сбое."""
+    def _pv(self, secid: str) -> float | None:
+        """Пункт-стоимость фьючерса ₽ (STEPPRICE/MINSTEP). None при сбое —
+        прежний дефолт 1.0 искажал сайзинг/P&L (исполняемся тогда акцией)."""
         if secid not in self._pv_cache:
             try:
                 from ..st6.data import point_value
                 self._pv_cache[secid] = float(point_value(secid))
             except Exception:  # noqa: BLE001
-                return 1.0
+                return None
         return self._pv_cache[secid]
 
     def _instrument_for(self, tk: str, ex_date: str, hold_after: int = 7):
@@ -289,11 +328,14 @@ class St8Session:
             # экспирация должна быть позже конца окна (ex + hold_after дней с запасом)
             min_exp = (date.fromisoformat(ex_date) + timedelta(days=hold_after)).isoformat()
             sec = self.near_future(tk, min_exp)
-            if sec:
-                q = self.fut_market.get(tk) or _iss_fut_quote(sec)
+            pv = self._pv(sec) if sec else None
+            if sec and pv:
+                # котировка строго ЖИВАЯ: прежний кэш fut_market отдавал вход по цене
+                # многодневной давности; кэш остаётся только для отображения на дашборде
+                q = _iss_fut_quote(sec)
                 if q:
                     self.fut_market[tk] = q
-                    return sec, q, self._pv(sec), 1
+                    return sec, q, pv, 1
         return None, self.market.get(tk, {}), 1.0, None   # акция (lot_size возьмёт engine)
 
     def free_cash_rub(self) -> float:
@@ -401,6 +443,16 @@ class St8Session:
         return round((self.capital_rub - a.get("capital", 0.0)) - (net - a.get("net", 0.0)))
 
     # ---------- DAILY-TICK ЦИКЛ (событийная торговля) ----------
+    @staticmethod
+    def in_exec_window() -> bool:
+        """Окно исполнения ПЛАНОВЫХ сделок: 17:00–18:45 МСК, у закрытия основной сессии.
+        Бэктест считан по ценам ЗАКРЫТИЯ дня — вход/выход утренним тиком добавлял бы
+        невалидированный внутридневной дрейф (особенно шорт в день гэпа: модель входит
+        на close ex-дня). Стопы исполняются ЛЮБЫМ тиком. Окно 105 мин > часового опроса —
+        хотя бы один тик гарантированно попадает."""
+        msk = datetime.now(timezone.utc) + timedelta(hours=3)
+        return (17, 0) <= (msk.hour, msk.minute) <= (18, 45)
+
     def _hedge_lots_for(self, stock_px: float, stock_lots: int, unit_value: float) -> int:
         """Сколько лотов IMOEXF шортить под нотионал позиции × hedge_ratio.
         Нотионал = px × lots × unit_value (пункт-стоимость фьюча или лотность акции)."""
@@ -415,7 +467,9 @@ class St8Session:
         вход (ex−N) / выход (ex−1 или стоп) → исполнить. Возвращает сводку действий."""
         today = date.today().isoformat()
         acted = {"entered": [], "exited": [], "missed": 0}
-        if not self._trading_days or self._trading_days[-1] < today:
+        # календарь перезагружаем раз в день (проекция будущего в списке всегда «свежее»
+        # today — прежнее условие `последний < today` с проекцией не сработало бы никогда)
+        if not self._trading_days or self._tdays_date != today:
             self._load_trading_days((date.today() - timedelta(days=400)).isoformat())
         self.scan_new_dividends()
         self._sleeping = self.sleeping_tickers()
@@ -430,10 +484,19 @@ class St8Session:
                     events.append(DivEvent(tk, ex, div, dy))
         # market открыт? (есть свежие котировки)
         market_open = any(q.get("last") for q in self.market.values())
+        # дневной лимит убытка: реализованный минус за сегодня → HALT входов (выходы работают)
+        loss_limit = self.cfg.strategy.daily_loss_limit_rub
+        day_realized = sum(t.get("net_pnl_rub", 0) for t in self.trades
+                           if t.get("exit_date") == today)
+        entries_halted = loss_limit > 0 and day_realized <= -loss_limit
+        if entries_halted:
+            self.log_event("warn", f"дневной лимит убытка: {day_realized:+.0f}₽ — входы HALT")
         for tk in ST8_TICKERS:
             if not self.enabled.get(tk, False):
                 continue
             eng = self._engine(tk)
+            if self.cfg.mode == "tbank_sandbox":
+                eng.lot_size = self._lot(tk)   # актуализация (сбой ISS при создании давал 1)
             q = self.market.get(tk, {})
             stock_px = q.get("offer") or q.get("last")   # вход по ask (реализм)
             # ── ВЫХОД (приоритет: стоп, потом плановый; лонг и шорт) ──
@@ -443,11 +506,16 @@ class St8Session:
                 cq = (_iss_fut_quote(fut) or {}) if fut else q   # котировки исполнителя
                 # лонг закрываем по bid (продаём), шорт выкупаем по offer (покупаем)
                 close_px = ((cq.get("offer") if is_short else cq.get("bid"))
-                            or cq.get("last") or eng.position.stock_entry)
+                            or cq.get("last"))
+                if close_px is None:
+                    continue   # нет котировки исполнителя — прежний fallback на цену входа
+                    #            писал в журнал фиктивный «выход в ноль»; ждём следующий тик
                 stop = eng.check_stop(close_px, self.hedge_px or eng.position.hedge_entry)
                 out_day = (eng.short_exit_day(self._trading_days) if is_short
                            else eng.exit_day(self._trading_days))
-                if stop or (out_day and today >= out_day):
+                planned = out_day is not None and today >= out_day
+                # плановый выход — в окне у закрытия (модель close-to-close); стоп — любым тиком
+                if stop or (planned and self.in_exec_window()):
                     if not market_open:
                         continue
                     reason = "stop" if stop else "exit"
@@ -463,8 +531,15 @@ class St8Session:
                     self.log_event("exit", f"{tk}: выход {eng_side_label(tr.side)} ({reason}) "
                                            f"net {tr.net_pnl_rub:+.0f}₽")
                 continue
-            # ── ШОРТ-ВХОД (день гэпа = ex, после гэпа на закрытии) ──
+            # ── ШОРТ-ВХОД (день гэпа = ex; модель входит на ЗАКРЫТИИ ex-дня → окно 17:00+) ──
             sev = eng.short_entry_signal(today, events, self._trading_days)
+            if sev is not None:
+                if not self.in_exec_window():
+                    continue   # план-вход у закрытия; не missed — день ещё не кончился
+                if entries_halted:
+                    self.log_missed(tk, today, sev.ex_date, "дневной лимит убытка")
+                    acted["missed"] += 1
+                    continue
             if sev is not None and self.cfg.trading_enabled and market_open:
                 fut, iq, pv, _lot = self._instrument_for(tk, sev.ex_date)
                 uval = pv if fut else float(eng.lot_size)
@@ -478,8 +553,8 @@ class St8Session:
                     try:
                         r = self._exec().open_short(tk, lots, short_px, fut_secid=fut)
                         eng.open(today, sev, short_px, 0.0, 0, side="short",
-                                 instrument=fut or "", unit_value=uval)
-                        eng.position.lots = r["stock_filled"]
+                                 instrument=fut or "", unit_value=uval,
+                                 lots=r["stock_filled"])
                         acted["entered"].append(tk + ":short")
                         self.log_event("position", f"{tk}: ШОРТ {r['stock_filled']}лот"
                                                    f"{' '+fut if fut else ''} @ {short_px} "
@@ -488,33 +563,41 @@ class St8Session:
                     except Exception as e:  # noqa: BLE001
                         self.log_missed(tk, today, sev.ex_date, f"шорт брокер: {str(e)[:80]}")
                         acted["missed"] += 1
-            # ── ВХОД (день входа = ex−N) ──
+            # ── ВХОД (день входа = ex−N; модель по close → окно 17:00+) ──
             ev = eng.entry_signal(today, events, self._trading_days)
             if ev is None:
+                continue
+            if not self.in_exec_window():
+                continue   # план-вход у закрытия; не missed — день ещё не кончился
+            if entries_halted:
+                self.log_missed(tk, today, ev.ex_date, "дневной лимит убытка")
+                acted["missed"] += 1
                 continue
             if not (self.cfg.trading_enabled and market_open and stock_px):
                 self.log_missed(tk, today, ev.ex_date,
                                 "торговля выкл" if not self.cfg.trading_enabled else "рынок закрыт/нет цены")
                 acted["missed"] += 1
                 continue
-            # фильтр ликвидности: широкий спред съедает edge (MRKC/MRKP/BELU дороги)
+            fut, iq, pv, _lot = self._instrument_for(tk, ev.ex_date)
+            uval = pv if fut else float(eng.lot_size)
+            entry_px = iq.get("offer") or iq.get("last") or stock_px   # вход по ask исполнителя
+            # фильтр ликвидности — спред ИНСТРУМЕНТА ИСПОЛНЕНИЯ (раньше при фьючерсном
+            # исполнении проверялся спред акции): широкий спред съедает edge
             max_sp = self.cfg.strategy.max_spread_pct
-            sp = q.get("spread_pct")
+            sp = iq.get("spread_pct")
+            if sp is None and iq.get("bid") and iq.get("offer"):
+                sp = (iq["offer"] - iq["bid"]) / iq["bid"] * 100
             if max_sp > 0 and sp is not None and sp > max_sp:
                 self.log_missed(tk, today, ev.ex_date, f"спред {sp:.2f}% > {max_sp}% (дорогое исполнение)")
                 acted["missed"] += 1
                 continue
-            fut, iq, pv, _lot = self._instrument_for(tk, ev.ex_date)
-            uval = pv if fut else float(eng.lot_size)
-            entry_px = iq.get("offer") or iq.get("last") or stock_px   # вход по ask исполнителя
             lots = self._position_lots(entry_px, uval)
             hlots = self._hedge_lots_for(entry_px, lots, uval)
             try:
                 r = self._exec().open(tk, lots, entry_px, hlots, self.hedge_px or 0,
                                       fut_secid=fut)
                 eng.open(today, ev, entry_px, self.hedge_px or 0, r.get("hedge_filled", 0),
-                         instrument=fut or "", unit_value=uval)
-                eng.position.lots = r["stock_filled"]
+                         instrument=fut or "", unit_value=uval, lots=r["stock_filled"])
                 acted["entered"].append(tk)
                 self.log_event("position", f"{tk}: ВХОД {r['stock_filled']}лот"
                                            f"{' '+fut if fut else ''} @ {entry_px} "
@@ -745,7 +828,11 @@ class St8Session:
             data = {"config": self.cfg.model_dump(), "trades": self.trades,
                     "enabled": self.enabled, "state": self.state,
                     "exec_anchor": self.exec_anchor, "new_dividends": self.new_dividends[-100:],
-                    "div_seen": self._div_seen, "missed": self.missed[-100:]}
+                    "div_seen": self._div_seen, "missed": self.missed[-100:],
+                    # позиции ПЕРСИСТЯТСЯ (ревизия 11.07: рестарт с открытой позицией
+                    # терял её — лоты оставались на счёте бесхозными, грабли st5)
+                    "positions": {tk: asdict(e.position)
+                                  for tk, e in self.engines.items() if e.position is not None}}
             self._session_file.write_text(json.dumps(data, ensure_ascii=False))
         except Exception:  # noqa: BLE001
             pass
@@ -774,4 +861,14 @@ class St8Session:
                 self.cfg = St8Config(**cfg)
             except Exception:  # noqa: BLE001
                 pass
+        # восстановление открытых позиций (unit_value в позиции — P&L/стоп корректны,
+        # даже если лотность при загрузке недоступна)
+        from .engine import St8Position
+        for tk, pd in (d.get("positions") or {}).items():
+            if tk not in ST8_TICKERS:
+                continue
+            try:
+                self._engine(tk).position = St8Position(**pd)
+            except Exception:  # noqa: BLE001
+                self.log_event("warn", f"{tk}: позиция из session не восстановлена")
         return True

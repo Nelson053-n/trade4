@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .config import St9Config
-from .engine import St9Engine, Bar
+from .engine import St9Engine, Bar, St9Position
 
 ISS = "https://iss.moex.com/iss"
 EVENTS_LEN = 60
@@ -21,6 +21,22 @@ def _iss(url: str) -> dict:
     return json.load(urllib.request.urlopen(req, timeout=30))
 
 
+def _now_ms_frame() -> int:
+    """«Сейчас» в той же шкале, что и ts баров: naive-МСК → local timestamp
+    (fromisoformat(begin).timestamp() интерпретирует naive как local — искажение
+    одинаковое с обеих сторон, сравнение корректно)."""
+    now = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=3)
+    return int(now.timestamp() * 1000)
+
+
+def bar_is_closed(begin_ts_ms: int, interval_min: int, now_ms: int) -> bool:
+    """Бар закрыт, когда истёк его ПЕРИОД (begin + interval). Фильтровать по полю end
+    нельзя: ISS пишет туда время ПОСЛЕДНЕЙ СДЕЛКИ, а не конец периода — формирующийся
+    бар всегда проходил проверку `end > now` и потреблялся как закрытый (ревизия 11.07:
+    60м бары ели первыми ~10 минутами часа, дневной GAZR — частичным баром дня)."""
+    return begin_ts_ms + interval_min * 60_000 <= now_ms
+
+
 def iss_candles(secid: str, frm: str, interval_min: int = 60) -> list[Bar]:
     """ЗАКРЫТЫЕ свечи фьючерса с ISS (формирующийся бар отброшен). 60м или дневные."""
     iss_iv = 24 if interval_min >= 1440 else interval_min   # ISS: 24 = дневной
@@ -28,14 +44,12 @@ def iss_candles(secid: str, frm: str, interval_min: int = 60) -> list[Bar]:
         d = _iss(f"{ISS}/engines/futures/markets/forts/securities/{secid}/candles.json"
                  f"?iss.meta=off&interval={iss_iv}&from={frm}")
         ci = {c: i for i, c in enumerate(d["candles"]["columns"])}
-        # ISS отдаёт naive-даты в МСК → сравниваем с naive-МСК (aware vs naive = TypeError)
-        now = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=3)
+        now_ms = _now_ms_frame()
         out = []
         for r in d["candles"]["data"]:
-            end = datetime.fromisoformat(r[ci["end"]])
-            if end > now:            # бар ещё формируется
-                continue
             ts = int(datetime.fromisoformat(r[ci["begin"]]).timestamp() * 1000)
+            if not bar_is_closed(ts, interval_min, now_ms):
+                continue
             out.append(Bar(ts=ts, o=float(r[ci["open"]]), h=float(r[ci["high"]]),
                            l=float(r[ci["low"]]), c=float(r[ci["close"]])))
         return out
@@ -53,7 +67,10 @@ class St9Session:
         self._session_file = Path(__file__).resolve().parent.parent.parent / "session_state_9.json"
         self._last_bar_ts: dict[str, int] = {}
         self._pv_cache: dict[str, float] = {}
+        self._pv_warned: set[str] = set()             # анти-спам warn'ов «pv недоступен»
         self._contract_cache: dict[str, tuple] = {}   # asset -> (secid, дата резолва)
+        self._bars_contract: dict[str, str] = {}      # asset -> контракт, чьи бары в движке
+        self._pending_positions: dict[str, dict] = {}  # позиции session, ждущие движка (pv)
         self.contracts: dict[str, str] = {}           # asset -> контракт ОТКРЫТОЙ позиции (персист)
         self.capital_rub: float = 0.0
         self.exec_anchor: dict | None = None
@@ -66,13 +83,15 @@ class St9Session:
         if len(self.events) > EVENTS_LEN:
             del self.events[0]
 
-    def _pv(self, secid: str) -> float:
+    def _pv(self, secid: str) -> float | None:
+        """Пункт-стоимость ₽. None при сбое ISS: торговать с неизвестным pv НЕЛЬЗЯ —
+        прежний fallback 1.0 давал сайзинг ×1000 на USDRUBF (1250 лотов вместо 1)."""
         if secid not in self._pv_cache:
             try:
                 from ..st6.data import point_value
                 self._pv_cache[secid] = float(point_value(secid))
             except Exception:  # noqa: BLE001
-                return 1.0
+                return None
         return self._pv_cache[secid]
 
     def _resolve_contract(self, icfg) -> str | None:
@@ -91,26 +110,50 @@ class St9Session:
         self._contract_cache[key] = (pick, today.isoformat())
         return pick
 
-    def _engine(self, icfg) -> St9Engine:
+    def _engine(self, icfg) -> St9Engine | None:
+        """Движок оси. None = pv недоступен (сбой ISS) — НЕ создаём с неверным pv,
+        ретрай следующим тиком (движок кэширует pv на всю жизнь)."""
         if icfg.secid not in self.engines:
+            pv = self._pv(icfg.secid)
+            if pv is None:
+                if icfg.secid not in self._pv_warned:
+                    self._pv_warned.add(icfg.secid)
+                    self.log_event("warn", f"{icfg.secid}: pv недоступен (ISS) — ось на паузе")
+                return None
+            self._pv_warned.discard(icfg.secid)
             s = self.cfg.strategy
             self.engines[icfg.secid] = St9Engine(
                 icfg.secid, icfg.don_enter, icfg.don_exit, icfg.atr_mult,
-                s.atr_period, pv=self._pv(icfg.secid),
+                s.atr_period, pv=pv,
                 fee_per_lot=s.fee_per_lot, allow_short=s.allow_short)
         return self.engines[icfg.secid]
 
     # ---------- исполнение (перп, один инструмент — атомарность не нужна) ----------
-    def _order(self, secid: str, lots: int, direction: str) -> None:
-        """Market-ордер в песочницу (или paper-ничего). Мелкими по 1 лоту (ёмкость)."""
+    def _order(self, secid: str, lots: int, direction: str) -> int:
+        """Market-ордера по 1 лоту (ёмкость). Возвращает ФАКТИЧЕСКИ исполненные лоты:
+        отказ в середине серии не должен оставлять слепые лоты (движок ≠ счёт)."""
         if self.cfg.mode != "tbank_sandbox" or not self.cfg.account_id:
-            return
+            return lots                    # paper: полный виртуальный филл
         import uuid as _uuid
         from ..st4 import tbank_sandbox as sb
         uid = sb.find_future(secid)["uid"]
+        filled = 0
         for _ in range(lots):
-            sb.post_order(self.cfg.account_id, uid, 1,
-                          f"ORDER_DIRECTION_{direction}", str(_uuid.uuid4()))
+            try:
+                resp = sb.post_order(self.cfg.account_id, uid, 1,
+                                     f"ORDER_DIRECTION_{direction}", str(_uuid.uuid4()))
+            except Exception as e:  # noqa: BLE001
+                self.log_event("warn", f"{secid}: ордер {direction} прерван "
+                                       f"на {filled}/{lots}: {str(e)[:60]}")
+                break
+            v = resp.get("lotsExecuted")
+            if v is None:
+                v = resp.get("executedLots")
+            try:
+                filled += int(float(v)) if v is not None else 1
+            except (TypeError, ValueError):
+                filled += 1
+        return filled
 
     def _trade_secid(self, icfg) -> str:
         """Что реально торгуем: перп = secid; квартальник = текущий контракт."""
@@ -124,8 +167,18 @@ class St9Session:
                 closing = eng.position
                 # закрываем на контракте, где позиция ОТКРЫВАЛАСЬ (не на свежем)
                 close_sec = self.contracts.get(icfg.secid, sec) if icfg.quarterly else sec
-                self._order(close_sec, closing.lots,
-                            "SELL" if closing.side == "long" else "BUY")
+                direction = "SELL" if closing.side == "long" else "BUY"
+                got = self._order(close_sec, closing.lots, direction)
+                if got < closing.lots:      # одна повторная попытка добить остаток
+                    got += self._order(close_sec, closing.lots - got, direction)
+                if got < closing.lots:
+                    # частичное закрытие: движок ведёт ОСТАТОК (трейл продолжает защищать),
+                    # сделка не фиксируется — P&L закрытой части покажет счёт (execution_gap)
+                    closing.lots -= got
+                    self.log_event("warn", f"🚨 {eng.secid}: закрыто {got} лотов, остаток "
+                                           f"{closing.lots} — выход повторится следующим баром")
+                    self.save_session()
+                    return
                 tr = eng.close(sig["px"], ts, sig["reason"])
                 self.trades.append(tr.__dict__)
                 self.contracts.pop(icfg.secid, None)
@@ -134,14 +187,22 @@ class St9Session:
             if sig["act"] in ("open", "reverse") and self.cfg.trading_enabled:
                 side = sig["new_side"]
                 if icfg.quarterly:
-                    eng.pv = self._pv(sec)   # pv контракта (может отличаться между сериями)
+                    pv = self._pv(sec)       # pv контракта (может отличаться между сериями)
+                    if pv is None:
+                        self.log_event("warn", f"{eng.secid}: pv {sec} недоступен — вход пропущен")
+                        self.save_session()
+                        return
+                    eng.pv = pv
                 lots = max(1, int(icfg.entry_notional_rub / (sig["px"] * eng.pv)))
-                self._order(sec, lots, "BUY" if side == "long" else "SELL")
-                eng.open(side, sig["px"], lots, ts, sig["atr"])
-                if icfg.quarterly:
-                    self.contracts[icfg.secid] = sec
-                self.log_event("position", f"{eng.secid}: {side.upper()} {lots}лот"
-                                           f"{' '+sec if sec!=eng.secid else ''} @ {sig['px']}")
+                got = self._order(sec, lots, "BUY" if side == "long" else "SELL")
+                if got <= 0:
+                    self.log_event("warn", f"{eng.secid}: вход не исполнен (0 лотов налито)")
+                else:
+                    eng.open(side, sig["px"], got, ts, sig["atr"])
+                    if icfg.quarterly:
+                        self.contracts[icfg.secid] = sec
+                    self.log_event("position", f"{eng.secid}: {side.upper()} {got}лот"
+                                               f"{' '+sec if sec!=eng.secid else ''} @ {sig['px']}")
             self.save_session()
         except Exception as e:  # noqa: BLE001
             self.log_event("warn", f"{eng.secid}: исполнение не удалось: {str(e)[:80]}")
@@ -153,6 +214,10 @@ class St9Session:
         ts = int(time.time() * 1000)
         try:
             p = eng.position
+            new_pv = self._pv(new_sec)     # pv ДО закрытия старого: нет pv — ролл откладываем
+            if new_pv is None:
+                self.log_event("warn", f"{eng.secid}: ролл отложен — pv {new_sec} недоступен")
+                return
             old_q = iss_candles(old_sec, (datetime.now(timezone.utc)
                                           - timedelta(days=5)).strftime("%Y-%m-%d"),
                                 icfg.interval_min)
@@ -162,21 +227,42 @@ class St9Session:
             old_px = old_q[-1].c if old_q else p.entry
             new_px = new_q[-1].c if new_q else old_px
             side = p.side
-            # трейл переносим относительным отступом (та же дистанция в % от цены)
-            trail_off_pct = abs(p.entry - p.trail) / p.entry if p.entry else 0.03
-            self._order(old_sec, p.lots, "SELL" if side == "long" else "BUY")
+            # трейл переносим отступом от ТЕКУЩЕЙ цены (не от entry: у прибыльной позиции
+            # трейл давно подтянут к цене, отступ от entry резко ослаблял защиту)
+            trail_off_pct = abs(old_px - p.trail) / old_px if old_px else 0.03
+            direction = "SELL" if side == "long" else "BUY"
+            got = self._order(old_sec, p.lots, direction)
+            if got < p.lots:
+                got += self._order(old_sec, p.lots - got, direction)
+            if got < p.lots:
+                p.lots -= got
+                self.log_event("warn", f"🚨 {eng.secid}: ролл прерван — закрыто {got}, "
+                                       f"остаток {p.lots} на {old_sec}, повтор следующим тиком")
+                self.save_session()
+                return
             tr = eng.close(old_px, ts, "roll")
             self.trades.append(tr.__dict__)
-            eng.pv = self._pv(new_sec)
-            lots = max(1, int(icfg.entry_notional_rub / (new_px * eng.pv)))
-            self._order(new_sec, lots, "BUY" if side == "long" else "SELL")
+            eng.pv = new_pv
+            lots = max(1, int(icfg.entry_notional_rub / (new_px * new_pv)))
+            got2 = self._order(new_sec, lots, "BUY" if side == "long" else "SELL")
+            if got2 <= 0:
+                self.contracts.pop(icfg.secid, None)
+                eng.bars.clear()
+                self.log_event("warn", f"🚨 {eng.secid}: ролл — {new_sec} не налился, "
+                                       f"старый закрыт, остаёмся flat")
+                self.save_session()
+                return
             atr_equiv = new_px * trail_off_pct / eng.atr_mult
-            eng.open(side, new_px, lots, ts, atr_equiv)
-            eng.bars.clear()   # индикаторы пересоберутся по новому контракту (бэкфилл)
-            self._last_bar_ts.pop(icfg.secid, None)
+            eng.open(side, new_px, got2, ts, atr_equiv)
+            # бары чистим, last_bar_ts НЕ трогаем: следующий тик увидит «last>0, баров нет»
+            # и сделает БЭКФИЛЛ индикаторов без сигналов. Прежний pop() уводил в ветку
+            # «первого прогрева», которая стирала position — реальные лоты оставались
+            # на счёте бесхозными (критический баг, ревизия 11.07)
+            eng.bars.clear()
+            self._bars_contract[icfg.secid] = new_sec
             self.contracts[icfg.secid] = new_sec
             self.log_event("info", f"{eng.secid}: РОЛЛ {old_sec}→{new_sec} "
-                                   f"{side} {lots}лот @ {new_px} (net старого {tr.net_pnl_rub:+.0f}₽)")
+                                   f"{side} {got2}лот @ {new_px} (net старого {tr.net_pnl_rub:+.0f}₽)")
             self.save_session()
         except Exception as e:  # noqa: BLE001
             self.log_event("warn", f"{eng.secid}: ролл не удался: {str(e)[:80]}")
@@ -184,8 +270,11 @@ class St9Session:
     # ---------- тик ----------
     def tick(self) -> dict:
         acted = {"signals": 0}
+        self._try_restore_positions()
         for icfg in self.cfg.instruments:
             eng = self._engine(icfg)
+            if eng is None:
+                continue   # pv недоступен (сбой ISS) — ось на паузе, ретрай следующим тиком
             # инструмент котировок: перп = сам secid; квартальник = текущий контракт
             trade_sec = icfg.secid
             if icfg.quarterly:
@@ -198,6 +287,12 @@ class St9Session:
                 trade_sec = fresh_c
                 if eng.position is not None and not held_c:
                     self.contracts[icfg.secid] = fresh_c
+                # смена котируемого контракта ВО ФЛЭТЕ: бары старой серии в окне Donchian
+                # дают ложный «пробой» на базисе → чистим, бэкфилл соберёт новую серию
+                if (eng.position is None and eng.bars
+                        and self._bars_contract.get(icfg.secid) not in (None, fresh_c)):
+                    eng.bars.clear()
+                self._bars_contract[icfg.secid] = fresh_c
             # горизонт истории: 60м — 14 дней; дневки — 90 (окна 20д + ATR прогрев)
             hist_days = 90 if icfg.interval_min >= 1440 else 14
             last0 = self._last_bar_ts.get(icfg.secid, 0)
@@ -217,8 +312,15 @@ class St9Session:
                     self.log_event("info", f"{icfg.secid}: индикаторы восстановлены "
                                            f"({len(hist)} баров после рестарта)")
             fresh = [b for b in bars if b.ts > last]
-            warmup = last == 0    # первый запуск: только прогрев индикаторов,
-            for b in fresh:       # БЕЗ сделок (иначе журнал засоряют фиктивные входы истории)
+            warmup = last == 0 and eng.position is None   # первый запуск: только прогрев,
+            # аномалия: позиция есть, а маркер баров потерян — историю доливаем без сигналов,
+            # живым считаем только последний бар (трейл в step защитит позицию)
+            if last == 0 and eng.position is not None and len(fresh) > 1:
+                for b in fresh[:-1]:
+                    eng.bars.append(b)
+                    self._last_bar_ts[icfg.secid] = b.ts
+                fresh = fresh[-1:]
+            for b in fresh:       # warmup: БЕЗ сделок (иначе журнал засоряют входы истории)
                 self._last_bar_ts[icfg.secid] = b.ts
                 lots = max(1, int(icfg.entry_notional_rub / (b.c * eng.pv))) if b.c > 0 else 1
                 sig = eng.step(b, lots_for_entry=lots)
@@ -226,7 +328,8 @@ class St9Session:
                     acted["signals"] += 1
                     self._apply_signal(eng, sig, icfg)
             if warmup and fresh:
-                eng.position = None   # стартуем flat; вход по следующему реальному пробою
+                # position и так None (warmup только во флэте) — стирать НЕЛЬЗЯ:
+                # прежний безусловный сброс убивал позицию после ролла (ревизия 11.07)
                 self.log_event("info", f"{icfg.secid}: прогрет ({len(fresh)} баров), старт flat")
         self.refresh_capital()
         self.last_tick_ts = int(time.time() * 1000)
@@ -306,15 +409,37 @@ class St9Session:
             "events": self.events[-20:],
         }
 
+    def _try_restore_positions(self) -> None:
+        """Восстановить позиции из session в движки. Отложенно: если при загрузке pv был
+        недоступен (движок не создался), позиция ждёт в _pending_positions до успеха."""
+        for sec, pd in list(self._pending_positions.items()):
+            icfg = next((i for i in self.cfg.instruments if i.secid == sec), None)
+            if icfg is None:
+                self._pending_positions.pop(sec)
+                continue
+            eng = self._engine(icfg)
+            if eng is None:
+                continue   # pv недоступен — попробуем следующим тиком
+            try:
+                eng.position = St9Position(**pd)
+                self.log_event("info", f"{sec}: позиция восстановлена из session")
+            except Exception:  # noqa: BLE001
+                self.log_event("warn", f"{sec}: позиция из session не восстановлена")
+            self._pending_positions.pop(sec)
+
     def save_session(self) -> None:
         try:
+            # позиции ПЕРСИСТЯТСЯ (грабли st5); pending — ещё не восстановленные (pv ждём),
+            # без объединения save до первого тика стирал бы их из файла
+            pos = {sec: e.position.__dict__
+                   for sec, e in self.engines.items() if e.position}
+            for sec, pd in self._pending_positions.items():
+                pos.setdefault(sec, pd)
             data = {"config": self.cfg.model_dump(), "trades": self.trades,
                     "state": self.state, "last_bar_ts": self._last_bar_ts,
                     "exec_anchor": self.exec_anchor,
                     "contracts": self.contracts,
-                    # позиции ПЕРСИСТЯТСЯ (грабли st5: рестарт терял открытые позиции)
-                    "positions": {sec: e.position.__dict__
-                                  for sec, e in self.engines.items() if e.position}}
+                    "positions": pos}
             self._session_file.write_text(json.dumps(data, ensure_ascii=False))
         except Exception:  # noqa: BLE001
             pass
@@ -345,14 +470,15 @@ class St9Session:
                 self.cfg.instruments = St9Config().instruments
             except Exception:  # noqa: BLE001
                 pass
-        # восстановление открытых позиций в движки (сами движки создаются лениво)
-        from .engine import St9Position
-        for sec, pd in (d.get("positions") or {}).items():
-            icfg = next((i for i in self.cfg.instruments if i.secid == sec), None)
-            if icfg is None:
-                continue
-            try:
-                self._engine(icfg).position = St9Position(**pd)
-            except Exception:  # noqa: BLE001
-                self.log_event("warn", f"{sec}: позиция из session не восстановлена")
+        # миграция после фикса частичных баров 11.07: маркер, указывающий на НЕЗАКРЫТЫЙ
+        # период (частичный бар успел обработаться), откатываем на 1мс — завершённая
+        # версия бара переобработается, бэкфилл её не включит (bars ≤ last)
+        now_ms = _now_ms_frame()
+        for i in self.cfg.instruments:
+            ts = self._last_bar_ts.get(i.secid)
+            if ts and not bar_is_closed(ts, i.interval_min, now_ms):
+                self._last_bar_ts[i.secid] = ts - 1
+        # восстановление открытых позиций — отложенно (движку нужен pv, ISS может лежать)
+        self._pending_positions = dict(d.get("positions") or {})
+        self._try_restore_positions()
         return True

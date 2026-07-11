@@ -33,6 +33,9 @@ class St8Position:
     div_yield_pct: float = 0.0
     side: str = "long"                 # long = набег до отсечки; short = сдувание после
     instrument: str = ""               # secid фьючерса-исполнителя ("" = сама акция)
+    unit_value: float = 0.0            # ₽ за пункт×лот исполнителя (pv фьючерса / лотность
+    #                                    акции); 0 = lot_size движка. Хранится В ПОЗИЦИИ:
+    #                                    мутация engine.lot_size ломала следующий вход акцией
 
 
 @dataclass
@@ -130,13 +133,18 @@ class St8Engine:
             return None
         return trading_days[out_i]
 
+    def _unit(self) -> float:
+        """₽ за пункт×лот текущей позиции (pv фьючерса или лотность акции)."""
+        p = self.position
+        return (p.unit_value or self.lot_size) if p else self.lot_size
+
     def check_stop(self, stock_px: float, hedge_px: float) -> bool:
         """Стоп-лосс: чистый (акция − хедж) убыток позиции > stop_loss_pct нотионала входа."""
         p = self.position
         pct = getattr(self.strat, "stop_loss_pct", 0.0)
         if p is None or pct <= 0:
             return False
-        notional = abs(p.stock_entry * p.lots * self.lot_size)
+        notional = abs(p.stock_entry * p.lots * self._unit())
         if notional <= 0:
             return False
         unreal = self._pnl(stock_px, hedge_px)[2]   # net без комиссий выхода
@@ -146,7 +154,7 @@ class St8Engine:
     def _pnl(self, stock_exit: float, hedge_exit: float) -> tuple[float, float, float]:
         """(stock_pnl, hedge_pnl, sum) в ₽. long: прибыль при росте; short: при падении."""
         p = self.position
-        stock = (stock_exit - p.stock_entry) * p.lots * self.lot_size
+        stock = (stock_exit - p.stock_entry) * p.lots * self._unit()
         if p.side == "short":
             stock = -stock
         hedge = 0.0
@@ -161,27 +169,29 @@ class St8Engine:
     # ---------- исполнение (мутирует состояние) ----------
     def open(self, day: str, ev: DivEvent, stock_px: float,
              hedge_px: float, hedge_lots: int, side: str = "long",
-             instrument: str = "", unit_value: float | None = None) -> None:
-        """unit_value — ₽ за пункт×лот (пункт-стоимость фьючерса или лотность акции).
-        Задан → перекрывает lot_size движка на время жизни позиции (одна позиция/движок)."""
+             instrument: str = "", unit_value: float | None = None,
+             lots: int | None = None) -> None:
+        """unit_value — ₽ за пункт×лот (пункт-стоимость фьючерса или лотность акции),
+        хранится в позиции (lot_size движка НЕ мутируем). lots — фактически налитые лоты
+        (комиссия входа считается от них, не от quantity_lots)."""
         s = self.strat
-        if unit_value:
-            self.lot_size = unit_value
-        lots = s.quantity_lots
-        notional = stock_px * lots * self.lot_size
+        lots = lots or s.quantity_lots
+        unit = float(unit_value or self.lot_size)
+        notional = stock_px * lots * unit
         fee = self._fee(notional)
         if hedge_lots > 0:
             fee += self._fee(hedge_px * hedge_lots * self.pv_hedge)
         self.position = St8Position(
             ticker=self.ticker, entry_date=day, ex_date=ev.ex_date, lots=lots,
             stock_entry=stock_px, hedge_lots=hedge_lots, hedge_entry=hedge_px,
-            fees_rub=fee, div_yield_pct=ev.div_yield_pct, side=side, instrument=instrument)
+            fees_rub=fee, div_yield_pct=ev.div_yield_pct, side=side, instrument=instrument,
+            unit_value=unit)
 
     def close(self, day: str, stock_px: float, hedge_px: float, reason: str) -> St8Trade:
         p = self.position
         stock_pnl, hedge_pnl, _ = self._pnl(stock_px, hedge_px)
         # комиссия выхода: обе ноги
-        exit_fee = self._fee(stock_px * p.lots * self.lot_size)
+        exit_fee = self._fee(stock_px * p.lots * self._unit())
         if p.hedge_lots > 0:
             exit_fee += self._fee(hedge_px * p.hedge_lots * self.pv_hedge)
         fees = p.fees_rub + exit_fee

@@ -98,3 +98,122 @@ def test_trail_protects_after_restart():
     # первый же бар после рестарта пробивает трейл — выход обязан сработать
     sig = e.step(Bar(ts=2, o=95, h=95, l=90, c=92), lots_for_entry=1)
     assert sig is not None and sig["act"] == "close" and sig["reason"] == "trail"
+
+
+# ==================== регрессии ревизии 11.07 (сервисный слой) ====================
+
+def test_bar_is_closed_rejects_forming():
+    """Закрытость бара = истёкший ПЕРИОД (begin+interval), а не поле end ISS:
+    ISS пишет в end время последней сделки — формирующийся бар проходил старый фильтр."""
+    from app.st9.service import bar_is_closed
+    now = 10_000 * 60_000
+    assert bar_is_closed(now - 60 * 60_000, 60, now)            # час истёк → закрыт
+    assert not bar_is_closed(now - 30 * 60_000, 60, now)        # полчаса → формируется
+    assert not bar_is_closed(now - 600 * 60_000, 1440, now)     # дневной, 10ч → формируется
+    assert bar_is_closed(now - 1440 * 60_000, 1440, now)        # сутки истекли → закрыт
+
+
+def test_iss_candles_drops_forming_bar(monkeypatch):
+    """iss_candles отбрасывает формирующийся бар даже когда его end в прошлом."""
+    import app.st9.service as svc
+    from datetime import datetime, timezone, timedelta
+    now_msk = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=3)
+    forming_begin = now_msk.replace(minute=0, second=0, microsecond=0)  # бар ТЕКУЩЕГО часа
+    closed_begin = forming_begin - timedelta(hours=1)
+    def _fake_iss(url):
+        return {"candles": {"columns": ["begin", "end", "open", "high", "low", "close"],
+                "data": [
+                    [closed_begin.isoformat(sep=" "), "x", 100, 101, 99, 100],
+                    # end формирующегося = «последняя сделка» (в прошлом!) — ловушка ISS
+                    [forming_begin.isoformat(sep=" "), "x", 100, 105, 99, 104],
+                ]}}
+    monkeypatch.setattr(svc, "_iss", _fake_iss)
+    bars = svc.iss_candles("USDRUBF", "2026-07-01", 60)
+    assert len(bars) == 1 and bars[0].c == 100
+
+
+def _quarterly_session(monkeypatch):
+    """Сессия paper с квартальной осью и замоканными pv/свечами."""
+    import app.st9.service as svc
+    from app.st9.config import St9InstrumentCfg
+    s = svc.St9Session()
+    s.cfg.mode = "paper"
+    icfg = St9InstrumentCfg(secid="GAZR", quarterly=True, interval_min=1440,
+                            entry_notional_rub=100_000.0)
+    for sec in ("GAZR", "GZU6", "GZZ6"):
+        s._pv_cache[sec] = 1.0
+    monkeypatch.setattr(svc, "iss_candles",
+                        lambda sec, frm, iv=60: [Bar(ts=1, o=50_000, h=50_500,
+                                                     l=49_500, c=50_000)])
+    return s, icfg
+
+
+def test_roll_keeps_position_and_bar_marker(monkeypatch):
+    """РОЛЛ: позиция переоткрывается на новом контракте и ПЕРЕЖИВАЕТ следующий тик —
+    last_bar_ts не сбрасывается (прежний pop уводил в «первый прогрев», который стирал
+    позицию; лоты оставались на счёте бесхозными — критический баг ревизии 11.07)."""
+    s, icfg = _quarterly_session(monkeypatch)
+    eng = s._engine(icfg)
+    eng.open("long", 48_000.0, 2, 1, atr=500.0)
+    s.contracts["GAZR"] = "GZU6"
+    s._last_bar_ts["GAZR"] = 777
+    s._roll(eng, icfg, "GZU6", "GZZ6")
+    assert eng.position is not None and eng.position.side == "long"
+    assert s._last_bar_ts.get("GAZR") == 777          # маркер жив → тик пойдёт в бэкфилл
+    assert s.contracts["GAZR"] == "GZZ6"
+    assert s.trades and s.trades[-1]["reason"] == "roll"
+
+
+def test_roll_trail_offset_from_price_not_entry(monkeypatch):
+    """Перенос трейла при ролле — отступ от ТЕКУЩЕЙ цены (от entry ослаблял защиту
+    прибыльной позиции: entry 40к/цена 50к/трейл 48к давал бы новый трейл ~40к)."""
+    s, icfg = _quarterly_session(monkeypatch)
+    eng = s._engine(icfg)
+    eng.open("long", 40_000.0, 2, 1, atr=500.0)
+    eng.position.trail = 48_000.0                      # трейл подтянут к цене (профит)
+    s.contracts["GAZR"] = "GZU6"
+    s._roll(eng, icfg, "GZU6", "GZZ6")
+    # old_px = new_px = 50 000 (мок) → отступ 4% от цены → новый трейл = 48 000, не 40 000
+    assert abs(eng.position.trail - 48_000.0) < 1.0
+
+
+def test_open_uses_actually_filled_lots(monkeypatch):
+    """Частичный филл входа: позиция движка = реально налитые лоты (не запрошенные)."""
+    import app.st9.service as svc
+    from app.st9.config import St9InstrumentCfg
+    s = svc.St9Session()
+    s.cfg.mode = "paper"
+    icfg = St9InstrumentCfg(secid="USDRUBF")
+    s._pv_cache["USDRUBF"] = 1000.0
+    eng = s._engine(icfg)
+    monkeypatch.setattr(s, "_order", lambda sec, lots, d: 1)   # брокер налил только 1
+    s._apply_signal(eng, {"act": "open", "new_side": "long", "px": 80.0, "atr": 0.5}, icfg)
+    assert eng.position is not None and eng.position.lots == 1
+
+
+def test_partial_close_keeps_remainder(monkeypatch):
+    """Частичное закрытие: движок ведёт остаток (трейл защищает), сделка не фиксируется."""
+    import app.st9.service as svc
+    from app.st9.config import St9InstrumentCfg
+    s = svc.St9Session()
+    s.cfg.mode = "paper"
+    icfg = St9InstrumentCfg(secid="USDRUBF")
+    s._pv_cache["USDRUBF"] = 1000.0
+    eng = s._engine(icfg)
+    eng.open("long", 80.0, 5, 1, atr=0.5)
+    calls = iter([2, 1])                               # первая попытка 2, добивка 1 → 3 из 5
+    monkeypatch.setattr(s, "_order", lambda sec, lots, d: next(calls, 0))
+    s._apply_signal(eng, {"act": "close", "px": 81.0, "reason": "trail"}, icfg)
+    assert eng.position is not None and eng.position.lots == 2
+    assert not s.trades
+
+
+def test_engine_paused_when_pv_unavailable(monkeypatch):
+    """pv недоступен (сбой ISS) → движок не создаётся, ось на паузе (прежний fallback
+    pv=1.0 давал сайзинг ×1000 на USDRUBF)."""
+    import app.st9.service as svc
+    from app.st9.config import St9InstrumentCfg
+    s = svc.St9Session()
+    monkeypatch.setattr(s, "_pv", lambda sec: None)
+    assert s._engine(St9InstrumentCfg(secid="USDRUBF")) is None
+    assert "USDRUBF" not in s.engines
