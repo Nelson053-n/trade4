@@ -114,7 +114,9 @@ class St9Session:
         """Движок оси. None = pv недоступен (сбой ISS) — НЕ создаём с неверным pv,
         ретрай следующим тиком (движок кэширует pv на всю жизнь)."""
         if icfg.secid not in self.engines:
-            pv = self._pv(icfg.secid)
+            # квартальник: pv берём с ТЕКУЩЕГО КОНТРАКТА — secid оси (GAZR) это код
+            # актива, спецификации у него нет (point_value падал, до 11.07 молча 1.0)
+            pv = self._pv(self._trade_secid(icfg) if icfg.quarterly else icfg.secid)
             if pv is None:
                 if icfg.secid not in self._pv_warned:
                     self._pv_warned.add(icfg.secid)
