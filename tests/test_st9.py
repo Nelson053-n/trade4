@@ -186,7 +186,7 @@ def test_open_uses_actually_filled_lots(monkeypatch):
     icfg = St9InstrumentCfg(secid="USDRUBF")
     s._pv_cache["USDRUBF"] = 1000.0
     eng = s._engine(icfg)
-    monkeypatch.setattr(s, "_order", lambda sec, lots, d: 1)   # брокер налил только 1
+    monkeypatch.setattr(s, "_order", lambda sec, lots, d, ref_px=0.0: 1)   # налил только 1
     s._apply_signal(eng, {"act": "open", "new_side": "long", "px": 80.0, "atr": 0.5}, icfg)
     assert eng.position is not None and eng.position.lots == 1
 
@@ -202,7 +202,7 @@ def test_partial_close_keeps_remainder(monkeypatch):
     eng = s._engine(icfg)
     eng.open("long", 80.0, 5, 1, atr=0.5)
     calls = iter([2, 1])                               # первая попытка 2, добивка 1 → 3 из 5
-    monkeypatch.setattr(s, "_order", lambda sec, lots, d: next(calls, 0))
+    monkeypatch.setattr(s, "_order", lambda sec, lots, d, ref_px=0.0: next(calls, 0))
     s._apply_signal(eng, {"act": "close", "px": 81.0, "reason": "trail"}, icfg)
     assert eng.position is not None and eng.position.lots == 2
     assert not s.trades
@@ -217,3 +217,68 @@ def test_engine_paused_when_pv_unavailable(monkeypatch):
     monkeypatch.setattr(s, "_pv", lambda sec: None)
     assert s._engine(St9InstrumentCfg(secid="USDRUBF")) is None
     assert "USDRUBF" not in s.engines
+
+
+# ==================== боевой контур tbank_real (двойной гейт) ====================
+
+def test_st9_real_order_blocked_when_not_armed(monkeypatch):
+    """real без взвода: ордер не уходит, filled=0 (гейт на КАЖДЫЙ ордер)."""
+    import app.st9.service as svc
+    from app.st4 import tbank_live as live, tbank_sandbox as sb
+    s = svc.St9Session()
+    s.cfg.mode = "tbank_real"; s.cfg.account_id = "real-acc"
+    monkeypatch.setattr(sb, "find_future", lambda sec: {"uid": "u1"})
+    monkeypatch.setattr(live, "post_order",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("не должен уйти")))
+    assert s._order("USDRUBF", 2, "BUY", ref_px=80.0) == 0
+
+
+def test_st9_real_order_armed_goes_live(monkeypatch):
+    """Взведённый real после cooldown: 1-лотовые ордера идут в боевой API, sha256-id."""
+    import time
+    import app.st9.service as svc
+    from app.st4 import tbank_live as live, tbank_sandbox as sb
+    s = svc.St9Session()
+    s.cfg.mode = "tbank_real"; s.cfg.account_id = "real-acc"
+    s.state["real_trading_armed"] = True
+    s.state["session_started"] = time.time() - 700
+    calls = []
+    monkeypatch.setattr(sb, "find_future", lambda sec: {"uid": "u1"})
+    monkeypatch.setattr(sb, "last_price", lambda uid: 80.0)
+    monkeypatch.setattr(live, "post_order",
+                        lambda acc, uid, lots, d, oid, **kw:
+                        calls.append(oid) or {"lotsExecuted": 1})
+    monkeypatch.setattr(sb, "post_order",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("sandbox path!")))
+    assert s._order("USDRUBF", 3, "BUY", ref_px=80.0) == 3
+    assert len(calls) == 3 and all(len(o) == 32 and "-" not in o for o in calls)
+    assert len(set(calls)) == 3                        # id уникальны (дискриминатор i)
+
+
+def test_st9_real_price_sanity_blocks(monkeypatch):
+    """Рынок уехал >5% от сигнальной цены → боевой ордер отменён (filled=0)."""
+    import time
+    import app.st9.service as svc
+    from app.st4 import tbank_live as live, tbank_sandbox as sb
+    s = svc.St9Session()
+    s.cfg.mode = "tbank_real"; s.cfg.account_id = "real-acc"
+    s.state["real_trading_armed"] = True
+    s.state["session_started"] = time.time() - 700
+    monkeypatch.setattr(sb, "find_future", lambda sec: {"uid": "u1"})
+    monkeypatch.setattr(sb, "last_price", lambda uid: 90.0)          # +12.5% от ref 80
+    monkeypatch.setattr(live, "post_order",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("не должен уйти")))
+    assert s._order("USDRUBF", 1, "BUY", ref_px=80.0) == 0
+
+
+def test_st9_entry_lots_real_cap():
+    """В tbank_real нотионал оси режется потолком real_max_notional_rub."""
+    from app.st9.service import St9Session
+    from app.st9.config import St9InstrumentCfg
+    s = St9Session()
+    icfg = St9InstrumentCfg(secid="GLDRUBF", entry_notional_rub=500_000.0)
+    s.cfg.strategy.real_max_notional_rub = 100_000.0
+    s.cfg.mode = "tbank_real"
+    assert s._entry_lots(icfg, 9_000.0, 1.0) == 11     # 100к/9к, не 500к/9к (55)
+    s.cfg.mode = "tbank_sandbox"
+    assert s._entry_lots(icfg, 9_000.0, 1.0) == 55

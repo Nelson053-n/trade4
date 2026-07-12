@@ -1746,21 +1746,48 @@ async def st8_tick():
 
 @app.post("/st8/connector")
 def st8_connector(payload: dict):
-    """paper | tbank_sandbox (+account_id). Гейт по открытым позициям."""
+    """paper | tbank_sandbox | tbank_real (+account_id). Гейт по открытым позициям.
+    ⚠️ tbank_real: обязателен account_id, счёт проверяется против реальных счетов
+    (UsersService.GetAccounts); установка режима ордера НЕ шлёт — нужен ещё взвод
+    через /st8/control/arm-real. Смена режима снимает взвод."""
     if any(e.position is not None for e in ST8.engines.values()):
         raise HTTPException(409, "смена коннектора: закрой позиции st8")
     mode = payload.get("mode")
-    if mode not in ("paper", "tbank_sandbox"):
-        raise HTTPException(400, "mode: paper | tbank_sandbox")
+    if mode not in ("paper", "tbank_sandbox", "tbank_real"):
+        raise HTTPException(400, "mode: paper | tbank_sandbox | tbank_real")
     from .st4 import tbank_sandbox as _sb
-    ST8.cfg.mode = mode
     if "account_id" in payload:
         ST8.cfg.account_id = str(payload["account_id"]).strip()
     if payload.get("account_token") and ST8.cfg.account_id:
         _sb.set_account_token(ST8.cfg.account_id, str(payload["account_token"]).strip())
-    ST8._executor = None   # пересоздать под новый счёт
+    if mode == "tbank_real":
+        if not ST8.cfg.account_id:
+            raise HTTPException(400, "для tbank_real обязателен account_id")
+        from .st4 import tbank_live as _live
+        try:
+            if not _live.account_is_open(ST8.cfg.account_id):
+                raise HTTPException(400, f"реальный счёт {ST8.cfg.account_id} не найден/закрыт")
+        except HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(502, f"проверка реального счёта не удалась: {str(e)[:80]}")
+    ST8.cfg.mode = mode
+    ST8.state["real_trading_armed"] = False   # смена режима снимает взвод (safe)
+    ST8._executor = None   # пересоздать под новый режим/счёт
     ST8.save_session()
     return {"ok": True, "mode": mode, "account_id": ST8.cfg.account_id or None}
+
+
+@app.post("/st8/control/arm-real")
+def st8_arm_real(payload: dict):
+    """⚠️ Двойной включатель боевой торговли ST8. armed=true ВЗВОДИТ отправку реальных
+    ордеров (mode должен быть tbank_real). Не персистится — рестарт снимает взвод.
+    Cooldown 600с после старта live действует независимо от взвода."""
+    armed = bool(payload.get("armed"))
+    if armed and ST8.cfg.mode != "tbank_real":
+        raise HTTPException(400, "взвод доступен только в режиме tbank_real")
+    ST8.arm_real(armed)
+    return {"ok": True, "real_trading_armed": bool(ST8.state.get("real_trading_armed"))}
 
 
 @app.get("/st8/market")
@@ -1835,19 +1862,45 @@ async def st9_tick():
 
 @app.post("/st9/connector")
 def st9_connector(payload: dict):
+    """paper | tbank_sandbox | tbank_real (+account_id). Гейт по открытым позициям.
+    ⚠️ tbank_real: обязателен account_id, счёт проверяется; ордера пойдут только после
+    взвода /st9/control/arm-real. Смена режима снимает взвод."""
     if any(e.position is not None for e in ST9.engines.values()):
         raise HTTPException(409, "смена коннектора: закрой позиции st9")
     mode = payload.get("mode")
-    if mode not in ("paper", "tbank_sandbox"):
-        raise HTTPException(400, "mode: paper | tbank_sandbox")
+    if mode not in ("paper", "tbank_sandbox", "tbank_real"):
+        raise HTTPException(400, "mode: paper | tbank_sandbox | tbank_real")
     from .st4 import tbank_sandbox as _sb
-    ST9.cfg.mode = mode
     if "account_id" in payload:
         ST9.cfg.account_id = str(payload["account_id"]).strip()
     if payload.get("account_token") and ST9.cfg.account_id:
         _sb.set_account_token(ST9.cfg.account_id, str(payload["account_token"]).strip())
+    if mode == "tbank_real":
+        if not ST9.cfg.account_id:
+            raise HTTPException(400, "для tbank_real обязателен account_id")
+        from .st4 import tbank_live as _live
+        try:
+            if not _live.account_is_open(ST9.cfg.account_id):
+                raise HTTPException(400, f"реальный счёт {ST9.cfg.account_id} не найден/закрыт")
+        except HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(502, f"проверка реального счёта не удалась: {str(e)[:80]}")
+    ST9.cfg.mode = mode
+    ST9.state["real_trading_armed"] = False   # смена режима снимает взвод (safe)
     ST9.save_session()
     return {"ok": True, "mode": mode, "account_id": ST9.cfg.account_id or None}
+
+
+@app.post("/st9/control/arm-real")
+def st9_arm_real(payload: dict):
+    """⚠️ Двойной включатель боевой торговли ST9 (mode должен быть tbank_real).
+    Не персистится — рестарт снимает взвод. Cooldown 600с после старта live."""
+    armed = bool(payload.get("armed"))
+    if armed and ST9.cfg.mode != "tbank_real":
+        raise HTTPException(400, "взвод доступен только в режиме tbank_real")
+    ST9.arm_real(armed)
+    return {"ok": True, "real_trading_armed": bool(ST9.state.get("real_trading_armed"))}
 
 
 @app.post("/st5/connector")

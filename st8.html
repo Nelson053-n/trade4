@@ -134,8 +134,9 @@
       <button class="btn" id="b-stop">⏸ стоп</button>
       <button class="btn" id="b-trading">торговля: ?</button>
       <button class="btn" id="b-tick">тик</button>
+      <button class="btn" id="b-arm" style="display:none">🔴 взвод: ?</button>
     </div>
-    <div class="fld"><label>режим</label><select id="c-mode"><option value="paper">paper</option><option value="tbank_sandbox">tbank_sandbox</option></select></div>
+    <div class="fld"><label>режим</label><select id="c-mode"><option value="paper">paper</option><option value="tbank_sandbox">tbank_sandbox</option><option value="tbank_real">tbank_real ⚠️ бой</option></select></div>
     <div class="fld"><label>account_id (sandbox)</label><input id="c-acc" placeholder="пусто = не менять"></div>
     <div class="fld"><label>account_token</label><input id="c-tok" type="password" placeholder="пусто = не менять"></div>
     <button class="btn" id="c-save">применить коннектор</button>
@@ -151,6 +152,7 @@
       <button class="btn" id="s9-stop">⏸ стоп</button>
       <button class="btn" id="s9-trading">торговля: ?</button>
       <button class="btn" id="s9-tick">тик</button>
+      <button class="btn" id="s9-arm" style="display:none">🔴 взвод: ?</button>
     </div>
     <div class="subhead" style="margin-top:12px">Сделки ST9</div>
     <table id="s9-trades"><thead><tr><th>перп</th><th>сторона</th><th>вход→выход</th><th>net</th><th>причина</th></tr></thead><tbody></tbody></table>
@@ -219,6 +221,8 @@ function render(s){
   $('k-net').textContent=fmt(s.net_pnl_rub); $('k-net').className='v num '+((s.net_pnl_rub||0)>=0?'up':'down');
   $('k-trades').textContent=s.trades_count||0;
   $('b-trading').textContent='торговля: '+(s.trading_enabled?'ВКЛ':'выкл');
+  $('b-arm').style.display=(s.mode==='tbank_real')?'':'none';
+  $('b-arm').textContent='🔴 взвод: '+(s.real_trading_armed?'ВЗВЕДЁН':'снят');
   const mo=$('c-mode'); if(document.activeElement!==mo) mo.value=s.mode||'paper';
   // позиции
   const pb=$('pos').querySelector('tbody'); pb.innerHTML='';
@@ -360,6 +364,8 @@ function render9(d){
     +(d.capital_rub?' · капитал '+d.capital_rub.toLocaleString('ru')+' ₽':'')
     +' · сделок '+(d.trades_count||0)+' · net '+((d.net_pnl_rub>=0?'+':'')+(d.net_pnl_rub||0))+' ₽';
   $('s9-trading').textContent='торговля: '+(d.trading_enabled?'ВКЛ':'выкл');
+  $('s9-arm').style.display=(d.mode==='tbank_real')?'':'none';
+  $('s9-arm').textContent='🔴 взвод: '+(d.real_trading_armed?'ВЗВЕДЁН':'снят');
   const tb=$('s9-instr').querySelector('tbody'); tb.innerHTML='';
   (d.instruments||[]).forEach(i=>{const tr=document.createElement('tr');
     const p=i.position;
@@ -376,10 +382,12 @@ function render9(d){
 }
 async function poll9(){try{render9(await api9('/state'));}catch(e){}}
 $('s9-start').onclick=async()=>{try{await api9('/control/start','POST');poll9();}catch(e){alert(e.message);}};
+$('s9-arm').onclick=async()=>{const arm=!(S9&&S9.real_trading_armed);if(arm&&!confirm('⚠️ ВЗВЕСТИ реальную торговлю ST9? Боевые ордера пойдут на реальные деньги.'))return;try{await api9('/control/arm-real','POST',{armed:arm});poll9();}catch(e){alert(e.message);}};
 $('s9-stop').onclick=async()=>{try{await api9('/control/stop','POST');poll9();}catch(e){alert(e.message);}};
 $('s9-trading').onclick=async()=>{try{const on=!(S9&&S9.trading_enabled);await api9('/control/trading?on='+on,'POST');poll9();}catch(e){alert(e.message);}};
 $('s9-tick').onclick=async()=>{$('s9-tick').textContent='…';try{const r=await api9('/tick','POST');$('s9-msg').textContent='тик: сигналов '+(r.signals||0);poll9();}catch(e){alert(e.message);}$('s9-tick').textContent='тик';};
 $('b-start').onclick=async()=>{try{await api('/control/start','POST');poll();}catch(e){alert(e.message);}};
+$('b-arm').onclick=async()=>{const arm=!(SNAP&&SNAP.real_trading_armed);if(arm&&!confirm('⚠️ ВЗВЕСТИ реальную торговлю ST8? Боевые ордера пойдут на реальные деньги.'))return;try{await api('/control/arm-real','POST',{armed:arm});poll();}catch(e){alert(e.message);}};
 $('b-stop').onclick=async()=>{try{await api('/control/stop','POST');poll();}catch(e){alert(e.message);}};
 $('b-trading').onclick=async()=>{try{const on=!(SNAP&&SNAP.trading_enabled);await api('/control/trading?on='+on,'POST');poll();}catch(e){alert(e.message);}};
 $('b-tick').onclick=async()=>{$('b-tick').textContent='…';try{const r=await api('/tick','POST');$('c-msg').textContent='тик: вход '+(r.entered||[]).length+', выход '+(r.exited||[]).length+', упущено '+(r.missed||0);poll();loadCal();loadLedger();}catch(e){alert(e.message);}$('b-tick').textContent='тик';};

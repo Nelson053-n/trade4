@@ -35,6 +35,9 @@ class St9StrategyConfig(BaseModel):
     allow_short: bool = True          # тренд двусторонний (шорт Si = укрепление рубля)
     fee_per_lot: float = 2.0          # ₽/лот/сторона (перпы дёшевы)
     daily_loss_limit_rub: float = 0.0
+    # боевой лимит объёма: потолок нотионала одной позиции в tbank_real (пилот на малом
+    # размере); сайзинг режется до лимита независимо от entry_notional_rub оси. 0 = без лимита.
+    real_max_notional_rub: float = 100_000.0
 
 
 class St9Config(BaseModel):
@@ -48,7 +51,10 @@ class St9Config(BaseModel):
         St9InstrumentCfg(secid="GAZR", don_enter=20, don_exit=10, quarterly=True,
                          interval_min=1440, entry_notional_rub=100_000.0),
     ]
-    mode: str = "paper"               # paper | tbank_sandbox
+    # paper | tbank_sandbox | tbank_real. Установка tbank_real ордера НЕ шлёт: гейт
+    # НА УРОВНЕ ОРДЕРА двойной — mode==tbank_real И real_trading_armed (+cooldown 600с
+    # после старта live; взвод сбрасывается рестартом/сменой режима).
+    mode: str = "paper"
     account_id: str = ""
     poll_seconds: float = 600.0       # 60м бары — опрос раз в 10 мин достаточно
     trading_enabled: bool = True

@@ -130,20 +130,60 @@ class St9Session:
                 fee_per_lot=s.fee_per_lot, allow_short=s.allow_short)
         return self.engines[icfg.secid]
 
+    # ---------- боевой контур: взвод реальной торговли (канон st5) ----------
+    def arm_real(self, armed: bool) -> None:
+        """Двойной включатель. Взвод НЕ персистится (сбрасывается рестартом/сменой режима)."""
+        self.state["real_trading_armed"] = bool(armed)
+        self.log_event("warn" if armed else "info",
+                       "🔴 ST9: реальная торговля ВЗВЕДЕНА" if armed else "ST9: взвод снят")
+
+    def _real_armed(self) -> bool:
+        """Взвод + cooldown 600с после старта live (защита от автоордеров на всплеске
+        сразу после рестарта — сигналы с восстановленных индикаторов)."""
+        if not self.state.get("real_trading_armed"):
+            return False
+        started = self.state.get("session_started") or 0
+        return (time.time() - started) >= 600
+
     # ---------- исполнение (перп, один инструмент — атомарность не нужна) ----------
-    def _order(self, secid: str, lots: int, direction: str) -> int:
+    def _order(self, secid: str, lots: int, direction: str, ref_px: float = 0.0) -> int:
         """Market-ордера по 1 лоту (ёмкость). Возвращает ФАКТИЧЕСКИ исполненные лоты:
-        отказ в середине серии не должен оставлять слепые лоты (движок ≠ счёт)."""
-        if self.cfg.mode != "tbank_sandbox" or not self.cfg.account_id:
+        отказ в середине серии не должен оставлять слепые лоты (движок ≠ счёт).
+
+        ⚠️ tbank_real: гейт на КАЖДЫЙ ордер (вход/выход/ролл) — armed+cooldown; идемпотентный
+        orderId (ретрай не задвоит); sanity цены против ref_px (сигнальный бар)."""
+        if self.cfg.mode not in ("tbank_sandbox", "tbank_real") or not self.cfg.account_id:
             return lots                    # paper: полный виртуальный филл
+        real = self.cfg.mode == "tbank_real"
+        import hashlib as _hl
         import uuid as _uuid
         from ..st4 import tbank_sandbox as sb
+        from ..st4 import tbank_live as live
         uid = sb.find_future(secid)["uid"]
+        if real:
+            if not self._real_armed():
+                self.log_event("warn", f"{secid}: боевой ордер заблокирован — "
+                                       f"реальная торговля не взведена/cooldown")
+                return 0
+            try:   # pre-trade sanity: рынок не должен аномально уехать от сигнальной цены
+                mkt = sb.last_price(uid)
+                if mkt > 0 and ref_px > 0 and abs(mkt - ref_px) / ref_px > 0.05:
+                    self.log_event("warn", f"{secid}: аномальная цена market={mkt} "
+                                           f"ref={ref_px} (>5%) — ордер отменён")
+                    return 0
+            except Exception:  # noqa: BLE001  last_price недоступен — не блокируем
+                pass
         filled = 0
-        for _ in range(lots):
+        for i in range(lots):
             try:
-                resp = sb.post_order(self.cfg.account_id, uid, 1,
-                                     f"ORDER_DIRECTION_{direction}", str(_uuid.uuid4()))
+                if real:
+                    raw = f"{self.cfg.account_id}|{uid}|1|{direction}|{i}|{int(time.time())}"
+                    oid = _hl.sha256(raw.encode()).hexdigest()[:32]   # идемпотентный
+                    resp = live.post_order(self.cfg.account_id, uid, 1,
+                                           f"ORDER_DIRECTION_{direction}", oid)
+                else:
+                    resp = sb.post_order(self.cfg.account_id, uid, 1,
+                                         f"ORDER_DIRECTION_{direction}", str(_uuid.uuid4()))
             except Exception as e:  # noqa: BLE001
                 self.log_event("warn", f"{secid}: ордер {direction} прерван "
                                        f"на {filled}/{lots}: {str(e)[:60]}")
@@ -161,6 +201,17 @@ class St9Session:
         """Что реально торгуем: перп = secid; квартальник = текущий контракт."""
         return (self._resolve_contract(icfg) or icfg.secid) if icfg.quarterly else icfg.secid
 
+    def _entry_lots(self, icfg, px: float, pv: float) -> int:
+        """Лоты входа из нотионала оси; в tbank_real нотионал режется потолком
+        real_max_notional_rub (боевой лимит объёма — пилот на малом размере)."""
+        if px <= 0 or pv <= 0:
+            return 1
+        target = icfg.entry_notional_rub
+        cap = getattr(self.cfg.strategy, "real_max_notional_rub", 0.0)
+        if self.cfg.mode == "tbank_real" and cap > 0:
+            target = min(target, cap)
+        return max(1, int(target / (px * pv)))
+
     def _apply_signal(self, eng: St9Engine, sig: dict, icfg) -> None:
         ts = int(time.time() * 1000)
         sec = self._trade_secid(icfg)
@@ -170,9 +221,10 @@ class St9Session:
                 # закрываем на контракте, где позиция ОТКРЫВАЛАСЬ (не на свежем)
                 close_sec = self.contracts.get(icfg.secid, sec) if icfg.quarterly else sec
                 direction = "SELL" if closing.side == "long" else "BUY"
-                got = self._order(close_sec, closing.lots, direction)
+                got = self._order(close_sec, closing.lots, direction, ref_px=sig["px"])
                 if got < closing.lots:      # одна повторная попытка добить остаток
-                    got += self._order(close_sec, closing.lots - got, direction)
+                    got += self._order(close_sec, closing.lots - got, direction,
+                                       ref_px=sig["px"])
                 if got < closing.lots:
                     # частичное закрытие: движок ведёт ОСТАТОК (трейл продолжает защищать),
                     # сделка не фиксируется — P&L закрытой части покажет счёт (execution_gap)
@@ -195,8 +247,9 @@ class St9Session:
                         self.save_session()
                         return
                     eng.pv = pv
-                lots = max(1, int(icfg.entry_notional_rub / (sig["px"] * eng.pv)))
-                got = self._order(sec, lots, "BUY" if side == "long" else "SELL")
+                lots = self._entry_lots(icfg, sig["px"], eng.pv)
+                got = self._order(sec, lots, "BUY" if side == "long" else "SELL",
+                                  ref_px=sig["px"])
                 if got <= 0:
                     self.log_event("warn", f"{eng.secid}: вход не исполнен (0 лотов налито)")
                 else:
@@ -233,9 +286,9 @@ class St9Session:
             # трейл давно подтянут к цене, отступ от entry резко ослаблял защиту)
             trail_off_pct = abs(old_px - p.trail) / old_px if old_px else 0.03
             direction = "SELL" if side == "long" else "BUY"
-            got = self._order(old_sec, p.lots, direction)
+            got = self._order(old_sec, p.lots, direction, ref_px=old_px)
             if got < p.lots:
-                got += self._order(old_sec, p.lots - got, direction)
+                got += self._order(old_sec, p.lots - got, direction, ref_px=old_px)
             if got < p.lots:
                 p.lots -= got
                 self.log_event("warn", f"🚨 {eng.secid}: ролл прерван — закрыто {got}, "
@@ -245,8 +298,9 @@ class St9Session:
             tr = eng.close(old_px, ts, "roll")
             self.trades.append(tr.__dict__)
             eng.pv = new_pv
-            lots = max(1, int(icfg.entry_notional_rub / (new_px * new_pv)))
-            got2 = self._order(new_sec, lots, "BUY" if side == "long" else "SELL")
+            lots = self._entry_lots(icfg, new_px, new_pv)
+            got2 = self._order(new_sec, lots, "BUY" if side == "long" else "SELL",
+                               ref_px=new_px)
             if got2 <= 0:
                 self.contracts.pop(icfg.secid, None)
                 eng.bars.clear()
@@ -324,7 +378,7 @@ class St9Session:
                 fresh = fresh[-1:]
             for b in fresh:       # warmup: БЕЗ сделок (иначе журнал засоряют входы истории)
                 self._last_bar_ts[icfg.secid] = b.ts
-                lots = max(1, int(icfg.entry_notional_rub / (b.c * eng.pv))) if b.c > 0 else 1
+                lots = self._entry_lots(icfg, b.c, eng.pv)
                 sig = eng.step(b, lots_for_entry=lots)
                 if sig and not warmup:
                     acted["signals"] += 1
@@ -342,11 +396,15 @@ class St9Session:
         return acted
 
     def refresh_capital(self) -> None:
-        if self.cfg.mode != "tbank_sandbox" or not self.cfg.account_id:
+        if self.cfg.mode not in ("tbank_sandbox", "tbank_real") or not self.cfg.account_id:
             return
         try:
             from ..st4 import tbank_sandbox as sb
-            pf = sb.portfolio(self.cfg.account_id)
+            if self.cfg.mode == "tbank_real":
+                from ..st4 import tbank_live as live
+                pf = live.portfolio(self.cfg.account_id)
+            else:
+                pf = sb.portfolio(self.cfg.account_id)
             total = sb._q_to_float(pf.get("totalAmountPortfolio") or pf.get("totalAmountCurrencies"))
             if total and total > 0:
                 self.capital_rub = float(total)
@@ -377,6 +435,7 @@ class St9Session:
             return   # цикл реально жив (проверка task, НЕ флага — флаг бывает фиктивным)
         self.state["live"] = True
         self.state["live_intent"] = True
+        self.state["session_started"] = time.time()   # точка отсчёта cooldown боевого взвода
         self._task = asyncio.create_task(self.run_live())
         self.log_event("info", f"ST9 live запущен ({self.cfg.mode}, трендовая корзина)")
         self.save_session()
@@ -394,6 +453,7 @@ class St9Session:
             "strategy": "st9", "live": self.state["live"], "mode": self.cfg.mode,
             "account_id": self.cfg.account_id or None,
             "trading_enabled": self.cfg.trading_enabled,
+            "real_trading_armed": bool(self.state.get("real_trading_armed")),  # боевой взвод
             "instruments": [
                 {"secid": i.secid, "don": f"{i.don_enter}/{i.don_exit}",
                  "notional_rub": i.entry_notional_rub,
@@ -459,6 +519,7 @@ class St9Session:
         # иначе start_live() видит live=True и выходит, НЕ создав task → фиктивный live
         # с мёртвым циклом (баг найден 09.07: st9 жил без цикла после рестарта)
         self.state["live"] = False
+        self.state["real_trading_armed"] = False   # взвод НЕ переживает рестарт (safe)
         self._last_bar_ts = {k: int(v) for k, v in (d.get("last_bar_ts") or {}).items()}
         self.exec_anchor = d.get("exec_anchor") or None
         self.contracts = dict(d.get("contracts") or {})

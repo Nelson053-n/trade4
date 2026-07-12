@@ -64,11 +64,18 @@ class St8StrategyConfig(BaseModel):
     sizing_mode: str = "manual_rub"   # manual_rub | cash_pct
     entry_notional_rub: float = 100_000.0
     entry_cash_pct: float = 25.0
+    # ── БОЕВОЙ ЛИМИТ ОБЪЁМА ──
+    # жёсткий потолок нотионала одной позиции в tbank_real (пилот = малый размер);
+    # сайзинг режется до лимита независимо от manual_rub/cash_pct. 0 = без лимита.
+    real_max_notional_rub: float = 100_000.0
 
 
 class St8Config(BaseModel):
     strategy: St8StrategyConfig = St8StrategyConfig()
-    mode: str = "paper"               # paper | tbank_sandbox
+    # paper | tbank_sandbox | tbank_real. Сама установка tbank_real ордера НЕ шлёт:
+    # гейт НА УРОВНЕ ОРДЕРА двойной — mode==tbank_real И real_trading_armed
+    # (+cooldown 600с после старта live; взвод сбрасывается рестартом/сменой режима).
+    mode: str = "paper"
     account_id: str = ""
     poll_seconds: float = 3600.0      # событийная — раз в час достаточно (проверка календаря)
     trading_enabled: bool = True

@@ -1,18 +1,28 @@
 """St8Executor — исполнение «дивидендного набега»: покупка/продажа спот-акции TQBR +
-одновременный шорт фьючерса IMOEXF (хедж беты). Sandbox или paper.
+одновременный шорт фьючерса IMOEXF (хедж беты). Paper / sandbox / БОЕВОЙ (tbank_real).
 
 Уроки прошлых инцидентов заложены:
 - сверка executed_lots (частичный филл → unwind реально налитого, а не «поверили запросу»);
 - аварийное/крупное закрытие МЕЛКИМИ ордерами (песочница отклоняет крупный по ёмкости 30034);
-- order_id строго UUID (иначе HTTP 400 30028);
+- order_id: sandbox строго UUID (иначе HTTP 400 30028), боевой — идемпотентный sha256
+  с дискриминатором операции (ретрай при сетевом обрыве не задвоит ордер, канон st5);
 - атомарность пары акция+хедж: если хедж не встал — откат акции (не оставлять голую бету).
 paper — виртуальные филлы по переданным ценам (last/offer/bid), без реальных ордеров.
+
+⚠️ БОЕВОЙ контур (real=True): post_order тратит РЕАЛЬНЫЕ деньги. Гейт НА УРОВНЕ ОРДЕРА,
+для ВСЕХ ордеров (вход/выход/unwind/хедж): real==True требует armed_cb() ==True
+(real_trading_armed + cooldown 600с в сервисе). trading_enabled здесь НЕ проверяется —
+это гейт только ВХОДА (уровень tick), выходы от него не зависят (иначе позиция залипнет).
+Плюс pre-trade sanity: |market − ref| / ref > max_price_dev_pct → отказ (канон st5).
 """
 from __future__ import annotations
 
+import hashlib
+import time
 import uuid
 
 from ..st4 import tbank_sandbox as _sb
+from ..st4 import tbank_live as _live
 
 
 class St8ExecError(Exception):
@@ -20,10 +30,15 @@ class St8ExecError(Exception):
 
 
 class St8Executor:
-    def __init__(self, account_id: str, paper: bool = True, audit_cb=None):
+    def __init__(self, account_id: str, paper: bool = True, real: bool = False,
+                 armed_cb=None, audit_cb=None, max_price_dev_pct: float = 0.05):
         self.account_id = account_id
         self.paper = paper
+        self.real = real                   # боевой контур (реальные деньги)
+        self.armed_cb = armed_cb           # () -> bool, взвод реальной торговли
         self.audit_cb = audit_cb           # callback(dict) — аудит-лог каждого ордера
+        self.max_price_dev_pct = max_price_dev_pct
+        self._seq = 0                      # счётчик для идемпотентных боевых order_id
         self._share_cache: dict[str, dict] = {}
         self._hedge_uid: str | None = None
 
@@ -58,19 +73,42 @@ class St8Executor:
 
     # ---------- один ордер с защитами ----------
     def _order(self, uid: str, lots: int, direction: str, op: str, ref_px: float) -> dict:
-        """Один sandbox-ордер (BUY|SELL) с аудитом. paper → виртуальный филл по ref_px."""
-        oid = str(uuid.uuid4())
+        """Один ордер (BUY|SELL) с аудитом. paper → виртуальный филл по ref_px;
+        sandbox → SandboxService; real → БОЕВОЙ OrdersService (гейт armed + sanity цены)."""
         full_dir = f"ORDER_DIRECTION_{direction}"
-        audit = {"account": self.account_id, "uid": uid, "lots": lots,
-                 "direction": direction, "op": op, "order_id": oid, "ref_px": ref_px}
         if self.paper:
-            audit["status"] = "paper_fill"
-            audit["executed_lots"] = lots
+            audit = {"account": self.account_id, "uid": uid, "lots": lots,
+                     "direction": direction, "op": op, "ref_px": ref_px,
+                     "status": "paper_fill", "executed_lots": lots}
             if self.audit_cb:
                 self.audit_cb(audit)
             return {"executionReportStatus": "FILL", "lotsExecuted": lots, "paper": True}
+        if self.real:
+            # гейт реальной торговли — на КАЖДЫЙ ордер (вход/выход/unwind/хедж)
+            if self.armed_cb is None or not self.armed_cb():
+                raise St8ExecError("реальная торговля не взведена (armed_cb) — ордер заблокирован")
+            # pre-trade sanity: рыночная цена не должна аномально расходиться с ref
+            try:
+                mkt = _sb.last_price(uid)
+                if mkt > 0 and ref_px > 0 and abs(mkt - ref_px) / ref_px > self.max_price_dev_pct:
+                    raise St8ExecError(f"аномальная цена {uid}: market={mkt} ref={ref_px} "
+                                       f"(>{self.max_price_dev_pct*100:.0f}%)")
+            except St8ExecError:
+                raise
+            except Exception:  # noqa: BLE001  last_price недоступен — market исполнится и так
+                pass
+            # идемпотентный orderId с дискриминатором операции (ретрай не задвоит ордер)
+            self._seq += 1
+            raw = f"{self.account_id}|{uid}|{int(lots)}|{direction}|{op}|{self._seq}|{int(time.time())}"
+            oid = hashlib.sha256(raw.encode()).hexdigest()[:32]
+        else:
+            oid = str(uuid.uuid4())        # sandbox требует строго UUID (400 30028)
+        audit = {"account": self.account_id, "uid": uid, "lots": lots,
+                 "direction": direction, "op": op, "order_id": oid, "ref_px": ref_px,
+                 "real": self.real}
         try:
-            resp = _sb.post_order(self.account_id, uid, lots, full_dir, oid)
+            api = _live if self.real else _sb
+            resp = api.post_order(self.account_id, uid, lots, full_dir, oid)
             audit["status"] = "ok"
             audit["executed_lots"] = resp.get("lotsExecuted") or resp.get("executedLots")
         except Exception as e:  # noqa: BLE001

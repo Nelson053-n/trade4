@@ -159,19 +159,37 @@ class St8Session:
 
     def _engine(self, tk: str) -> St8Engine:
         if tk not in self.engines:
-            lot = self._lot(tk) if self.cfg.mode == "tbank_sandbox" else 1
+            lot = self._lot(tk) if self.cfg.mode in ("tbank_sandbox", "tbank_real") else 1
             self.engines[tk] = St8Engine(tk, self.cfg.strategy, lot_size=lot)
         return self.engines[tk]
 
     def _exec(self):
-        """Ленивый St8Executor под текущий режим/счёт."""
+        """Ленивый St8Executor под текущий режим/счёт (смена любого — пересоздание)."""
         from .executor import St8Executor
-        if self._executor is None or self._executor.account_id != self.cfg.account_id:
+        real = self.cfg.mode == "tbank_real"
+        paper = self.cfg.mode == "paper"
+        if (self._executor is None or self._executor.account_id != self.cfg.account_id
+                or self._executor.real != real or self._executor.paper != paper):
             self._executor = St8Executor(
-                self.cfg.account_id, paper=(self.cfg.mode != "tbank_sandbox"),
+                self.cfg.account_id, paper=paper, real=real, armed_cb=self._real_armed,
                 audit_cb=lambda a: self.log_event("order",
                     f"{a['op']} {a['direction']} {a['lots']}лот → {a.get('status')}"))
         return self._executor
+
+    # ---------- боевой контур: взвод реальной торговли (канон st5) ----------
+    def arm_real(self, armed: bool) -> None:
+        """Двойной включатель. Взвод НЕ персистится (сбрасывается рестартом/сменой режима)."""
+        self.state["real_trading_armed"] = bool(armed)
+        self.log_event("warn" if armed else "info",
+                       "🔴 ST8: реальная торговля ВЗВЕДЕНА" if armed else "ST8: взвод снят")
+
+    def _real_armed(self) -> bool:
+        """armed_cb исполнителя: взвод + cooldown 600с после старта live (защита от
+        автоордеров на всплеске сразу после рестарта)."""
+        if not self.state.get("real_trading_armed"):
+            return False
+        started = self.state.get("session_started") or 0
+        return (time.time() - started) >= 600
 
     def log_missed(self, tk: str, day: str, ex_date: str, reason: str) -> None:
         if any(m["ticker"] == tk and m["ex_date"] == ex_date for m in self.missed):
@@ -339,11 +357,18 @@ class St8Session:
         return None, self.market.get(tk, {}), 1.0, None   # акция (lot_size возьмёт engine)
 
     def free_cash_rub(self) -> float:
-        """Свободный кэш: sandbox — деньги счёта (API); paper — капитал − занятые нотионалы."""
-        if self.cfg.mode == "tbank_sandbox" and self.cfg.account_id:
+        """Свободный кэш: sandbox/real — деньги счёта (API); paper — капитал − нотионалы."""
+        if self.cfg.account_id and self.cfg.mode in ("tbank_sandbox", "tbank_real"):
             try:
-                from ..st4 import tbank_sandbox as sb
-                return float(sb.free_money_rub(self.cfg.account_id))
+                if self.cfg.mode == "tbank_real":
+                    from ..st4 import tbank_live as live
+                    for m in live.positions(self.cfg.account_id).get("money", []):
+                        if m.get("currency") == "rub":
+                            from ..st4 import tbank_sandbox as sb
+                            return float(sb._q_to_float(m))
+                else:
+                    from ..st4 import tbank_sandbox as sb
+                    return float(sb.free_money_rub(self.cfg.account_id))
             except Exception:  # noqa: BLE001
                 pass
         base = self.capital_rub or 1_000_000.0
@@ -352,13 +377,17 @@ class St8Session:
         return max(0.0, base - used)
 
     def _position_lots(self, px: float, unit_value: float) -> int:
-        """Лоты входа из целевого нотионала: manual ₽ или % свободного кэша."""
+        """Лоты входа из целевого нотионала: manual ₽ или % свободного кэша.
+        В tbank_real нотионал дополнительно режется потолком real_max_notional_rub."""
         s = self.cfg.strategy
         target = 0.0
         if s.sizing_mode == "cash_pct" and s.entry_cash_pct > 0:
             target = self.free_cash_rub() * s.entry_cash_pct / 100.0
         if target <= 0:
             target = s.entry_notional_rub
+        cap = getattr(s, "real_max_notional_rub", 0.0)
+        if self.cfg.mode == "tbank_real" and cap > 0:
+            target = min(target, cap)      # боевой лимит объёма (пилот — малый размер)
         if target <= 0 or px <= 0 or unit_value <= 0:
             return max(1, s.quantity_lots)
         return max(1, int(target / (px * unit_value)))
@@ -416,13 +445,17 @@ class St8Session:
 
     # ---------- АУДИТ журнал↔счёт (кэш-истина, урок проекта) ----------
     def refresh_capital(self) -> None:
-        """Капитал sandbox-счёта + якорь аудита. ЖУРНАЛ ВРЁТ — истина только кэш счёта
-        (урок band/st4: журнальный P&L расходился с реальным вдвое)."""
-        if self.cfg.mode != "tbank_sandbox" or not self.cfg.account_id:
+        """Капитал счёта (sandbox или боевого) + якорь аудита. ЖУРНАЛ ВРЁТ — истина
+        только кэш счёта (урок band/st4: журнальный P&L расходился с реальным вдвое)."""
+        if self.cfg.mode not in ("tbank_sandbox", "tbank_real") or not self.cfg.account_id:
             return
         try:
             from ..st4 import tbank_sandbox as sb
-            pf = sb.portfolio(self.cfg.account_id)
+            if self.cfg.mode == "tbank_real":
+                from ..st4 import tbank_live as live
+                pf = live.portfolio(self.cfg.account_id)
+            else:
+                pf = sb.portfolio(self.cfg.account_id)
             total = sb._q_to_float(pf.get("totalAmountCurrencies") or pf.get("totalAmountPortfolio"))
         except Exception:  # noqa: BLE001
             return
@@ -495,7 +528,7 @@ class St8Session:
             if not self.enabled.get(tk, False):
                 continue
             eng = self._engine(tk)
-            if self.cfg.mode == "tbank_sandbox":
+            if self.cfg.mode in ("tbank_sandbox", "tbank_real"):
                 eng.lot_size = self._lot(tk)   # актуализация (сбой ISS при создании давал 1)
             q = self.market.get(tk, {})
             stock_px = q.get("offer") or q.get("last")   # вход по ask (реализм)
@@ -632,6 +665,7 @@ class St8Session:
             return   # цикл реально жив (проверка task, НЕ флага)
         self.state["live"] = True
         self.state["live_intent"] = True
+        self.state["session_started"] = time.time()   # точка отсчёта cooldown боевого взвода
         self._task = asyncio.create_task(self.run_live())
         self.log_event("info", f"ST8 live запущен ({self.cfg.mode}, дивидендный набег)")
         self.save_session()
@@ -743,6 +777,7 @@ class St8Session:
             "strategy": "st8", "live": self.state["live"], "mode": self.cfg.mode,
             "account_id": self.cfg.account_id or None,
             "trading_enabled": self.cfg.trading_enabled,
+            "real_trading_armed": bool(self.state.get("real_trading_armed")),  # боевой взвод
             "tickers_enabled": [tk for tk, on in self.enabled.items() if on],
             "open_positions": [
                 {"ticker": tk, "entry": e.position.entry_date, "ex": e.position.ex_date,
@@ -770,18 +805,22 @@ class St8Session:
         sandbox — реальные операции счёта (GetSandboxOperations, кэш-истина);
         paper — синтез из журнала: на сделку строка P&L (gross) и строка комиссии."""
         rows = []
-        if self.cfg.mode == "tbank_sandbox" and self.cfg.account_id:
+        if self.cfg.mode in ("tbank_sandbox", "tbank_real") and self.cfg.account_id:
             try:
                 from ..st4 import tbank_sandbox as sb
                 import datetime as _dtm
                 now = _dtm.datetime.now(_dtm.timezone.utc)
                 frm = (now - _dtm.timedelta(days=days_back)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
                 to = now.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-                ops = sb._call("tinkoff.public.invest.api.contract.v1.SandboxService",
-                               "GetSandboxOperations",
-                               {"accountId": self.cfg.account_id, "from": frm, "to": to,
-                                "state": "OPERATION_STATE_EXECUTED"},
-                               token=sb._account_token(self.cfg.account_id)).get("operations", [])
+                if self.cfg.mode == "tbank_real":
+                    from ..st4 import tbank_live as live
+                    ops = live.operations(self.cfg.account_id, frm, to)
+                else:
+                    ops = sb._call("tinkoff.public.invest.api.contract.v1.SandboxService",
+                                   "GetSandboxOperations",
+                                   {"accountId": self.cfg.account_id, "from": frm, "to": to,
+                                    "state": "OPERATION_STATE_EXECUTED"},
+                                   token=sb._account_token(self.cfg.account_id)).get("operations", [])
                 for o in ops:
                     amt = sb._q_to_float(o.get("payment"))
                     rows.append({"date": str(o.get("date", ""))[:16].replace("T", " "),
@@ -848,6 +887,7 @@ class St8Session:
         # live — рантайм-факт, из файла не восстанавливаем (см. st9: фиктивный live без цикла)
         st = d.get("state") or {}
         st["live"] = False
+        st["real_trading_armed"] = False   # взвод НЕ переживает рестарт (safe-by-default)
         self.state.update(st)
         en = d.get("enabled") or {}
         self.enabled = {tk: bool(en.get(tk, tk in ST8_CORE or tk in ST8_EXTENDED)) for tk in ST8_TICKERS}

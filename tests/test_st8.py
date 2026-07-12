@@ -563,3 +563,79 @@ def test_daily_loss_limit_halts_entries(monkeypatch):
     r = s.tick()
     assert r["missed"] == 1 and not r["entered"]
     assert any("лимит" in m["reason"] for m in s.missed)
+
+
+# ==================== боевой контур tbank_real (двойной гейт, канон st5) ====================
+
+def test_real_order_blocked_when_not_armed(monkeypatch):
+    """real=True без взвода: ЛЮБОЙ ордер заблокирован, боевой API не вызывается."""
+    import app.st8.executor as exmod
+    from app.st8.executor import St8Executor, St8ExecError
+    import pytest
+    called = []
+    monkeypatch.setattr(exmod._live, "post_order",
+                        lambda *a, **k: called.append(a) or {})
+    e = St8Executor("real-acc", paper=False, real=True, armed_cb=lambda: False)
+    with pytest.raises(St8ExecError, match="не взведена"):
+        e._order("uid1", 1, "BUY", "entry", 100.0)
+    assert not called                                  # боевой ордер НЕ ушёл
+
+
+def test_real_order_armed_routes_to_live(monkeypatch):
+    """Взведённый real: ордер идёт в БОЕВОЙ OrdersService с идемпотентным sha256-id."""
+    import app.st8.executor as exmod
+    from app.st8.executor import St8Executor
+    calls = []
+    def _post(acc, uid, lots, direction, oid, **kw):
+        calls.append({"acc": acc, "uid": uid, "lots": lots, "dir": direction, "oid": oid})
+        return {"executionReportStatus": "FILL", "lotsExecuted": lots}
+    monkeypatch.setattr(exmod._live, "post_order", _post)
+    monkeypatch.setattr(exmod._sb, "post_order",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("sandbox path!")))
+    monkeypatch.setattr(exmod._sb, "last_price", lambda uid: 100.0)
+    e = St8Executor("real-acc", paper=False, real=True, armed_cb=lambda: True)
+    r = e._order("uid1", 2, "BUY", "entry", 100.0)
+    assert r["lotsExecuted"] == 2
+    assert len(calls) == 1 and calls[0]["acc"] == "real-acc"
+    oid = calls[0]["oid"]
+    assert len(oid) == 32 and "-" not in oid           # sha256-хеш, не UUID
+
+
+def test_real_order_price_sanity(monkeypatch):
+    """Pre-trade sanity: рынок уехал >5% от ref → боевой ордер отклонён."""
+    import app.st8.executor as exmod
+    from app.st8.executor import St8Executor, St8ExecError
+    import pytest
+    monkeypatch.setattr(exmod._sb, "last_price", lambda uid: 120.0)   # +20% от ref
+    monkeypatch.setattr(exmod._live, "post_order",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("не должен уйти")))
+    e = St8Executor("real-acc", paper=False, real=True, armed_cb=lambda: True)
+    with pytest.raises(St8ExecError, match="аномальная цена"):
+        e._order("uid1", 1, "BUY", "entry", 100.0)
+
+
+def test_real_armed_cooldown():
+    """Взвод действует только после cooldown 600с от старта live."""
+    import time
+    from app.st8.service import St8Session
+    s = St8Session()
+    s.state["real_trading_armed"] = True
+    s.state["session_started"] = time.time()           # только что стартовали
+    assert s._real_armed() is False
+    s.state["session_started"] = time.time() - 700     # cooldown прошёл
+    assert s._real_armed() is True
+    s.state["real_trading_armed"] = False
+    assert s._real_armed() is False
+
+
+def test_position_lots_real_notional_cap():
+    """В tbank_real сайзинг режется потолком real_max_notional_rub (пилот малым размером)."""
+    from app.st8.service import St8Session
+    s = St8Session()
+    s.cfg.strategy.sizing_mode = "manual_rub"
+    s.cfg.strategy.entry_notional_rub = 500_000.0
+    s.cfg.strategy.real_max_notional_rub = 100_000.0
+    s.cfg.mode = "tbank_real"
+    assert s._position_lots(700.0, 1.0) == 142         # 100к/700, не 500к/700
+    s.cfg.mode = "tbank_sandbox"
+    assert s._position_lots(700.0, 1.0) == 714         # песочница без потолка
