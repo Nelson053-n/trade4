@@ -98,11 +98,13 @@ a{color:var(--accent-2);text-decoration:none}
   box-shadow:0 0 0 0 currentColor}
 .sessbar.live .sb-dot{background:var(--signal);color:var(--signal);animation:sbpulse 2s infinite}
 .sessbar.warn .sb-dot{background:var(--warn);color:var(--warn)}
+.sessbar.armed .sb-dot{background:var(--loss);color:var(--loss);animation:sbpulse 1.4s infinite}
 .sessbar.closed .sb-dot{background:var(--ink-faint)}
 @keyframes sbpulse{0%{box-shadow:0 0 0 0 currentColor}70%{box-shadow:0 0 0 6px transparent}100%{box-shadow:0 0 0 0 transparent}}
 .sessbar .sb-state{font-weight:600;letter-spacing:.3px}
 .sessbar.live .sb-state{color:var(--signal)}
 .sessbar.warn .sb-state{color:var(--warn)}
+.sessbar.armed .sb-state{color:var(--loss)}
 .sessbar.closed .sb-state{color:var(--ink-dim)}
 .sessbar .sb-count{color:var(--ink-dim)}
 .sessbar .sb-clock{margin-left:auto;color:var(--ink-faint);font-size:12px;letter-spacing:.5px}
@@ -153,6 +155,7 @@ a{color:var(--accent-2);text-decoration:none}
 .kpi .k{font-family:var(--mono);font-size:9.5px;letter-spacing:1.2px;color:var(--ink-faint);text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .kpi .v{font-family:var(--mono);font-size:19px;font-weight:600;margin-top:5px;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .kpi .u{font-size:11px;color:var(--ink-faint);font-weight:400}
+.kpi .v.pos{color:var(--signal)} .kpi .v.neg{color:var(--loss)}
 @media(max-width:520px){.kpis{grid-template-columns:repeat(2,1fr)}}
 
 /* график */
@@ -248,6 +251,94 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
 .pos-card{background:var(--panel-hi);border:1px solid var(--line-soft);border-radius:var(--r-sm);padding:12px 13px;font-family:var(--mono);font-size:12px;line-height:1.65}
 .foot{font-family:var(--mono);font-size:11px;color:var(--ink-faint);text-align:center;padding:8px 0 0;line-height:1.7}
 .badge{font-family:var(--mono);font-size:11px;margin-left:8px}
+
+/* ==== ST8/ST9 редизайн (новые классы, не конфликтуют с существующими) ==== */
+/* пустое состояние с иконкой */
+.emptybox{display:flex;gap:13px;align-items:flex-start;padding:18px 16px;background:var(--panel-hi);
+  border:1px dashed var(--line);border-radius:var(--r-sm);font-family:var(--mono);font-size:12px;line-height:1.7;color:var(--ink-dim)}
+.emptybox .ico{width:34px;height:34px;border-radius:9px;flex:none;display:grid;place-items:center;
+  background:var(--panel);border:1px solid var(--line);color:var(--ink-faint);font-size:16px}
+.emptybox b{color:var(--ink)}
+
+/* пилюли состояния (namespaced .pill — существующий .badge не трогаем) */
+.pill{display:inline-flex;align-items:center;gap:5px;font-family:var(--mono);font-size:10px;
+  font-weight:600;letter-spacing:.4px;text-transform:uppercase;border-radius:999px;padding:3px 9px;
+  border:1px solid transparent;white-space:nowrap}
+.pill.long{color:var(--signal);background:rgba(46,230,166,.1);border-color:rgba(46,230,166,.32)}
+.pill.short{color:var(--short);background:rgba(76,182,255,.1);border-color:rgba(76,182,255,.32)}
+.pill.flat{color:var(--ink-dim);background:rgba(127,127,127,.07);border-color:var(--line)}
+.pill.warn{color:var(--warn);background:rgba(245,179,67,.1);border-color:rgba(245,179,67,.32)}
+.pill.done{color:var(--ink-dim);border-color:var(--line)}
+
+/* ==== ST9: карты осей (главный элемент) ==== */
+.axes{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:13px}
+.axis{background:var(--panel-hi);border:1px solid var(--line);border-radius:var(--r);
+  padding:14px 15px 15px;display:flex;flex-direction:column;gap:11px;position:relative;overflow:hidden}
+.axis.open{border-color:rgba(76,182,255,.35)}
+.axis::after{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--line)}
+.axis.open.short::after{background:var(--short)}
+.axis.open.long::after{background:var(--signal)}
+.axis-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+.axis-name{font-family:var(--disp);font-weight:700;font-size:17px;letter-spacing:.3px}
+.axis-sub{font-family:var(--mono);font-size:10px;color:var(--ink-faint);margin-top:2px}
+.axis-sig{font-family:var(--mono);font-size:10.5px;color:var(--ink-dim)}
+.axis-sig.up{color:var(--signal)} .axis-sig.down{color:var(--short)}
+.axrow{display:flex;justify-content:space-between;font-family:var(--mono);
+  font-variant-numeric:tabular-nums;font-size:11.5px}
+.axrow .l{color:var(--ink-faint)} .axrow .r{color:var(--ink);font-weight:500}
+
+/* визуальная шкала цена → трейл → вход (защищённая прибыль) */
+.trail{margin-top:3px}
+.trail-cap{display:flex;justify-content:space-between;font-family:var(--mono);font-size:9.5px;
+  letter-spacing:.6px;text-transform:uppercase;color:var(--ink-faint);margin-bottom:6px}
+.trail-track{position:relative;height:34px;border-radius:8px;border:1px solid var(--line);
+  background:var(--panel);overflow:hidden}
+.trail-lock{position:absolute;top:0;bottom:0;background:rgba(46,230,166,.12)}
+.trail-mark{position:absolute;top:-1px;bottom:-1px;width:2px}
+.trail-mark.entry{background:var(--ink-dim)}
+.trail-mark.trailm{background:var(--warn);box-shadow:0 0 8px rgba(245,179,67,.5)}
+.trail-mark.price{background:var(--ink);width:3px;box-shadow:0 0 8px var(--ink)}
+.trail-mark .lab{position:absolute;top:100%;margin-top:3px;transform:translateX(-50%);
+  font-family:var(--mono);font-size:8.5px;color:var(--ink-faint);white-space:nowrap}
+.trail-legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:20px;font-family:var(--mono);
+  font-size:10px;color:var(--ink-dim)}
+.trail-legend i{display:inline-block;width:9px;height:9px;border-radius:2px;vertical-align:middle;margin-right:5px}
+.axis-flat{display:flex;flex-direction:column;gap:6px;align-items:center;justify-content:center;
+  min-height:104px;text-align:center;font-family:var(--mono);font-size:11px;color:var(--ink-faint);
+  border:1px dashed var(--line);border-radius:8px;padding:12px}
+.axis-flat .big{font-size:13px;color:var(--ink-dim)}
+.note{margin-top:8px;font-family:var(--mono);font-size:10.5px;color:var(--ink-faint);line-height:1.65}
+
+/* вселенная тикеров */
+.tickers{display:flex;flex-wrap:wrap;gap:6px}
+.tk{font-family:var(--mono);font-size:11px;border-radius:6px;padding:4px 8px;border:1px solid var(--line)}
+.tk.on{color:var(--signal);background:rgba(46,230,166,.08);border-color:rgba(46,230,166,.28)}
+.tk.sleep{color:var(--ink-faint);background:transparent}
+
+/* лента операций счёта (ledger) */
+.ledger{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:11.5px;
+  max-height:300px;overflow:auto}
+.ledger .lg{display:grid;grid-template-columns:96px 1fr auto;gap:10px;align-items:baseline;
+  padding:6px 2px;border-bottom:1px solid var(--line-soft)}
+.ledger .lg .lt{color:var(--ink-faint);white-space:nowrap}
+.ledger .lg .lk{color:var(--ink-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ledger .lg .lk b{color:var(--ink);font-weight:500}
+.ledger .lg .la{text-align:right;font-weight:600;white-space:nowrap}
+.ledger .lg .la.pos{color:var(--signal)} .ledger .lg .la.neg{color:var(--loss)}
+.ledger::-webkit-scrollbar,.events9::-webkit-scrollbar{width:8px;height:8px}
+.ledger::-webkit-scrollbar-thumb,.events9::-webkit-scrollbar-thumb{background:var(--scroll-thumb);border-radius:8px}
+
+/* события ST9 */
+.events9{font-family:var(--mono);font-size:11px;max-height:230px;overflow:auto;
+  display:flex;flex-direction:column;gap:2px}
+.events9 .ev{display:flex;gap:9px;padding:4px 0;border-bottom:1px solid var(--line-soft)}
+.events9 .ev .t{color:var(--ink-faint);flex:none}
+.events9 .ev .m{color:var(--ink-dim)}
+.events9 .ev.key .m{color:var(--ink)}
+
+/* canvas-графики ST8/ST9 */
+#s9chart{width:100%;height:380px;display:block}
+#s8-event-chart{width:100%;height:300px;display:block}
 </style>
 </head>
 <body>
@@ -288,6 +379,7 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
   <button class="strat-tab" data-strat="st6" style="background:var(--panel);color:var(--ink-dim);border:1px solid var(--line);border-bottom:none;border-radius:8px 8px 0 0;padding:8px 18px;cursor:pointer;font:inherit">ST6 · фандинг-арбитраж</button>
   <button class="strat-tab" data-strat="st7" style="background:var(--panel);color:var(--ink-dim);border:1px solid var(--line);border-bottom:none;border-radius:8px 8px 0 0;padding:8px 18px;cursor:pointer;font:inherit">ST7 · фандинг-давление</button>
   <button class="strat-tab" data-strat="st8" style="background:var(--panel);color:var(--ink-dim);border:1px solid var(--line);border-bottom:none;border-radius:8px 8px 0 0;padding:8px 18px;cursor:pointer;font:inherit">ST8 · дивидендный набег</button>
+  <button class="strat-tab" data-strat="st9" style="background:var(--panel);color:var(--ink-dim);border:1px solid var(--line);border-bottom:none;border-radius:8px 8px 0 0;padding:8px 18px;cursor:pointer;font:inherit">ST9 · трендовая корзина</button>
 </div>
 
 <div id="tab-st4">
@@ -923,28 +1015,63 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
   <div class="wrap">
   <div class="grid">
     <div>
+      <div class="statusbar">
+        <span class="sdot"></span>
+        <div>
+          <div class="stxt">Дивидендный набег — лонг за 10 торг. дней до отсечки</div>
+          <div class="ssub">Выход накануне гэпа · пост-див шорт 5 дней · хедж шортом IMOEXF · июль пропускается (рынок переразогрет)</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Сводка <span class="em">капитал · сверка со счётом</span></h2>
+        <div class="kpis">
+          <div class="kpi"><div class="k">net P&amp;L</div><div class="v" id="s8-k-net">—</div></div>
+          <div class="kpi"><div class="k">сделок</div><div class="v" id="s8-k-trades">—</div></div>
+          <div class="kpi"><div class="k">расхожд. исполн.</div><div class="v" id="s8-k-gap">—</div></div>
+          <div class="kpi"><div class="k">хедж IMOEXF</div><div class="v" id="s8-k-hedge">—</div></div>
+          <div class="kpi"><div class="k">бумаг активно</div><div class="v" id="s8-k-active">—</div></div>
+          <div class="kpi"><div class="k">открыто позиций</div><div class="v" id="s8-k-open">—</div></div>
+        </div>
+      </div>
+
       <div class="card">
         <h2>📅 Календарь входов/выходов <span class="em">купить за 10д до отсечки · продать накануне гэпа · июль пропускаем</span>
           <button id="s8-refresh" style="float:right;font:inherit;font-size:11px;padding:3px 10px;cursor:pointer;background:var(--panel);color:var(--ink-dim);border:1px solid var(--line);border-radius:6px">обновить из ISS</button>
           <a href="https://claude.ai/code/artifact/becf1aa7-5a05-4827-963a-73dfc5ea36e0" target="_blank" rel="noopener" style="float:right;margin-right:8px;font-size:11px;font-weight:400;color:var(--ink-dim);text-decoration:none;border:1px solid var(--line);border-radius:6px;padding:3px 8px">📄 отчёт по стратегии</a></h2>
+        <div class="tblwrap">
         <table id="s8-calendar"><thead><tr><th>тикер</th><th>бумага</th><th>ex (гэп)</th><th>ВХОД</th><th>цена вх.</th><th>ВЫХОД</th><th>цена вых.</th><th>набег</th><th>дох%</th><th>статус</th></tr></thead><tbody></tbody></table>
+        </div>
         <canvas id="s8-tip-chart" width="260" height="130" style="display:none;position:fixed;z-index:99;background:var(--panel);border:1px solid var(--chart-line);border-radius:8px;box-shadow:0 6px 24px rgba(0,0,0,.4);pointer-events:none"></canvas>
-        <div style="margin-top:8px;font-size:11px;color:var(--ink-dim)">бэктест 373 события 2020-2026 (0.10% комиссия): портфель 16 бумаг ядра t=8.2, ~23 сд/год, ~78%/год сырых на задействованный капитал; 3-way пройден, контроль на случайной дате = ноль. Хедж шортом IMOEXF убирает бету (2022 без хеджа −45%)</div>
+        <div class="note">клик по строке — дневной график бумаги вокруг отсечки ниже. Бэктест 373 события 2020-2026 (0.10% комиссия): портфель 16 бумаг ядра t=8.2, ~23 сд/год, ~78%/год сырых на задействованный капитал; 3-way пройден, контроль на случайной дате = ноль. Хедж шортом IMOEXF убирает бету (2022 без хеджа −45%)</div>
       </div>
+
+      <div class="card">
+        <h2>График события <span class="em" id="s8-event-cap">выберите строку календаря</span></h2>
+        <div class="chartwrap"><canvas id="s8-event-chart" style="display:none"></canvas></div>
+        <div class="emptybox" id="s8-event-empty"><div class="ico">📈</div>
+          <div>Кликните строку календаря — покажем <b>дневной график</b> бумаги вокруг отсечки с вертикалями вход / выход / ex-дата.<br>
+          Сейчас событий в работе нет (июль пропускается, осенние объявления ещё не вышли из ISS).</div></div>
+      </div>
+
       <div class="card">
         <h2>Открытые позиции</h2>
+        <div class="tblwrap">
         <table id="s8-pos"><thead><tr><th>тикер</th><th>вход</th><th>ex-дата</th><th>лотов</th></tr></thead><tbody></tbody></table>
+        </div>
       </div>
       <div class="card">
         <h2>Журнал сделок</h2>
+        <div class="tblwrap">
         <table id="s8-trades"><thead><tr><th>тикер</th><th>период</th><th>лотов</th><th>P&amp;L акции</th><th>P&amp;L хеджа</th><th>комиссии</th><th>net</th><th>причина</th></tr></thead><tbody></tbody></table>
+        </div>
       </div>
     </div>
     <div>
       <div class="card">
         <h2>Управление</h2>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
-          <button id="s8-start" class="btn">▶ старт live</button>
+        <div class="ctrls" style="margin-bottom:12px">
+          <button id="s8-start" class="btn primary">▶ старт live</button>
           <button id="s8-stop" class="btn">⏸ стоп</button>
           <button id="s8-trading" class="btn">торговля: ?</button>
           <button id="s8-tick" class="btn">тик сейчас</button>
@@ -956,9 +1083,18 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
         <button id="s8-c-save" class="btn" style="margin-top:6px">применить коннектор</button>
         <div id="s8-c-msg" style="font-size:11px;color:var(--ink-dim);margin-top:6px"></div>
       </div>
+
+      <div class="card">
+        <h2>Операции счёта <span class="em">истина: сделки и вар.маржа со счёта</span></h2>
+        <div class="ledger" id="s8-ledger"></div>
+        <div class="note">открытие позиции (покупки) и вар.маржа живут только на счёте — журнал сделок пишется лишь при закрытии. Эта лента показывает фактические операции.</div>
+      </div>
+
       <div class="card">
         <h2>Упущенные входы <span class="em">событие было — входа нет, с причиной</span></h2>
+        <div class="tblwrap">
         <table id="s8-missed"><thead><tr><th>день</th><th>тикер</th><th>отсечка</th><th>почему</th></tr></thead><tbody></tbody></table>
+        </div>
       </div>
       <div class="card">
         <h2>Параметры стратегии</h2>
@@ -983,6 +1119,95 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
   </div>
   </div>
 </div><!-- /tab-st8 -->
+
+<div id="tab-st9" hidden>
+  <div class="sessbar" style="margin-top:8px">
+    <span class="sb-dot" id="s9-dot"></span>
+    <span class="sb-state" id="s9-state">ST9 остановлен</span>
+    <span class="sb-count" id="s9-mode"></span>
+    <span style="flex:1"></span>
+    <span class="sb-count" id="s9-net"></span>
+  </div>
+  <div class="wrap">
+  <div class="grid">
+    <div>
+      <div class="statusbar">
+        <span class="sdot"></span>
+        <div>
+          <div class="stxt" id="s9-status-txt">Трендовая корзина — Donchian-пробой + ATR-трейл</div>
+          <div class="ssub">Направленная ставка с плечом по перпам · heartbeat 60 мин · сверка со счётом</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Сводка <span class="em">капитал искажён шортом → истина = кэш счёта</span></h2>
+        <div class="kpis">
+          <div class="kpi"><div class="k">кэш на счёте</div><div class="v" id="s9-k-cash">—</div></div>
+          <div class="kpi"><div class="k">вар.маржа (открыт.)</div><div class="v" id="s9-k-vm">—</div></div>
+          <div class="kpi"><div class="k">net P&amp;L (закрыт.)</div><div class="v" id="s9-k-net">—</div></div>
+          <div class="kpi"><div class="k">сделок</div><div class="v" id="s9-k-trades">—</div></div>
+          <div class="kpi"><div class="k">открыто осей</div><div class="v" id="s9-k-open">—</div></div>
+          <div class="kpi"><div class="k">капитал (оц.)</div><div class="v" id="s9-k-cap">—</div></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Оси корзины <span class="em">Donchian(вход/выход) · трейл = стоп по ATR</span></h2>
+        <div class="axes" id="s9-axes"></div>
+      </div>
+
+      <div class="card">
+        <h2>График оси <span class="em" id="s9-chart-cap"></span>
+          <span class="tf-switch" id="s9-chart-switch" style="float:right;font-weight:400"></span></h2>
+        <div class="chartwrap"><canvas id="s9chart"></canvas></div>
+        <div class="legend">
+          <span><i style="border-top-color:var(--chart-line)"></i>цена (close)</span>
+          <span><i style="border-top-color:var(--short);border-top-style:dashed"></i>Donchian канал</span>
+          <span><i style="border-top-color:var(--warn);border-top-style:dashed"></i>ATR-трейл</span>
+          <span><i style="border-top-color:var(--ink-dim);border-top-style:dashed"></i>вход</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Журнал сделок</h2>
+        <div class="tblwrap">
+        <table id="s9-trades"><thead><tr><th>ось</th><th>сторона</th><th>период</th><th>лотов</th><th>вход</th><th>выход</th><th>net</th><th>причина</th></tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+    </div>
+    <div>
+      <div class="card">
+        <h2>Управление</h2>
+        <div class="ctrls" style="margin-bottom:12px">
+          <button id="s9-start" class="btn primary">▶ старт live</button>
+          <button id="s9-stop" class="btn">⏸ стоп</button>
+          <button id="s9-trading" class="btn">торговля: ?</button>
+          <button id="s9-tick" class="btn">тик сейчас</button>
+        </div>
+        <div class="fld"><label>режим коннектора</label>
+          <select id="s9-c-mode"><option value="paper">paper</option><option value="tbank_sandbox">tbank_sandbox</option><option value="tbank_real">tbank_real</option></select></div>
+        <div class="fld"><label>account_id (sandbox)</label><input id="s9-c-acc" placeholder="пусто = не менять"></div>
+        <div class="fld"><label>account_token</label><input id="s9-c-tok" type="password" placeholder="пусто = не менять"></div>
+        <div class="fld chk" style="margin-top:2px"><label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:11.5px;color:var(--ink-dim)"><input id="s9-c-armed" type="checkbox" style="width:15px;height:15px;accent-color:var(--accent)"> взвести боевой контур (real_trading_armed)</label></div>
+        <button id="s9-c-save" class="btn" style="margin-top:6px">применить коннектор</button>
+        <div class="note">боевой ордер тратит реальные деньги — двойной гейт: <b>tbank_real</b> + <b>armed</b> (cooldown 600с). <span id="s9-armed-note"></span></div>
+        <div id="s9-c-msg" style="font-size:11px;color:var(--ink-dim);margin-top:6px"></div>
+      </div>
+
+      <div class="card">
+        <h2>Операции счёта <span class="em">истина: сделки и вар.маржа со счёта</span></h2>
+        <div class="ledger" id="s9-ledger"></div>
+        <div class="note">открытие позиции (9× продажа по 1 лоту) и вар.маржа живут только на счёте — журнал пишется лишь при закрытии. Лента показывает фактические операции.</div>
+      </div>
+
+      <div class="card">
+        <h2>События <span class="em">heartbeat 60 мин</span></h2>
+        <div class="events9" id="s9-events"></div>
+      </div>
+    </div>
+  </div>
+  </div>
+</div><!-- /tab-st9 -->
 
 <!-- модальное подтверждение «закрыть всё» (st5) -->
 <div class="modal-ov" id="s5-flat-modal">
@@ -1821,10 +2046,12 @@ function s5Switch(strat){
   $('tab-st6').hidden = strat!=='st6';
   $('tab-st7').hidden = strat!=='st7';
   $('tab-st8').hidden = strat!=='st8';
+  $('tab-st9').hidden = strat!=='st9';
   if(strat==='st5'){ s5Poll(); s5LoadWeekly(); s5LoadStrategies(); if(!_s5dailyLoaded){ _s5dailyLoaded=true; s5LoadDaily(); s5LoadGoInfo(); s5LoadMarginTimeline(); } }
   if(strat==='st6'){ s6Poll(); if(!_s6chartLoaded){ _s6chartLoaded=true; s6LoadChart(); } }
   if(strat==='st7'){ s7Poll(); }
-  if(strat==='st8'){ s8Poll(); s8LoadCalendar(); }
+  if(strat==='st8'){ s8Poll(); s8LoadCalendar(); s8Ledger(); }
+  if(strat==='st9'){ s9Poll(); s9Ledger(); s9DrawChart(); }
 }
 function s5Render(s){
   _s5snap=s;
@@ -2507,6 +2734,15 @@ function s8Render(s){
     + (s.execution_gap_rub!=null ? ' · сверка '+(s.execution_gap_rub>=0?'+':'')+s.execution_gap_rub+'₽' : '');
   $('s8-trading').textContent = 'торговля: '+(s.trading_enabled?'ВКЛ':'выкл');
   const mo=$('s8-c-mode'); if(mo&&document.activeElement!==mo) mo.value=s.mode||'paper';
+  // сводка-KPI
+  const setNum=(id,v,pos)=>{ const el=$(id); if(!el)return; el.textContent=v; el.classList.toggle('pos',pos===1); el.classList.toggle('neg',pos===-1); };
+  const netv=s.net_pnl_rub||0;
+  setNum('s8-k-net', s4money(netv), netv>0?1:(netv<0?-1:0));
+  setNum('s8-k-trades', (s.trades_count||0));
+  setNum('s8-k-gap', s.execution_gap_rub!=null?s4money(s.execution_gap_rub):'—');
+  setNum('s8-k-hedge', s.hedge_px!=null?s.hedge_px+' px':'—');
+  setNum('s8-k-active', (s.tickers_enabled||[]).length);
+  setNum('s8-k-open', (s.open_positions||[]).length);
   // позиции
   const pb=$('s8-pos').querySelector('tbody'); pb.innerHTML='';
   (s.open_positions||[]).forEach(p=>{ const tr=document.createElement('tr');
@@ -2562,6 +2798,8 @@ async function s8LoadCalendar(){
       tr.onmouseenter=e=>s8ShowChart(r.ticker, r.ex_date, e, r);
       tr.onmousemove=e=>s8MoveChart(e);
       tr.onmouseleave=()=>{ $('s8-tip-chart').style.display='none'; };
+      // клик — полноразмерный график события в отдельной карточке
+      tr.onclick=()=>s8ShowEventChart(r);
       tb.appendChild(tr); });
   }catch(e){ $('s8-calendar').querySelector('tbody').innerHTML='<tr><td colspan="10" style="color:var(--warn,#a33)">ошибка: '+e.message+'</td></tr>'; }
 }
@@ -2611,7 +2849,80 @@ function s8DrawTipChart(cv, series, ticker, row){
   c.fillStyle=loss; c.fillText('выход', 42, H-4);
   c.fillStyle='#889'; c.fillText('ex', 88, H-4);
 }
-async function s8Poll(){ if(_s5strat!=='st8') return; try{ s8Render(await s8api('/state')); }catch(e){} }
+let _s8ledgerTick=0;
+async function s8Poll(){ if(_s5strat!=='st8') return; try{ s8Render(await s8api('/state')); }catch(e){}
+  if((_s8ledgerTick++%4)===0) s8Ledger(); }   // ленту счёта — раз в ~32с
+
+// ── лента операций счёта (истина: покупки/продажи/вар.маржа/комиссии) ──
+const LEDGER_KIND={sell:'продажа',buy:'покупка',broker_fee:'комиссия',accruing_varmargin:'вар.маржа',input:'ввод ₽'};
+function s89LedgerRow(r){
+  const dt=s4esc(r.date||'');
+  const kind=LEDGER_KIND[r.kind]||s4esc(r.kind||'');
+  const lab=r.label?' · '+s4esc(r.label):'';
+  const qty=(r.qty!=null&&r.qty!==0)?' ×'+r.qty:'';
+  const a=+r.amount||0; const cls=a>0?'pos':(a<0?'neg':'');
+  const amt=(a>0?'+':'')+Math.round(a).toLocaleString('ru')+' ₽';
+  return `<div class="lg"><span class="lt">${dt}</span><span class="lk"><b>${kind}</b>${lab}${qty}</span><span class="la ${cls}">${amt}</span></div>`;
+}
+function s89RenderLedger(el, d){
+  const rows=(d&&d.rows)||[];
+  let head='';
+  if(d){ const fc=d.free_cash_rub, vm=d.varmargin_rub;
+    head=`<div class="lg" style="border-bottom:1px solid var(--line)"><span class="lt" style="color:var(--ink)">свободно</span>`
+      +`<span class="lk">вар.маржа за период</span>`
+      +`<span class="la ${fc>=0?'pos':'neg'}">${fc!=null?Math.round(fc).toLocaleString('ru')+' ₽':'—'}`
+      +` · <span class="${vm>=0?'pos':'neg'}">${vm!=null?(vm>=0?'+':'')+Math.round(vm).toLocaleString('ru')+' ₽':'—'}</span></span></div>`;
+  }
+  if(!rows.length){ el.innerHTML=head+'<div class="lg"><span class="lk" style="color:var(--ink-faint)">операций за период нет</span></div>'; return; }
+  el.innerHTML=head+rows.map(s89LedgerRow).join('');
+}
+async function s8Ledger(){ try{ s89RenderLedger($('s8-ledger'), await s8api('/ledger?days_back=30')); }
+  catch(e){ $('s8-ledger').innerHTML='<div class="lg"><span class="lk" style="color:var(--warn)">лента недоступна: '+s4esc(e.message)+'</span></div>'; } }
+
+// ── полноразмерный график события (дневной close вокруг ex-даты) ──
+let _s8eventRow=null;
+async function s8ShowEventChart(row){
+  _s8eventRow=row;
+  $('s8-event-empty').style.display='none';
+  $('s8-event-chart').style.display='block';
+  $('s8-event-cap').textContent=row.ticker+' · '+(row.name||'')+' · ex '+row.ex_date;
+  const key=row.ticker+row.ex_date;
+  let series=_s8chartCache[key];
+  if(!series){ try{ const d=await s8api(`/price-series?ticker=${row.ticker}&ex_date=${row.ex_date}`); series=d.series||[]; _s8chartCache[key]=series; }catch(err){ series=[]; } }
+  s8DrawEventChart(series, row);
+}
+function s8DrawEventChart(series, row){
+  const cv=$('s8-event-chart'); if(!cv) return;
+  const r=cv.getBoundingClientRect(); if(r.width<5){ requestAnimationFrame(()=>s8DrawEventChart(series,row)); return; }
+  const dpr=devicePixelRatio||1; cv.width=r.width*dpr; cv.height=r.height*dpr;
+  const ctx=cv.getContext('2d'); ctx.setTransform(1,0,0,1,0,0); ctx.scale(dpr,dpr);
+  const W=r.width,H=r.height; ctx.clearRect(0,0,W,H);
+  const ML=46,MR=14,MT=14,MB=26, px0=ML,px1=W-MR,py0=MT,py1=H-MB;
+  const line=getCSS('--chart-line'),grid=getCSS('--line'),ax=getCSS('--ink-faint'),
+        sig=getCSS('--signal'),loss=getCSS('--loss'),warn=getCSS('--warn'),ink=getCSS('--ink');
+  if(!series.length){ ctx.fillStyle=ax; ctx.font='12px IBM Plex Mono,monospace'; ctx.fillText('нет данных (межсезонье / нет истории ISS)',px0,py0+30); return; }
+  const vals=series.map(p=>p.close), mn=Math.min(...vals), mx=Math.max(...vals), pad=(mx-mn)*0.08||1;
+  const lo=mn-pad, hi=mx+pad;
+  const X=i=>px0+(series.length<2?0:i/(series.length-1)*(px1-px0));
+  const Y=v=>py1-(v-lo)/((hi-lo)||1)*(py1-py0);
+  // сетка + ось Y (цена)
+  ctx.font='9px IBM Plex Mono,monospace'; ctx.textBaseline='middle'; ctx.textAlign='right';
+  for(let k=0;k<=4;k++){ const v=lo+(hi-lo)*k/4, yy=Y(v);
+    ctx.strokeStyle=grid; ctx.globalAlpha=.5; ctx.beginPath(); ctx.moveTo(px0,yy); ctx.lineTo(px1,yy); ctx.stroke(); ctx.globalAlpha=1;
+    ctx.fillStyle=ax; ctx.fillText(v>=100?v.toFixed(0):v.toFixed(2), px0-6, yy); }
+  // вертикали вход/выход/ex
+  const mark=(dt,col,lbl)=>{ if(!dt)return; const i=series.findIndex(p=>p.date>=dt); if(i<0)return; const xx=X(i);
+    ctx.strokeStyle=col; ctx.globalAlpha=.9; ctx.setLineDash([4,3]); ctx.beginPath(); ctx.moveTo(xx,py0); ctx.lineTo(xx,py1); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha=1;
+    ctx.fillStyle=col; ctx.textAlign='center'; ctx.textBaseline='bottom'; ctx.fillText(lbl,xx,py1+13); ctx.textBaseline='middle'; };
+  mark(row.entry_date,sig,'вход'); mark(row.exit_date,loss,'выход'); mark(row.ex_date,warn,'ex');
+  // линия цены
+  ctx.beginPath(); series.forEach((p,i)=>{ const x=X(i),y=Y(p.close); i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
+  ctx.strokeStyle=line; ctx.lineWidth=1.8; ctx.lineJoin='round'; ctx.stroke();
+  // последняя точка
+  const lp=series[series.length-1]; ctx.beginPath(); ctx.arc(X(series.length-1),Y(lp.close),3,0,7); ctx.fillStyle=line; ctx.fill();
+}
+addEventListener('resize',()=>{ if(_s5strat==='st8'&&_s8eventRow) s8DrawEventChart(_s8chartCache[_s8eventRow.ticker+_s8eventRow.ex_date]||[], _s8eventRow); });
+
 function s8Init(){
   $('s8-trading').onclick=async()=>{ try{ const on=!(_s8snap&&_s8snap.trading_enabled); await s8api('/control/trading?on='+on,'POST'); s8Poll(); }catch(e){alert(e.message);} };
   $('s8-start').onclick=async()=>{ try{ await s8api('/control/start','POST'); s8Poll(); }catch(e){alert(e.message);} };
@@ -2632,6 +2943,230 @@ function s8Init(){
   }catch(e){ $('s8-p-msg').textContent='ошибка: '+e.message; } };
 }
 setInterval(s8Poll, 8000);
+
+// ══════════════════════════ ST9 · трендовая корзина ══════════════════════════
+let _s9snap=null, _s9chartAxis=null, _s9ledgerTick=0;
+async function s9api(path, method='GET', body=null){
+  const o={method,headers:{},credentials:'same-origin'};
+  if(body){o.headers['Content-Type']='application/json'; o.body=JSON.stringify(body);}
+  const r=await fetch('/st9'+path,o);
+  if(r.status===401){ location.href='/login.html'; throw new Error('не авторизован'); }
+  if(!r.ok) throw new Error((await r.json().catch(()=>({}))).detail||('HTTP '+r.status));
+  return r.json();
+}
+function s9num(v,d){ if(v==null||Number.isNaN(v)) return '—'; return (+v).toLocaleString('ru',{minimumFractionDigits:d||0,maximumFractionDigits:d||0}); }
+function s9px(v){ if(v==null||Number.isNaN(v)) return '—'; return (+v).toLocaleString('ru',{minimumFractionDigits:2,maximumFractionDigits:2}); }
+
+function s9Render(s){
+  _s9snap=s;
+  const live=!!s.live;
+  const sb=$('s9-dot').closest('.sessbar'); if(sb){ sb.className='sessbar'+(live?' live':'')+(s.real_trading_armed?' armed':''); }
+  $('s9-state').textContent = live?'ST9 live идёт':(s.trading_enabled?'ST9 остановлен (торговля вкл)':'ST9 остановлен');
+  const inst=s.instruments||[];
+  const openN=inst.filter(a=>a.position).length;
+  $('s9-mode').textContent = (s.mode||'paper')+' · осей '+inst.length
+    +(s.real_trading_armed?' · 🔴ВЗВЕДЁН':'');
+  const netv=s.net_pnl_rub||0;
+  $('s9-net').innerHTML = 'net <b style="color:'+(netv>=0?'var(--signal)':'var(--loss)')+'">'+(netv>=0?'+':'')+Math.round(netv).toLocaleString('ru')+' ₽</b>';
+  $('s9-trading').textContent='торговля: '+(s.trading_enabled?'ВКЛ':'выкл');
+  const mo=$('s9-c-mode'); if(mo&&document.activeElement!==mo) mo.value=s.mode||'paper';
+  const am=$('s9-c-armed'); if(am&&document.activeElement!==am) am.checked=!!s.real_trading_armed;
+  $('s9-armed-note').textContent = s.real_trading_armed?'Взведён — боевые ордера разрешены.':'Сейчас выключено.';
+  $('s9-status-txt').textContent = 'Трендовая корзина — '+inst.length+' осей, открытых позиций '+openN;
+
+  // KPI (капитал искажён шортом → кэш/вар.маржа из ledger приоритетны, заполняются в s9Ledger)
+  const setK=(id,txt,pos)=>{ const el=$(id); if(!el)return; el.textContent=txt; el.classList.toggle('pos',pos===1); el.classList.toggle('neg',pos===-1); };
+  setK('s9-k-net', (netv>=0?'+':'')+s9num(netv)+' ₽', netv>0?1:(netv<0?-1:0));
+  setK('s9-k-trades', s9num(s.trades_count||0));
+  setK('s9-k-open', s9num(openN)+' / '+inst.length);
+  setK('s9-k-cap', s.capital_rub!=null?s9num(Math.round(s.capital_rub))+' ₽':'—');
+
+  s9RenderAxes(inst);
+  s9RenderTrades(s.trades_tail||[]);
+  // события
+  $('s9-events').innerHTML=(s.events||[]).slice().reverse().slice(0,40).map(e=>{
+    const d=new Date(e.ts).toLocaleTimeString('ru',{hour:'2-digit',minute:'2-digit'});
+    const key=/SHORT|LONG|SELL|BUY|стоп|закры|откры/i.test(e.message||'')?' key':'';
+    return `<div class="ev${key}"><span class="t">${d}</span><span class="m">${s4esc(e.message||'')}</span></div>`;
+  }).join('')||'<div class="ev"><span class="m" style="color:var(--ink-faint)">событий нет</span></div>';
+
+  s9BuildAxisSwitch(inst);
+}
+
+function s9RenderAxes(inst){
+  const box=$('s9-axes');
+  if(!inst.length){ box.innerHTML='<div class="emptybox"><div class="ico">◎</div><div>Оси не сконфигурированы.</div></div>'; return; }
+  box.innerHTML = inst.map(a=>{
+    const secid=s4esc(a.secid);
+    const sub='Donchian '+s4esc(a.don||'—')+' · нотионал '+s9num(a.notional_rub)+' ₽';
+    const sigTxt=s4esc(a.last_signal||'—');
+    const sigCls=/long/i.test(a.last_signal||'')?'up':(/short/i.test(a.last_signal||'')?'down':'');
+    if(!a.position){
+      return `<div class="axis flat"><div class="axis-head"><div><div class="axis-name">${secid}</div>`
+        +`<div class="axis-sub">${sub}</div></div><span class="pill flat">flat</span></div>`
+        +`<div class="axis-flat"><div class="big">ждём пробой</div>`
+        +`<div>последний сигнал: <span class="axis-sig ${sigCls}">${sigTxt}</span></div>`
+        +`<div style="color:var(--ink-faint)">вход при закрытии бара за границей Donchian</div></div></div>`;
+    }
+    const p=a.position, side=p.side==='short'?'short':'long';
+    const entry=+p.entry, trail=+p.trail;
+    // ширину полосы считаем в JS (диапазон входа/трейла + запас)
+    const span=Math.max(Math.abs(entry-trail)*1.6, Math.abs(entry)*0.004)||1;
+    const lo=Math.min(entry,trail)-span*0.25, hi=Math.max(entry,trail)+span*0.25;
+    const pct=v=>Math.max(2,Math.min(98, (v-lo)/((hi-lo)||1)*100));
+    const eP=pct(entry), tP=pct(trail);
+    const lockL=Math.min(eP,tP), lockR=100-Math.max(eP,tP);
+    const prot=Math.abs(entry-trail); // защищённый ход в пунктах
+    const protRub=(a.protected_rub!=null)?a.protected_rub:null;
+    const protTxt='+'+s9px(prot)+' п'+(protRub!=null?' · +'+s9num(Math.round(protRub))+' ₽':'');
+    return `<div class="axis open ${side}"><div class="axis-head"><div><div class="axis-name">${secid}</div>`
+      +`<div class="axis-sub">${sub}</div></div><span class="pill ${side}">${side} · ${s9num(p.lots)} лот</span></div>`
+      +`<div class="axrow"><span class="l">цена входа</span><span class="r">${s9px(entry)}</span></div>`
+      +`<div class="axrow"><span class="l">ATR-трейл (стоп)</span><span class="r" style="color:var(--warn)">${s9px(trail)}</span></div>`
+      +`<div class="axrow"><span class="l">защищено прибыли</span><span class="r" style="color:var(--signal)">${protTxt}</span></div>`
+      +`<div class="trail"><div class="trail-cap"><span>${side==='short'?'трейл ↑ вход':'вход · трейл'}</span><span>${side==='short'?'ниже = прибыль':'выше = прибыль'}</span></div>`
+      +`<div class="trail-track"><div class="trail-lock" style="left:${lockL}%;right:${lockR}%"></div>`
+      +`<div class="trail-mark entry" style="left:${eP}%"><span class="lab">${s9px(entry)}</span></div>`
+      +`<div class="trail-mark trailm" style="left:${tP}%"><span class="lab">${s9px(trail)}</span></div></div>`
+      +`<div class="trail-legend"><span><i style="background:var(--ink-dim)"></i>вход</span>`
+      +`<span><i style="background:var(--warn)"></i>ATR-трейл</span>`
+      +`<span><i style="background:rgba(46,230,166,.4)"></i>защищено</span></div></div>`
+      +`<div class="note">последний сигнал: <span class="axis-sig ${sigCls}">${sigTxt}</span>. Зона между входом и трейлом — прибыль, которую уже не отдадим.</div></div>`;
+  }).join('');
+}
+
+function s9RenderTrades(tail){
+  const tb=$('s9-trades').querySelector('tbody'); tb.innerHTML='';
+  if(!tail.length){ tb.innerHTML='<tr><td colspan="8" style="color:var(--ink-dim)">закрытых сделок ещё нет — запись появится, когда трейл-стоп закроет ось</td></tr>'; return; }
+  tail.slice().reverse().forEach(t=>{
+    const net=+t.net_pnl_rub||0; const col=net>=0?'var(--signal)':'var(--loss)';
+    const per=(t.entry_ts?new Date(t.entry_ts).toLocaleDateString('ru',{day:'2-digit',month:'2-digit'}):'—')
+      +'→'+(t.exit_ts?new Date(t.exit_ts).toLocaleDateString('ru',{day:'2-digit',month:'2-digit'}):'—');
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${s4esc(t.secid)}</td><td>${s4esc(t.side||'')}</td><td>${per}</td><td>${s9num(t.lots)}</td>`
+      +`<td>${s9px(t.entry)}</td><td>${s9px(t.exit)}</td>`
+      +`<td style="color:${col}">${(net>=0?'+':'')+s9num(Math.round(net))}</td><td>${s4esc(t.reason||'')}</td>`;
+    tb.appendChild(tr);
+  });
+}
+
+// лента операций счёта ST9 + честные KPI (кэш/вар.маржа)
+async function s9Ledger(){
+  try{ const d=await s9api('/ledger?days_back=30'); s89RenderLedger($('s9-ledger'), d);
+    if(d.free_cash_rub!=null) $('s9-k-cash').textContent=s9num(Math.round(d.free_cash_rub))+' ₽';
+    const vm=d.varmargin_rub;
+    if(vm!=null){ const el=$('s9-k-vm'); el.textContent=(vm>=0?'+':'')+s9num(Math.round(vm))+' ₽';
+      el.classList.toggle('pos',vm>0); el.classList.toggle('neg',vm<0); }
+  }catch(e){ $('s9-ledger').innerHTML='<div class="lg"><span class="lk" style="color:var(--warn)">лента недоступна: '+s4esc(e.message)+'</span></div>'; }
+}
+
+// селектор оси над графиком (кнопки как #s5-chart-switch)
+function s9BuildAxisSwitch(inst){
+  const el=$('s9-chart-switch'); if(!el) return;
+  const ids=inst.map(a=>a.secid);
+  if(_s9chartAxis==null || !ids.includes(_s9chartAxis)){
+    const openAxis=inst.find(a=>a.position); _s9chartAxis=openAxis?openAxis.secid:(ids[0]||null);
+  }
+  // перерисовываем кнопки только при смене набора осей
+  if(el.dataset.axes===ids.join(',')){
+    el.querySelectorAll('.tf-btn').forEach(b=>b.classList.toggle('on',b.dataset.axis===_s9chartAxis)); return;
+  }
+  el.dataset.axes=ids.join(',');
+  el.innerHTML='';
+  ids.forEach(id=>{ const b=document.createElement('button'); b.className='tf-btn'+(id===_s9chartAxis?' on':'');
+    b.textContent=id; b.dataset.axis=id;
+    b.onclick=()=>s9SwitchAxis(id); el.appendChild(b); });
+}
+function s9SwitchAxis(secid){
+  _s9chartAxis=secid;
+  document.querySelectorAll('#s9-chart-switch .tf-btn').forEach(b=>b.classList.toggle('on',b.dataset.axis===secid));
+  s9DrawChart();
+}
+
+// canvas-график: close + Donchian-канал + ATR-трейл + метка входа (DPR, тема через getCSS)
+let _s9series=null, _s9seriesAxis=null;
+async function s9DrawChart(){
+  const cv=$('s9chart'); if(!cv) return;
+  if(_s5strat!=='st9') return;
+  const axis=_s9chartAxis;
+  if(!axis){ const r=cv.getBoundingClientRect(); if(r.width>5){ const dpr=devicePixelRatio||1; cv.width=r.width*dpr; cv.height=r.height*dpr;
+    const ctx=cv.getContext('2d'); ctx.setTransform(1,0,0,1,0,0); ctx.scale(dpr,dpr); ctx.clearRect(0,0,r.width,r.height);
+    ctx.fillStyle=getCSS('--ink-faint'); ctx.font='12px IBM Plex Mono,monospace'; ctx.fillText('нет оси для графика',12,24); } return; }
+  // подгружаем серию если сменилась ось / нет данных
+  if(_s9seriesAxis!==axis || _s9series==null){
+    _s9seriesAxis=axis;
+    try{ _s9series=await s9api('/price-series?secid='+encodeURIComponent(axis)+'&days_back=20'); }
+    catch(e){ _s9series={bars:[],error:e.message}; }
+    if(_s9chartAxis!==axis) return;   // ось сменили пока грузили
+  }
+  s9PaintChart(_s9series||{bars:[]});
+}
+function s9PaintChart(data){
+  const cv=$('s9chart'); if(!cv) return;
+  const r=cv.getBoundingClientRect(); if(r.width<5){ requestAnimationFrame(()=>s9PaintChart(data)); return; }
+  const dpr=devicePixelRatio||1; cv.width=r.width*dpr; cv.height=r.height*dpr;
+  const ctx=cv.getContext('2d'); ctx.setTransform(1,0,0,1,0,0); ctx.scale(dpr,dpr);
+  const W=r.width,H=r.height; ctx.clearRect(0,0,W,H);
+  $('s9-chart-cap').textContent=(data.secid?s4esc(data.secid):(_s9chartAxis||''))+(data.don?' · Donchian '+s4esc(data.don):'')+(data.interval_min?' · '+data.interval_min+'м':'');
+  const line=getCSS('--chart-line'),grid=getCSS('--line'),ax=getCSS('--ink-faint'),
+        sh=getCSS('--short'),warn=getCSS('--warn'),inkd=getCSS('--ink-dim'),ink=getCSS('--ink');
+  const bars=(data.bars||[]);
+  const ML=52,MR=14,MT=14,MB=24, px0=ML,px1=W-MR,py0=MT,py1=H-MB;
+  if(bars.length<2){ ctx.fillStyle=ax; ctx.font='12px IBM Plex Mono,monospace';
+    ctx.fillText(data.error?('ошибка: '+data.error):'прогрев / нет данных',px0,py0+30); return; }
+  // диапазон Y по всем видимым значениям
+  let lo=Infinity,hi=-Infinity;
+  bars.forEach(b=>{ [b.c,b.h,b.l,b.don_hi,b.don_lo].forEach(v=>{ if(v!=null){ if(v<lo)lo=v; if(v>hi)hi=v; } }); });
+  const pos=data.position;
+  if(pos){ [pos.entry,pos.trail].forEach(v=>{ if(v!=null){ if(v<lo)lo=v; if(v>hi)hi=v; } }); }
+  const pad=(hi-lo)*0.06||1; lo-=pad; hi+=pad;
+  const X=i=>px0+i/(bars.length-1)*(px1-px0), Y=v=>py1-(v-lo)/((hi-lo)||1)*(py1-py0);
+  // сетка + ось цены
+  ctx.font='9px IBM Plex Mono,monospace'; ctx.textAlign='right'; ctx.textBaseline='middle';
+  for(let k=0;k<=4;k++){ const v=lo+(hi-lo)*k/4, yy=Y(v);
+    ctx.strokeStyle=grid; ctx.globalAlpha=.5; ctx.beginPath(); ctx.moveTo(px0,yy); ctx.lineTo(px1,yy); ctx.stroke(); ctx.globalAlpha=1;
+    ctx.fillStyle=ax; ctx.fillText(v>=100?v.toFixed(0):v.toFixed(2),px0-6,yy); }
+  // Donchian канал (штрих, пропуски при null в прогреве)
+  const drawStep=(key,col)=>{ ctx.strokeStyle=col; ctx.globalAlpha=.7; ctx.lineWidth=1; ctx.setLineDash([4,3]); ctx.beginPath();
+    let started=false;
+    bars.forEach((b,i)=>{ const v=b[key]; if(v==null){ started=false; return; } const x=X(i),y=Y(v);
+      if(!started){ ctx.moveTo(x,y); started=true; } else ctx.lineTo(x,y); });
+    ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha=1; };
+  drawStep('don_hi',sh); drawStep('don_lo',sh);
+  // линия close
+  ctx.beginPath(); bars.forEach((b,i)=>{ const x=X(i),y=Y(b.c); i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
+  ctx.strokeStyle=line; ctx.lineWidth=1.8; ctx.lineJoin='round'; ctx.stroke();
+  // горизонтали трейла (warn) и входа (ink-dim) + метка входа на оси времени
+  const hline=(v,col,lbl)=>{ if(v==null)return; const yy=Y(v);
+    ctx.strokeStyle=col; ctx.globalAlpha=.9; ctx.lineWidth=1.2; ctx.setLineDash([6,3]); ctx.beginPath(); ctx.moveTo(px0,yy); ctx.lineTo(px1,yy); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha=1;
+    ctx.fillStyle=col; ctx.textAlign='left'; ctx.textBaseline='bottom'; ctx.fillText(lbl,px0+4,yy-2); };
+  if(pos){ hline(pos.entry,inkd,'вход '+s9px(pos.entry)); hline(pos.trail,warn,'ATR-трейл '+s9px(pos.trail));
+    // вертикаль момента входа
+    if(pos.entry_ts){ let bi=-1,bd=Infinity; bars.forEach((b,i)=>{ const d=Math.abs(b.ts-pos.entry_ts); if(d<bd){bd=d;bi=i;} });
+      if(bi>=0){ const xx=X(bi); ctx.strokeStyle=inkd; ctx.globalAlpha=.6; ctx.setLineDash([2,3]); ctx.beginPath(); ctx.moveTo(xx,py0); ctx.lineTo(xx,py1); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha=1; } } }
+  // последняя точка close
+  const lp=bars[bars.length-1]; ctx.beginPath(); ctx.arc(X(bars.length-1),Y(lp.c),3.2,0,7); ctx.fillStyle=line; ctx.shadowColor=line; ctx.shadowBlur=6; ctx.fill(); ctx.shadowBlur=0;
+}
+
+async function s9Poll(){ if(_s5strat!=='st9') return;
+  try{ s9Render(await s9api('/state')); }catch(e){}
+  if((_s9ledgerTick++%4)===0) s9Ledger();
+  s9DrawChart();
+}
+function s9Init(){
+  $('s9-start').onclick=async()=>{ try{ await s9api('/control/start','POST'); s9Poll(); }catch(e){alert(e.message);} };
+  $('s9-stop').onclick=async()=>{ try{ await s9api('/control/stop','POST'); s9Poll(); }catch(e){alert(e.message);} };
+  $('s9-trading').onclick=async()=>{ try{ const on=!(_s9snap&&_s9snap.trading_enabled); await s9api('/control/trading?on='+on,'POST'); s9Poll(); }catch(e){alert(e.message);} };
+  $('s9-tick').onclick=async()=>{ $('s9-tick').textContent='…'; try{ await s9api('/tick','POST'); }catch(e){alert(e.message);} $('s9-tick').textContent='тик сейчас'; s9Poll(); };
+  $('s9-c-save').onclick=async()=>{ try{
+    const body={mode:$('s9-c-mode').value, real_trading_armed:$('s9-c-armed').checked};
+    if($('s9-c-acc').value.trim()) body.account_id=$('s9-c-acc').value.trim();
+    if($('s9-c-tok').value.trim()) body.account_token=$('s9-c-tok').value.trim();
+    await s9api('/connector','POST',body); $('s9-c-msg').textContent='применено'; $('s9-c-tok').value=''; s9Poll();
+  }catch(e){ $('s9-c-msg').textContent='ошибка: '+e.message; } };
+}
+addEventListener('resize',()=>{ if(_s5strat==='st9') s9DrawChart(); });
+setInterval(s9Poll, 8000);
 
 function s5Init(){
   document.querySelectorAll('.strat-tab').forEach(b=> b.onclick=()=>s5Switch(b.dataset.strat));
@@ -2841,6 +3376,7 @@ s5Init();
 s6Init();
 s7Init();
 s8Init();
+s9Init();
 setInterval(s5Poll, 2500);
 </script>
 </body>

@@ -1835,6 +1835,19 @@ def st9_state():
     return _clean(ST9.snapshot())
 
 
+@app.get("/st9/ledger")
+async def st9_ledger(days_back: int = 30):
+    """Операции счёта st9 (кэш-истина): покупки/продажи ног, комиссии, вариационная маржа.
+    Показывает то, чего нет в trades движка — операции ОТКРЫТИЯ и varmargin по счёту."""
+    return _clean(await asyncio.to_thread(ST9.ledger, days_back))
+
+
+@app.get("/st9/price-series")
+async def st9_price_series(secid: str, days_back: int = 20):
+    """Свечи оси + Donchian-канал + линия ATR-трейла + метка входа (для canvas-графика)."""
+    return _clean(await asyncio.to_thread(ST9.price_series, secid, days_back))
+
+
 @app.post("/st9/control/start")
 async def st9_start():
     ST9.start_live()

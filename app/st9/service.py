@@ -395,6 +395,96 @@ class St9Session:
             self.log_event("info", f"цикл жив: {len(self.cfg.instruments)} осей, позиций {npos}")
         return acted
 
+    def ledger(self, days_back: int = 30) -> dict:
+        """Операции счёта (кэш-истина): покупки/продажи ног, комиссии, вариационная маржа.
+        ГЛАВНОЕ, чего не показывал журнал движка — оператор «не видел сделки», потому что
+        trades пишутся только при ЗАКРЫТИИ, а операции ОТКРЫТИЯ (SELL×N лотов) и varmargin
+        живут только на счёте. sandbox — GetSandboxOperations; paper — синтез из журнала."""
+        rows: list[dict] = []
+        varmargin = 0.0
+        if self.cfg.mode in ("tbank_sandbox", "tbank_real") and self.cfg.account_id:
+            try:
+                from ..st4 import tbank_sandbox as sb
+                now = datetime.now(timezone.utc)
+                frm = (now - timedelta(days=days_back)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                to = now.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                if self.cfg.mode == "tbank_real":
+                    from ..st4 import tbank_live as live
+                    ops = live.operations(self.cfg.account_id, frm, to)
+                else:
+                    ops = sb._call("tinkoff.public.invest.api.contract.v1.SandboxService",
+                                   "GetSandboxOperations",
+                                   {"accountId": self.cfg.account_id, "from": frm, "to": to,
+                                    "state": "OPERATION_STATE_EXECUTED"},
+                                   token=sb._account_token(self.cfg.account_id)).get("operations", [])
+                for o in ops:
+                    amt = sb._q_to_float(o.get("payment"))
+                    kind = o.get("operationType", "").replace("OPERATION_TYPE_", "").lower()
+                    if kind == "accruing_varmargin":
+                        varmargin += amt
+                    rows.append({"date": str(o.get("date", ""))[:16].replace("T", " "),
+                                 "kind": kind, "qty": o.get("quantity", 0) or 0,
+                                 "label": o.get("figi") or "счёт", "amount": round(amt, 2)})
+                rows.sort(key=lambda r: r["date"], reverse=True)
+            except Exception as e:  # noqa: BLE001
+                rows.append({"date": "", "kind": "error", "qty": 0,
+                             "label": str(e)[:80], "amount": 0})
+        else:
+            for t in self.trades:
+                lbl = f"{t.get('secid')} {t.get('side')} {t.get('lots')}лот"
+                rows.append({"date": "", "kind": "trade_pnl", "qty": t.get("lots", 0),
+                             "label": lbl, "amount": round(t.get("gross_pnl_rub", 0), 2)})
+                if t.get("fees_rub"):
+                    rows.append({"date": "", "kind": "fee", "qty": 0,
+                                 "label": f"комиссия {t.get('secid')}",
+                                 "amount": -round(t["fees_rub"], 2)})
+        free_cash = None
+        try:
+            if self.cfg.mode in ("tbank_sandbox", "tbank_real") and self.cfg.account_id:
+                from ..st4 import tbank_sandbox as sb
+                free_cash = round(sb.free_money_rub(self.cfg.account_id))
+        except Exception:  # noqa: BLE001
+            pass
+        net = sum(t.get("net_pnl_rub", 0) for t in self.trades)
+        return {"rows": rows[:200], "free_cash_rub": free_cash,
+                "varmargin_rub": round(varmargin, 2),
+                "journal_net_rub": round(net),
+                "fees_total_rub": round(sum(t.get("fees_rub", 0) for t in self.trades), 2)}
+
+    def price_series(self, secid: str, days_back: int = 20) -> dict:
+        """Свечи + Donchian-канал + линия ATR-трейла + метка входа для canvas-графика.
+        Считает индикаторы тем же движком (no-repaint Donchian, ATR), что и торговля."""
+        icfg = next((i for i in self.cfg.instruments if i.secid == secid), None)
+        if icfg is None:
+            return {"secid": secid, "bars": [], "error": "неизвестная ось"}
+        trade_sec = self._trade_secid(icfg)
+        frm = (datetime.now(timezone.utc) - timedelta(days=days_back)).strftime("%Y-%m-%d")
+        bars = iss_candles(trade_sec, frm, icfg.interval_min)
+        if not bars:
+            return {"secid": secid, "trade_secid": trade_sec, "bars": []}
+        s = self.cfg.strategy
+        n_in, n_out, atr_n = icfg.don_enter, icfg.don_exit, s.atr_period
+        out = []
+        for k, b in enumerate(bars):
+            win_in = bars[max(0, k - n_in):k]          # без текущего (no-repaint)
+            win_out = bars[max(0, k - n_out):k]
+            don_hi = max((x.h for x in win_in), default=None) if len(win_in) >= n_in else None
+            don_lo = min((x.l for x in win_in), default=None) if len(win_in) >= n_in else None
+            don_hi_out = max((x.h for x in win_out), default=None) if len(win_out) >= n_out else None
+            don_lo_out = min((x.l for x in win_out), default=None) if len(win_out) >= n_out else None
+            out.append({"ts": b.ts, "o": b.o, "h": b.h, "l": b.l, "c": b.c,
+                        "don_hi": don_hi, "don_lo": don_lo,
+                        "don_hi_out": don_hi_out, "don_lo_out": don_lo_out})
+        eng = self.engines.get(secid)
+        pos = None
+        if eng and eng.position:
+            p = eng.position
+            pos = {"side": p.side, "entry": p.entry, "lots": p.lots,
+                   "trail": round(p.trail, 2), "entry_ts": p.entry_ts}
+        return {"secid": secid, "trade_secid": trade_sec,
+                "don": f"{n_in}/{n_out}", "interval_min": icfg.interval_min,
+                "bars": out, "position": pos}
+
     def refresh_capital(self) -> None:
         if self.cfg.mode not in ("tbank_sandbox", "tbank_real") or not self.cfg.account_id:
             return
