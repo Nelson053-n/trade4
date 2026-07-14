@@ -458,6 +458,12 @@ class St9Session:
         if icfg is None:
             return {"secid": secid, "bars": [], "error": "неизвестная ось"}
         trade_sec = self._trade_secid(icfg)
+        # для дневных осей (GAZR) 20 календарных дней = ~14 торговых баров — Donchian(20)
+        # не прогревается (канал None). Гарантируем ≥ don_enter+15 торговых баров: переводим
+        # в календарные дни через ~1.5× (выходные/праздники). Внутридневные ТФ не трогаем.
+        if icfg.interval_min >= 1440:
+            need_days = int((icfg.don_enter + 15) * 1.5)
+            days_back = max(days_back, need_days)
         frm = (datetime.now(timezone.utc) - timedelta(days=days_back)).strftime("%Y-%m-%d")
         bars = iss_candles(trade_sec, frm, icfg.interval_min)
         if not bars:
