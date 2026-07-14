@@ -1848,6 +1848,12 @@ async def st9_price_series(secid: str, days_back: int = 20):
     return _clean(await asyncio.to_thread(ST9.price_series, secid, days_back))
 
 
+@app.get("/st9/trades-fact")
+async def st9_trades_fact(days_back: int = 30):
+    """Закрытые сделки + ФАКТИЧЕСКИЙ P&L по ценам филлов счёта (истина vs модельный net)."""
+    return _clean({"trades": await asyncio.to_thread(ST9.trades_fact, days_back)})
+
+
 @app.post("/st9/control/start")
 async def st9_start():
     ST9.start_live()

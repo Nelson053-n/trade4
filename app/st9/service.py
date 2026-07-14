@@ -499,6 +499,74 @@ class St9Session:
                 "don": f"{n_in}/{n_out}", "interval_min": icfg.interval_min,
                 "bars": out, "position": pos, "deals": deals}
 
+    def trades_fact(self, days_back: int = 30) -> list[dict]:
+        """Закрытые сделки журнала + ФАКТИЧЕСКИЙ P&L по ценам филлов счёта (истина).
+        Журнальный net считается по МОДЕЛЬНЫМ ценам движка (entry/exit сигнального бара),
+        а счёт исполняет по рынку — расходятся. Тут для каждой сделки берём реальные
+        SELL/BUY операции в окне [entry_ts, exit_ts] по её контракту, средние цены филлов,
+        реальный P&L = (avg_exit−avg_entry)·dir·lots·pv − комиссии счёта. sandbox/real только."""
+        out = []
+        ops = []
+        if self.cfg.mode in ("tbank_sandbox", "tbank_real") and self.cfg.account_id:
+            try:
+                from ..st4 import tbank_sandbox as sb
+                now = datetime.now(timezone.utc)
+                frm = (now - timedelta(days=days_back)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                to = now.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                if self.cfg.mode == "tbank_real":
+                    from ..st4 import tbank_live as live
+                    ops = live.operations(self.cfg.account_id, frm, to)
+                else:
+                    ops = sb._call("tinkoff.public.invest.api.contract.v1.SandboxService",
+                                   "GetSandboxOperations",
+                                   {"accountId": self.cfg.account_id, "from": frm, "to": to,
+                                    "state": "OPERATION_STATE_EXECUTED"},
+                                   token=sb._account_token(self.cfg.account_id)).get("operations", [])
+            except Exception:  # noqa: BLE001
+                ops = []
+
+        def _op_ms(o):
+            try:
+                return int(datetime.fromisoformat(
+                    str(o.get("date")).replace("Z", "+00:00")).timestamp() * 1000)
+            except Exception:  # noqa: BLE001
+                return 0
+
+        for t in self.trades:
+            row = dict(t)
+            row["fact_pnl_rub"] = None
+            row["fact_entry"] = None
+            row["fact_exit"] = None
+            e_ts, x_ts = t.get("entry_ts") or 0, t.get("exit_ts") or 0
+            if ops and e_ts and x_ts:
+                from ..st4 import tbank_sandbox as sb
+                # операции сделки: в окне ±1ч (филлы могут датироваться чуть иначе)
+                win = [o for o in ops if e_ts - 3_600_000 <= _op_ms(o) <= x_ts + 3_600_000]
+                buys = [o for o in win if o.get("operationType") == "OPERATION_TYPE_BUY"]
+                sells = [o for o in win if o.get("operationType") == "OPERATION_TYPE_SELL"]
+                fees = -sum(sb._q_to_float(o.get("payment")) for o in win
+                            if o.get("operationType") == "OPERATION_TYPE_BROKER_FEE")
+
+                def _avg_px(lst):
+                    tot_q = sum(int(o.get("quantity", 0) or 0) for o in lst)
+                    if tot_q == 0:
+                        return None
+                    return sum(sb._q_to_float(o.get("price")) * int(o.get("quantity", 0) or 0)
+                               for o in lst) / tot_q
+                if t.get("side") == "short":       # открытие=SELL, закрытие=BUY
+                    aopen, aclose = _avg_px(sells), _avg_px(buys)
+                else:                              # long: открытие=BUY, закрытие=SELL
+                    aopen, aclose = _avg_px(buys), _avg_px(sells)
+                if aopen and aclose:
+                    eng = self.engines.get(t.get("secid"))
+                    pv = eng.pv if eng else 1.0
+                    d = 1 if t.get("side") == "long" else -1
+                    row["fact_entry"] = round(aopen, 2)
+                    row["fact_exit"] = round(aclose, 2)
+                    row["fact_pnl_rub"] = round((aclose - aopen) * d * (t.get("lots") or 0) * pv - fees, 2)
+            out.append(row)
+        return out
+
     def flat_all(self) -> dict:
         """Паник-закрытие ВСЕХ открытых осей по рынку (штатно: ордер + журнал + save).
         В отличие от ручного скрипта делает И eng.close() И self.trades.append() — журнал
