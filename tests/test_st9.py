@@ -369,3 +369,40 @@ def test_capital_dd_guard_off_by_default():
     s.capital_rub = 10_000         # −90%, но guard выключен
     s._capital_dd_guard()
     assert s._dd_halted is False and s.cfg.trading_enabled is True
+
+
+def test_update_strategy_leverage():
+    """update_strategy включает плечо + стоп, инициализирует пик от честного капитала."""
+    from app.st9.service import St9Session
+    s = St9Session()
+    s.capital_sizing_rub = 500_000
+    r = s.update_strategy({"go_target_pct": 15, "capital_dd_stop_pct": 15})
+    assert r["go_target_pct"] == 15 and r["capital_dd_stop_pct"] == 15
+    assert s._capital_peak == 500_000          # пик от честного капитала
+    # сайзинг теперь от честного капитала (не totalAmountPortfolio)
+    icfg = s.cfg.instruments[0]
+    notional = s._entry_lots(icfg, 77, 1000) * 77 * 1000
+    assert 450_000 < notional < 650_000        # ~570к при плече 15%/3 оси
+
+
+def test_sizing_uses_honest_capital():
+    """Сайзинг плеча берёт capital_sizing_rub (money+ГО), НЕ искажённый capital_rub."""
+    from app.st9.service import St9Session
+    s = St9Session()
+    s.cfg.strategy.go_target_pct = 15.0
+    s.capital_rub = 578_000            # искажённый totalAmountPortfolio
+    s.capital_sizing_rub = 500_000     # честный
+    icfg = s.cfg.instruments[0]
+    notional = s._entry_lots(icfg, 77, 1000) * 77 * 1000
+    # должен считать от 500к, не 578к
+    expected = 500_000 * 0.15 / 3 / 0.044
+    assert abs(notional - expected) / expected < 0.15   # в пределах округления лотов
+
+
+def test_update_strategy_validation():
+    """Гейт диапазона go_target_pct."""
+    import pytest
+    from app.st9.service import St9Session
+    s = St9Session()
+    with pytest.raises(ValueError, match="вне"):
+        s.update_strategy({"go_target_pct": 99})

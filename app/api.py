@@ -1911,6 +1911,16 @@ def st9_reset_dd_halt():
     return _clean(ST9.reset_dd_halt())
 
 
+@app.post("/st9/strategy-config")
+def st9_strategy_config(payload: dict):
+    """⚠️ Плечо и стоп просадки ST9: go_target_pct (0=выкл, >0 включает плечо от % капитала),
+    capital_dd_stop_pct (предохранитель). БОЕВОЙ РИСК — устанавливать оба осознанно."""
+    try:
+        return _clean(ST9.update_strategy(payload))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 @app.post("/st9/tick")
 async def st9_tick():
     """Ручной тик: свежие 60м бары → сигналы → исполнение."""

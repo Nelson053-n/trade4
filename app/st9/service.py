@@ -82,6 +82,7 @@ class St9Session:
         self._watchdog_stale_min = 25                  # порог зависания цикла, мин (60м бары — редкие проходы)
         self._capital_peak = 0.0                       # пик капитала для стопа просадки (плечо)
         self._dd_halted = False                        # сработал стоп просадки капитала → блок входов
+        self.capital_sizing_rub = 0.0                  # ЧЕСТНЫЙ капитал (money+ГО) для сайзинга плеча
 
     def log_event(self, kind: str, message: str) -> None:
         self.events.append({"ts": int(time.time() * 1000), "kind": kind, "message": message})
@@ -219,11 +220,13 @@ class St9Session:
         target = icfg.entry_notional_rub
         # режим утилизации капитала: нотионал от % капитала на число осей (плечо)
         go_pct = getattr(s, "go_target_pct", 0.0)
-        if go_pct > 0 and self.capital_rub > 0:
+        # ЧЕСТНЫЙ капитал (money+ГО), НЕ totalAmountPortfolio (искажён переоценкой шорта)
+        cap_base = self.capital_sizing_rub or self.capital_rub
+        if go_pct > 0 and cap_base > 0:
             go_frac = getattr(s, "go_frac", 0.044) or 0.044
             n_axes = max(1, len(self.cfg.instruments))
             # ГО на ось = капитал×go_pct%/N; нотионал = ГО / go_frac
-            go_per_axis = self.capital_rub * (go_pct / 100.0) / n_axes
+            go_per_axis = cap_base * (go_pct / 100.0) / n_axes
             target = go_per_axis / go_frac
         cap = getattr(s, "real_max_notional_rub", 0.0)
         if self.cfg.mode == "tbank_real" and cap > 0:
@@ -616,14 +619,16 @@ class St9Session:
         на уровне счёта. При capital < peak×(1−pct/100): flat всех осей + блок входов
         (trading_enabled=False). Сбрасывается вручную (оператор оценил и перезапустил)."""
         pct = getattr(self.cfg.strategy, "capital_dd_stop_pct", 0.0)
-        if pct <= 0 or self.capital_rub <= 0:
+        # честный капитал (money+ГО), не искажённый totalAmountPortfolio
+        cap = self.capital_sizing_rub or self.capital_rub
+        if pct <= 0 or cap <= 0:
             return
-        self._capital_peak = max(self._capital_peak, self.capital_rub)
+        self._capital_peak = max(self._capital_peak, cap)
         if self._dd_halted:
             return
         floor = self._capital_peak * (1 - pct / 100.0)
-        if self.capital_rub < floor:
-            dd = (1 - self.capital_rub / self._capital_peak) * 100
+        if cap < floor:
+            dd = (1 - cap / self._capital_peak) * 100
             self._dd_halted = True
             self.cfg.trading_enabled = False           # блок входов (выходы/flat живут)
             self.log_event("warn", f"🚨 СТОП ПРОСАДКИ КАПИТАЛА: {dd:.1f}% от пика "
@@ -633,6 +638,34 @@ class St9Session:
             except Exception as e:  # noqa: BLE001
                 self.log_event("warn", f"flat при стопе просадки не удался: {str(e)[:80]}")
             self.save_session()
+
+    def update_strategy(self, params: dict) -> dict:
+        """Strategy-level параметры ST9: плечо (go_target_pct) и стоп просадки капитала
+        (capital_dd_stop_pct). ⚠️ БОЕВОЙ РИСК: go_target_pct>0 включает плечо. Устанавливать
+        оба вместе (плечо без предохранителя опасно). Инициализирует пик от текущего капитала."""
+        s = self.cfg.strategy
+        ranges = {"go_target_pct": (0, 50), "capital_dd_stop_pct": (0, 90),
+                  "go_frac": (0.005, 0.5)}
+        for key, (lo, hi) in ranges.items():
+            if key not in params or params[key] is None:
+                continue
+            v = float(params[key])
+            if not (lo <= v <= hi):
+                raise ValueError(f"{key}: вне [{lo}, {hi}]")
+            setattr(s, key, v)
+        # при включении плеча/стопа — инициализировать пик от ЧЕСТНОГО капитала сейчас,
+        # иначе guard мог бы сработать от нулевого/искажённого пика
+        if s.capital_dd_stop_pct > 0:
+            cap = self.capital_sizing_rub or self.capital_rub
+            if cap > 0 and self._capital_peak <= 0:
+                self._capital_peak = cap
+        self.log_event("warn" if s.go_target_pct > 0 else "info",
+                       f"strategy обновлена: плечо go_target={s.go_target_pct}% "
+                       f"стоп_просадки={s.capital_dd_stop_pct}% (пик {self._capital_peak:.0f})")
+        self.save_session()
+        return {"go_target_pct": s.go_target_pct, "capital_dd_stop_pct": s.capital_dd_stop_pct,
+                "go_frac": s.go_frac, "capital_peak_rub": round(self._capital_peak),
+                "capital_sizing_rub": round(self.capital_sizing_rub) or None}
 
     def reset_dd_halt(self) -> dict:
         """Сброс стопа просадки капитала (оператор оценил и решил продолжить). Сбрасывает
@@ -662,6 +695,18 @@ class St9Session:
                     net = sum(t.get("net_pnl_rub", 0) for t in self.trades)
                     self.exec_anchor = {"capital": float(total), "net": net,
                                         "account_id": self.cfg.account_id}
+            # ЧЕСТНЫЙ капитал для СAЙЗИНГА плеча = свободные деньги + заблокированное ГО
+            # (totalAmountPortfolio искажён переоценкой шорта фьючерса — завысил бы плечо).
+            try:
+                pos = sb.positions(self.cfg.account_id)
+                money = sum(sb._q_to_float(m) for m in pos.get("money", [])
+                            if (m or {}).get("currency") == "rub")
+                blocked = sum(sb._q_to_float(m) for m in pos.get("blocked", [])
+                              if (m or {}).get("currency") == "rub")
+                if money + blocked > 0:
+                    self.capital_sizing_rub = float(money + blocked)
+            except Exception:  # noqa: BLE001
+                pass
         except Exception:  # noqa: BLE001
             pass
 
