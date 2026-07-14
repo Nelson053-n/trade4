@@ -134,13 +134,18 @@ class St8Executor:
         except (TypeError, ValueError):
             return requested
 
-    def _close_small(self, uid: str, lots: int, direction: str, op: str, ref_px: float) -> None:
-        """Закрыть позицию МЕЛКИМИ ордерами по 1 лоту (крупный отклоняется ёмкостью 30034)."""
+    def _close_small(self, uid: str, lots: int, direction: str, op: str, ref_px: float) -> int:
+        """Закрыть позицию МЕЛКИМИ ордерами по 1 лоту (крупный отклоняется ёмкостью 30034).
+        Возвращает ФАКТИЧЕСКИ закрытые лоты: частичное закрытие (break в середине) не должно
+        выдаваться движку за полное — иначе остаток висит на счёте голой ногой (движок flat)."""
+        closed = 0
         for _ in range(lots):
             try:
-                self._order(uid, 1, direction, op, ref_px)
+                r = self._order(uid, 1, direction, op, ref_px)
+                closed += self._filled(r, 1)
             except Exception:  # noqa: BLE001
                 break
+        return closed
 
     # ---------- вход: акция long + хедж-шорт IMOEXF ----------
     def open(self, ticker: str, stock_lots: int, stock_px: float,
@@ -186,8 +191,8 @@ class St8Executor:
                     fut_secid: str | None = None) -> dict:
         """Выкуп шорта: BUY мелкими ордерами (ёмкость)."""
         s_uid = self._instr_uid(ticker, fut_secid)
-        self._close_small(s_uid, stock_lots, "BUY", "short_exit", stock_px)
-        return {"ok": True}
+        closed = self._close_small(s_uid, stock_lots, "BUY", "short_exit", stock_px)
+        return {"ok": closed >= stock_lots, "stock_closed": closed}
 
     # ---------- выход: продать акцию + откупить хедж ----------
     def close(self, ticker: str, stock_lots: int, stock_px: float,
@@ -195,8 +200,10 @@ class St8Executor:
         """Продать инструмент + откупить хедж-шорт. Мелкими ордерами (ёмкость). Best-effort:
         обе ноги закрываем независимо, ошибки логируются (выход не гейтить)."""
         s_uid = self._instr_uid(ticker, fut_secid)
-        self._close_small(s_uid, stock_lots, "SELL", "exit", stock_px)
+        stock_closed = self._close_small(s_uid, stock_lots, "SELL", "exit", stock_px)
+        hedge_closed = 0
         if hedge_lots > 0:
             h_uid = self._hedge()
-            self._close_small(h_uid, hedge_lots, "BUY", "exit_hedge", hedge_px)
-        return {"ok": True}
+            hedge_closed = self._close_small(h_uid, hedge_lots, "BUY", "exit_hedge", hedge_px)
+        return {"ok": stock_closed >= stock_lots and hedge_closed >= hedge_lots,
+                "stock_closed": stock_closed, "hedge_closed": hedge_closed}

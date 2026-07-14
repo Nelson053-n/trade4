@@ -133,13 +133,39 @@ class St8Engine:
             return None
         return trading_days[out_i]
 
+    def overdue_exit(self, today: str) -> bool:
+        """ФЕЙЛСЕЙФ от залипания: exit_day/short_exit_day дают None, если ex_date выпал
+        из trading_days (проекция календаря «съела» день, сбой загрузки ISS-календаря,
+        незапланированный праздник). Тогда плановый выход не срабатывает и позиция висит
+        на счёте бессрочно (только стоп/ручной flat спасают). Здесь — грубый календарный
+        фейлсейф по ISO-дате: лонг ПРОСРОЧЕН, если наступил день гэпа (today >= ex_date —
+        держать сквозь гэп нельзя); шорт — если прошло >= short_hold_days КАЛЕНДАРНЫХ дней
+        после ex (приближение торговых, консервативно позже). Вызывать в tick ТОЛЬКО когда
+        плановый out_day is None (не подменяет нормальный календарный выход)."""
+        p = self.position
+        if p is None:
+            return False
+        if p.side == "long":
+            return today >= p.ex_date          # дошли до гэпа/позже — срочно выйти
+        # short: календарная разница дней от ex
+        from datetime import date as _d
+        try:
+            gap = (_d.fromisoformat(today) - _d.fromisoformat(p.ex_date)).days
+        except (ValueError, TypeError):
+            return False
+        return gap >= self.strat.short_hold_days
+
     def _unit(self) -> float:
         """₽ за пункт×лот текущей позиции (pv фьючерса или лотность акции)."""
         p = self.position
         return (p.unit_value or self.lot_size) if p else self.lot_size
 
     def check_stop(self, stock_px: float, hedge_px: float) -> bool:
-        """Стоп-лосс: чистый (акция − хедж) убыток позиции > stop_loss_pct нотионала входа."""
+        """Стоп-лосс: чистый (акция + хедж) убыток позиции > stop_loss_pct нотионала входа.
+        Убыток считается ПОСЛЕ уплаченных комиссий входа (p.fees_rub) — иначе стоп оптимистичен
+        и срабатывает на величину издержек позже реального пробоя лимита по счёту. Хедж-P&L
+        включён сознательно: стоп меряет РИСК хеджированной позиции (трекинг-ошибка хеджа —
+        реальный убыток, из него выходим)."""
         p = self.position
         pct = getattr(self.strat, "stop_loss_pct", 0.0)
         if p is None or pct <= 0:
@@ -147,7 +173,7 @@ class St8Engine:
         notional = abs(p.stock_entry * p.lots * self._unit())
         if notional <= 0:
             return False
-        unreal = self._pnl(stock_px, hedge_px)[2]   # net без комиссий выхода
+        unreal = self._pnl(stock_px, hedge_px)[2] - p.fees_rub   # за вычетом уплаченных комиссий
         return unreal < -(pct / 100.0) * notional
 
     # ---------- P&L (по фактическим ценам) ----------

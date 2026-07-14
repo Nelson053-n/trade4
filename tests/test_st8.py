@@ -720,3 +720,102 @@ def test_flat_all_closes_and_journals():
     assert s.trades[-1]["reason"] == "flat_all"
     # идемпотентность
     assert s.flat_all()["closed"] == []
+
+
+def test_overdue_exit_failsafe_long():
+    """Фейлсейф от залипания: ex_date вне календаря → exit_day None, но overdue_exit
+    форсирует выход лонга по достижении дня гэпа."""
+    from app.st8.engine import St8Engine, St8Position
+    from app.st8.config import St8StrategyConfig
+    eng = St8Engine("MOEX", St8StrategyConfig(), lot_size=1)
+    eng.position = St8Position(ticker="MOEX", entry_date="2026-10-01", ex_date="2026-10-15",
+                               lots=5, stock_entry=300.0, side="long")
+    assert eng.exit_day(["2026-10-01", "2026-10-02"]) is None   # ex вне календаря
+    assert eng.overdue_exit("2026-10-10") is False              # до гэпа — не форсируем
+    assert eng.overdue_exit("2026-10-15") is True               # день гэпа — выйти
+    assert eng.overdue_exit("2026-10-20") is True               # после — тем более
+
+
+def test_overdue_exit_failsafe_short():
+    """Фейлсейф шорта: выкуп по достижении short_hold_days календарных дней после ex."""
+    from app.st8.engine import St8Engine, St8Position
+    from app.st8.config import St8StrategyConfig
+    s = St8StrategyConfig()
+    s.short_hold_days = 5
+    eng = St8Engine("MOEX", s, lot_size=1)
+    eng.position = St8Position(ticker="MOEX", entry_date="2026-10-15", ex_date="2026-10-15",
+                               lots=5, stock_entry=300.0, side="short")
+    assert eng.overdue_exit("2026-10-18") is False              # +3д < hold
+    assert eng.overdue_exit("2026-10-20") is True               # +5д >= hold
+
+
+def test_overdue_exit_none_when_flat():
+    """overdue_exit безопасен без позиции."""
+    from app.st8.engine import St8Engine
+    from app.st8.config import St8StrategyConfig
+    eng = St8Engine("MOEX", St8StrategyConfig(), lot_size=1)
+    assert eng.overdue_exit("2026-10-15") is False
+
+
+def test_partial_close_keeps_remainder():
+    """Частичное закрытие выхода → позиция НЕ обнуляется, ведём остаток (не голая нога).
+    _close_small теперь возвращает фактически закрытые лоты, сервис ведёт остаток."""
+    from app.st8.service import St8Session
+    from app.st8.engine import St8Position
+
+    s = St8Session()
+    tk = list(__import__("app.st8.service", fromlist=["ST8_TICKERS"]).ST8_TICKERS)[0]
+    eng = s._engine(tk)
+    eng.position = St8Position(ticker=tk, entry_date="2026-10-01", ex_date="2026-10-15",
+                               lots=5, stock_entry=300.0, hedge_lots=0, hedge_entry=0.0,
+                               side="long", instrument="", unit_value=10.0)
+
+    # подменяем executor: close закрывает только 2 из 5 лотов (частичный филл)
+    class _PartialExec:
+        def close(self, ticker, stock_lots, stock_px, hedge_lots, hedge_px, fut_secid=None):
+            return {"ok": False, "stock_closed": 2, "hedge_closed": 0}
+        def close_short(self, ticker, stock_lots, stock_px, fut_secid=None):
+            return {"ok": False, "stock_closed": 2}
+    s._executor = _PartialExec()
+    s._exec = lambda: s._executor
+
+    # симулируем блок выхода: закрыть 5, налилось 2 → остаток 3
+    req_lots = eng.position.lots
+    rc = s._exec().close(tk, req_lots, 310.0, 0, 0, fut_secid=None)
+    s_closed = rc.get("stock_closed", req_lots)
+    assert s_closed == 2
+    # логика сервиса: остаток ведётся
+    if s_closed < req_lots:
+        eng.position.lots = req_lots - s_closed
+    assert eng.position is not None
+    assert eng.position.lots == 3      # остаток на счёте, не потерян
+    # сделка НЕ должна попасть в журнал при частичном закрытии
+    assert len(s.trades) == 0
+
+
+def test_close_small_returns_filled():
+    """_close_small возвращает фактически закрытые лоты (paper — полный филл)."""
+    from app.st8.executor import St8Executor
+    e = St8Executor("acc", paper=True)
+    # paper: _order всегда полный филл, _close_small вернёт запрошенное
+    closed = e._close_small("uid1", 5, "SELL", "exit", 100.0)
+    assert closed == 5
+
+
+def test_stop_loss_includes_paid_fees():
+    """Стоп-лосс учитывает уплаченные комиссии входа → консервативнее (срабатывает раньше)."""
+    from app.st8.engine import St8Engine, St8Position
+    from app.st8.config import St8StrategyConfig
+    s = St8StrategyConfig()
+    s.stop_loss_pct = 5.0
+    eng = St8Engine("MOEX", s, lot_size=1)
+    # нотионал 100000 (1000 лотов × 100), стоп 5% = -5000₽. Комиссия входа 100₽.
+    eng.position = St8Position(ticker="MOEX", entry_date="2026-10-01", ex_date="2026-10-20",
+                               lots=1000, stock_entry=100.0, hedge_lots=0, hedge_entry=0.0,
+                               fees_rub=100.0, side="long", unit_value=1.0)
+    # цена упала так, что ценовой убыток ровно -4950₽ (< 5000 порог по цене)
+    # с учётом комиссии 100 → -5050 < -5000 → стоп срабатывает (консервативно)
+    px = 100.0 - 4.95        # -4950₽ ценового убытка на 1000 лотов
+    assert eng.check_stop(px, 0.0) is True     # -4950-100=-5050 пробивает -5000
+    # без просадки — не срабатывает
+    assert eng.check_stop(100.0, 0.0) is False

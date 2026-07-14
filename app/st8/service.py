@@ -610,18 +610,54 @@ class St8Session:
                 stop = eng.check_stop(close_px, self.hedge_px or eng.position.hedge_entry)
                 out_day = (eng.short_exit_day(self._trading_days) if is_short
                            else eng.exit_day(self._trading_days))
-                planned = out_day is not None and today >= out_day
+                # фейлсейф от залипания: ex_date выпал из календаря → out_day None →
+                # плановый выход не сработает; закрываем по календарной просрочке
+                overdue = out_day is None and eng.overdue_exit(today)
+                planned = (out_day is not None and today >= out_day) or overdue
+                if overdue:
+                    self.log_event("warn", f"{tk}: 🚨 фейлсейф-выход — ex_date {eng.position.ex_date} "
+                                           f"вне календаря, закрываем во избежание залипания")
                 # плановый выход — в окне у закрытия (модель close-to-close); стоп — любым тиком
                 if stop or (planned and self.in_exec_window()):
                     if not market_open:
                         continue
+                    # P&L хеджа теряется, если IMOEXF-котировки нет: close по hedge_entry даёт
+                    # hedge_pnl=0 (фикция). ПЛАНОВЫЙ выход с активным хеджем без котировки —
+                    # откладываем до следующего тика (журнал не должен врать). СТОП/фейлсейф
+                    # закрываем всё равно (риск важнее точности), пометив недостоверность.
+                    hedge_active = (not is_short) and eng.position.hedge_lots > 0
+                    if hedge_active and self.hedge_px is None:
+                        if planned and not stop and not overdue:
+                            self.log_event("warn", f"{tk}: плановый выход отложен — нет котировки "
+                                                   f"IMOEXF (P&L хеджа был бы фиктивным)")
+                            continue
+                        self.log_event("warn", f"{tk}: 🚨 выход по стопу/фейлсейфу БЕЗ котировки "
+                                               f"IMOEXF — P&L хеджа в журнале недостоверен, сверь по счёту")
                     reason = "stop" if stop else "exit"
+                    req_lots = eng.position.lots
+                    req_hedge = eng.position.hedge_lots
                     if is_short:
-                        self._exec().close_short(tk, eng.position.lots, close_px, fut_secid=fut)
+                        rc = self._exec().close_short(tk, req_lots, close_px, fut_secid=fut)
+                        s_closed = rc.get("stock_closed", req_lots)
+                        h_closed = 0
                     else:
-                        self._exec().close(tk, eng.position.lots, close_px,
-                                           eng.position.hedge_lots, self.hedge_px or 0,
-                                           fut_secid=fut)
+                        rc = self._exec().close(tk, req_lots, close_px, req_hedge,
+                                                self.hedge_px or 0, fut_secid=fut)
+                        s_closed = rc.get("stock_closed", req_lots)
+                        h_closed = rc.get("hedge_closed", req_hedge)
+                    # ЧАСТИЧНОЕ закрытие → НЕ фиксируем сделку, ведём остаток (иначе движок
+                    # flat при висящих на счёте лотах = голая нога, грабли st5). Полное
+                    # закрытие обеих ног → штатная фиксация в журнал.
+                    if s_closed < req_lots or (req_hedge > 0 and h_closed < req_hedge):
+                        eng.position.lots = max(0, req_lots - s_closed)
+                        eng.position.hedge_lots = max(0, req_hedge - h_closed)
+                        self.log_event("warn", f"{tk}: 🚨 частичный выход — закрыто акция {s_closed}/"
+                                               f"{req_lots}, хедж {h_closed}/{req_hedge}; остаток ведём, "
+                                               f"выход повторится следующим тиком")
+                        if eng.position.lots == 0 and eng.position.hedge_lots == 0:
+                            eng.position = None   # всё же закрылось до нуля — обнулить
+                        self.save_session()
+                        continue
                     tr = eng.close(today, close_px, self.hedge_px or eng.position.hedge_entry, reason)
                     self.trades.append(_trade_dict(tr))
                     acted["exited"].append(tk)
@@ -949,11 +985,25 @@ class St8Session:
                 self.log_event("warn", f"{tk}: flat-all пропущен — нет котировки")
                 continue
             try:
+                req_lots, req_hedge = p.lots, p.hedge_lots
                 if is_short:
-                    self._exec().close_short(tk, p.lots, close_px, fut_secid=fut)
+                    rc = self._exec().close_short(tk, req_lots, close_px, fut_secid=fut)
+                    s_closed, h_closed = rc.get("stock_closed", req_lots), 0
                 else:
-                    self._exec().close(tk, p.lots, close_px, p.hedge_lots,
-                                       self.hedge_px or 0, fut_secid=fut)
+                    rc = self._exec().close(tk, req_lots, close_px, req_hedge,
+                                            self.hedge_px or 0, fut_secid=fut)
+                    s_closed = rc.get("stock_closed", req_lots)
+                    h_closed = rc.get("hedge_closed", req_hedge)
+                # частичное закрытие → ведём остаток (не фиктивим полное закрытие)
+                if s_closed < req_lots or (req_hedge > 0 and h_closed < req_hedge):
+                    p.lots = max(0, req_lots - s_closed)
+                    p.hedge_lots = max(0, req_hedge - h_closed)
+                    if p.lots == 0 and p.hedge_lots == 0:
+                        eng.position = None
+                    skipped.append({"ticker": tk, "reason": f"частично: акция {s_closed}/{req_lots}, "
+                                                            f"хедж {h_closed}/{req_hedge}"})
+                    self.log_event("warn", f"{tk}: 🚨 flat-all частично — остаток ведём")
+                    continue
                 tr = eng.close(today, close_px, self.hedge_px or p.hedge_entry, "flat_all")
                 self.trades.append(_trade_dict(tr))
                 closed.append({"ticker": tk, "side": tr.side, "lots": tr.lots,
