@@ -491,6 +491,47 @@ class St9Session:
                 "don": f"{n_in}/{n_out}", "interval_min": icfg.interval_min,
                 "bars": out, "position": pos}
 
+    def flat_all(self) -> dict:
+        """Паник-закрытие ВСЕХ открытых осей по рынку (штатно: ордер + журнал + save).
+        В отличие от ручного скрипта делает И eng.close() И self.trades.append() — журнал
+        не теряет запись. Закрытие на контракте ОТКРЫТИЯ (self.contracts) для квартальников.
+        Гейт ордера (armed/cooldown в tbank_real) работает как в tick — flat не в обход."""
+        from ..st4 import tbank_sandbox as sb
+        ts = int(time.time() * 1000)
+        closed, partial = [], []
+        for icfg in self.cfg.instruments:
+            eng = self.engines.get(icfg.secid)
+            if eng is None or eng.position is None:
+                continue
+            p = eng.position
+            close_sec = self.contracts.get(icfg.secid, self._trade_secid(icfg)) \
+                if icfg.quarterly else self._trade_secid(icfg)
+            # текущая цена для журнальной записи (нет сигнального бара)
+            try:
+                px = sb.last_price(sb.find_future(close_sec)["uid"])
+            except Exception:  # noqa: BLE001
+                px = p.entry     # фолбэк: цена входа (P&L=0, реальный покажет счёт)
+            direction = "SELL" if p.side == "long" else "BUY"
+            got = self._order(close_sec, p.lots, direction, ref_px=px)
+            if got < p.lots:                 # одна повторная попытка добить остаток
+                got += self._order(close_sec, p.lots - got, direction, ref_px=px)
+            if got <= 0:
+                self.log_event("warn", f"{eng.secid}: flat-all не исполнен (0 лотов)")
+                continue
+            if got < p.lots:                 # частичное: ведём остаток, сделку не фиксируем
+                p.lots -= got
+                partial.append({"secid": eng.secid, "closed": got, "left": p.lots})
+                self.log_event("warn", f"🚨 {eng.secid}: flat-all закрыл {got}, остаток {p.lots}")
+                continue
+            tr = eng.close(px, ts, "flat_all")
+            self.trades.append(tr.__dict__)
+            self.contracts.pop(icfg.secid, None)
+            closed.append({"secid": eng.secid, "side": tr.side, "lots": tr.lots,
+                           "exit": tr.exit, "net_pnl_rub": tr.net_pnl_rub})
+            self.log_event("exit", f"{eng.secid}: flat-all {tr.side} net {tr.net_pnl_rub:+.0f}₽")
+        self.save_session()
+        return {"ok": True, "closed": closed, "partial": partial}
+
     def refresh_capital(self) -> None:
         if self.cfg.mode not in ("tbank_sandbox", "tbank_real") or not self.cfg.account_id:
             return

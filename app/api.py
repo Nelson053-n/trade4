@@ -1873,6 +1873,15 @@ async def st9_tick():
     return _clean(await asyncio.to_thread(ST9.tick))
 
 
+@app.post("/st9/control/flat-all")
+async def st9_flat_all(payload: dict):
+    """Паник-закрытие ВСЕХ открытых осей ST9 по рынку (требует confirm). Штатно ведёт
+    журнал (ордер+eng.close+trades.append). НЕ блокируется trading_enabled (выход всегда жив)."""
+    if not payload or not payload.get("confirm"):
+        raise HTTPException(400, "нужно подтверждение: {\"confirm\": true}")
+    return _clean(await asyncio.to_thread(ST9.flat_all))
+
+
 @app.post("/st9/connector")
 def st9_connector(payload: dict):
     """paper | tbank_sandbox | tbank_real (+account_id). Гейт по открытым позициям.
