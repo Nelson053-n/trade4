@@ -83,6 +83,7 @@ class St9Session:
         self._capital_peak = 0.0                       # пик капитала для стопа просадки (плечо)
         self._dd_halted = False                        # сработал стоп просадки капитала → блок входов
         self.capital_sizing_rub = 0.0                  # ЧЕСТНЫЙ капитал (money+ГО) для сайзинга плеча
+        self._go_lot_cache: dict[tuple, float] = {}    # (sec,side) -> ГО на лот (кэш, прогрев зовёт часто)
 
     def log_event(self, kind: str, message: str) -> None:
         self.events.append({"ts": int(time.time() * 1000), "kind": kind, "message": message})
@@ -207,9 +208,12 @@ class St9Session:
         """Что реально торгуем: перп = secid; квартальник = текущий контракт."""
         return (self._resolve_contract(icfg) or icfg.secid) if icfg.quarterly else icfg.secid
 
-    def _entry_lots(self, icfg, px: float, pv: float) -> int:
-        """Лоты входа из нотионала оси; в tbank_real нотионал режется потолком
-        real_max_notional_rub (боевой лимит объёма — пилот на малом размере)."""
+    def _entry_lots(self, icfg, px: float, pv: float, side: str = "long",
+                    sec: str | None = None) -> int:
+        """Лоты входа. При плече (go_target_pct>0) — из ФАКТИЧЕСКОГО ГО на лот; иначе из
+        нотионала оси. В tbank_real режется потолком real_max_notional_rub (пилот).
+        side/sec нужны для точного ГО (long/short, контракт) при плече."""
+        sec = sec or self._trade_secid(icfg)
         if px <= 0 or pv <= 0:
             # битая цена (ISS отдал 0/None) → ОТКАЗ входа, НЕ 1 лот вслепую: при px=0
             # ref_px=0 отключал бы sanity-гейт в _order (условие ref_px>0) → вход по
@@ -220,18 +224,45 @@ class St9Session:
         target = icfg.entry_notional_rub
         # режим утилизации капитала: нотионал от % капитала на число осей (плечо)
         go_pct = getattr(s, "go_target_pct", 0.0)
-        # ЧЕСТНЫЙ капитал (money+ГО), НЕ totalAmountPortfolio (искажён переоценкой шорта)
+        # ЧЕСТНЫЙ капитал (free+ГО), НЕ totalAmountPortfolio (искажён переоценкой шорта)
         cap_base = self.capital_sizing_rub or self.capital_rub
         if go_pct > 0 and cap_base > 0:
-            go_frac = getattr(s, "go_frac", 0.044) or 0.044
             n_axes = max(1, len(self.cfg.instruments))
-            # ГО на ось = капитал×go_pct%/N; нотионал = ГО / go_frac
-            go_per_axis = cap_base * (go_pct / 100.0) / n_axes
+            go_per_axis = cap_base * (go_pct / 100.0) / n_axes   # целевое ГО на ось
+            # лоты ПРЯМО из ФАКТИЧЕСКОГО ГО на лот (GetFuturesMargin), НЕ через
+            # захардкоженный go_frac 0.044 — аудит 15.07: реальное ГО USDRUBF ≈0.15
+            # нотионала, не 0.044 → go_frac завышал плечо ~в 3×, а в стресс ГО растёт.
+            go_lot = self._go_per_lot(sec, side)
+            if go_lot and go_lot > 0:
+                lots = max(1, int(go_per_axis / go_lot))
+                cap = getattr(s, "real_max_notional_rub", 0.0)
+                if self.cfg.mode == "tbank_real" and cap > 0:
+                    lots = min(lots, max(1, int(cap / (px * pv))))
+                return lots
+            # ГО оси недоступно (сбой API) — фолбэк на go_frac-оценку (лучше чем ничего)
+            go_frac = getattr(s, "go_frac", 0.044) or 0.044
             target = go_per_axis / go_frac
         cap = getattr(s, "real_max_notional_rub", 0.0)
         if self.cfg.mode == "tbank_real" and cap > 0:
             target = min(target, cap)     # боевой потолок (пилот) поверх любого сайзинга
         return max(1, int(target / (px * pv)))
+
+    def _go_per_lot(self, sec: str, side: str) -> float | None:
+        """Фактическое ГО на 1 лот контракта (брокерский GetFuturesMargin), сторона важна.
+        Кэш на (sec, side) — ГО меняется биржей редко, а прогрев зовёт сотни раз/бар."""
+        key = (sec, side)
+        cached = self._go_lot_cache.get(key)
+        if cached is not None:
+            return cached
+        try:
+            from ..st4 import tbank_sandbox as sb
+            uid = sb.find_future(sec)["uid"]
+            mlong, mshort = sb.futures_margin(uid)
+            val = mlong if side == "long" else mshort
+            self._go_lot_cache[key] = val
+            return val
+        except Exception:  # noqa: BLE001
+            return None
 
     def _apply_signal(self, eng: St9Engine, sig: dict, icfg) -> None:
         ts = int(time.time() * 1000)
@@ -268,7 +299,7 @@ class St9Session:
                         self.save_session()
                         return
                     eng.pv = pv
-                lots = self._entry_lots(icfg, sig["px"], eng.pv)
+                lots = self._entry_lots(icfg, sig["px"], eng.pv, side, sec)
                 got = self._order(sec, lots, "BUY" if side == "long" else "SELL",
                                   ref_px=sig["px"])
                 if got <= 0:
@@ -319,7 +350,7 @@ class St9Session:
             tr = eng.close(old_px, ts, "roll")
             self.trades.append(tr.__dict__)
             eng.pv = new_pv
-            lots = self._entry_lots(icfg, new_px, new_pv)
+            lots = self._entry_lots(icfg, new_px, new_pv, side, new_sec)
             got2 = self._order(new_sec, lots, "BUY" if side == "long" else "SELL",
                                ref_px=new_px)
             if got2 <= 0:
@@ -399,7 +430,7 @@ class St9Session:
                 fresh = fresh[-1:]
             for b in fresh:       # warmup: БЕЗ сделок (иначе журнал засоряют входы истории)
                 self._last_bar_ts[icfg.secid] = b.ts
-                lots = self._entry_lots(icfg, b.c, eng.pv)
+                lots = self._entry_lots(icfg, b.c, eng.pv, "long", self._trade_secid(icfg))
                 sig = eng.step(b, lots_for_entry=lots)
                 if sig and not warmup:
                     acted["signals"] += 1
@@ -695,16 +726,26 @@ class St9Session:
                     net = sum(t.get("net_pnl_rub", 0) for t in self.trades)
                     self.exec_anchor = {"capital": float(total), "net": net,
                                         "account_id": self.cfg.account_id}
-            # ЧЕСТНЫЙ капитал для СAЙЗИНГА плеча = свободные деньги + заблокированное ГО
-            # (totalAmountPortfolio искажён переоценкой шорта фьючерса — завысил бы плечо).
+            # ЧЕСТНЫЙ капитал для СAЙЗИНГА плеча = свободные деньги + ФАКТИЧЕСКОЕ ГО открытых
+            # позиций. НЕ totalAmountPortfolio (искажён mark-to-market фьючерса, завысил бы
+            # ~на 77к) и НЕ top-key "blocked" (там валютные блокировки, не фьючерсное ГО —
+            # аудит 15.07 нашёл: читалось случайное 4412 вместо ГО). ГО берём точное из
+            # брокерского GetFuturesMargin на лот × лоты позиции.
             try:
-                pos = sb.positions(self.cfg.account_id)
-                money = sum(sb._q_to_float(m) for m in pos.get("money", [])
-                            if (m or {}).get("currency") == "rub")
-                blocked = sum(sb._q_to_float(m) for m in pos.get("blocked", [])
-                              if (m or {}).get("currency") == "rub")
-                if money + blocked > 0:
-                    self.capital_sizing_rub = float(money + blocked)
+                free = sb.free_money_rub(self.cfg.account_id)
+                go_open = 0.0
+                for sec, eng in self.engines.items():
+                    p = eng.position
+                    if p is None:
+                        continue
+                    try:
+                        uid = sb.find_future(self.contracts.get(sec, sec))["uid"]
+                        mlong, mshort = sb.futures_margin(uid)
+                        go_open += (mlong if p.side == "long" else mshort) * p.lots
+                    except Exception:  # noqa: BLE001  ГО оси недоступно — пропустим
+                        pass
+                if free > 0:
+                    self.capital_sizing_rub = float(free + go_open)
             except Exception:  # noqa: BLE001
                 pass
         except Exception:  # noqa: BLE001

@@ -406,3 +406,29 @@ def test_update_strategy_validation():
     s = St9Session()
     with pytest.raises(ValueError, match="вне"):
         s.update_strategy({"go_target_pct": 99})
+
+
+def test_sizing_from_actual_go_per_lot():
+    """При плече лоты считаются из ФАКТИЧЕСКОГО ГО на лот (не go_frac 0.044)."""
+    from app.st9.service import St9Session
+    s = St9Session()
+    s.capital_sizing_rub = 500_000
+    s.cfg.strategy.go_target_pct = 15.0
+    # мок фактического ГО: 11500₽/лот (реальное USDRUBF, не go_frac-оценка)
+    s._go_per_lot = lambda sec, side: 11_500.0
+    icfg = s.cfg.instruments[0]
+    lots = s._entry_lots(icfg, 77, 1000, side="long")
+    # целевое ГО на ось = 500к×15%/3 = 25000; лоты = 25000/11500 ≈ 2
+    assert lots == 2
+
+
+def test_sizing_go_fallback_when_api_down():
+    """ГО API недоступно (_go_per_lot None) → фолбэк на go_frac-оценку (не падаем)."""
+    from app.st9.service import St9Session
+    s = St9Session()
+    s.capital_sizing_rub = 500_000
+    s.cfg.strategy.go_target_pct = 15.0
+    s._go_per_lot = lambda sec, side: None      # API недоступно
+    icfg = s.cfg.instruments[0]
+    lots = s._entry_lots(icfg, 77, 1000, side="long")
+    assert lots >= 1                             # фолбэк сработал, вход возможен
