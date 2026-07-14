@@ -135,6 +135,7 @@ class St8Session:
         self.trades: list[dict] = []
         self.events: list[dict] = []
         self.enabled = {tk: (tk in ST8_CORE or tk in ST8_EXTENDED) for tk in ST8_TICKERS}  # ядро+расширение вкл, опц. выкл
+        self.ticker_overrides: dict[str, dict] = {}  # tk -> {entry_days_before,exit_offset_days,min_div_yield_pct,stop_loss_pct,entry_notional_rub} (персист, поверх глобала)
         self.state = {"live": False, "live_intent": False}
         self.signal_view: dict[str, dict] = {}
         self._session_file = Path(__file__).resolve().parent.parent.parent / "session_state_8.json"
@@ -157,11 +158,73 @@ class St8Session:
         self.last_tick_ts: int = 0                   # мс; наблюдаемость живости цикла
         self._task = None
 
+    # per-ticker параметры калибровки, которые можно переопределять поверх глобала
+    PER_TICKER_KEYS = ("entry_days_before", "exit_offset_days", "min_div_yield_pct",
+                       "stop_loss_pct", "entry_notional_rub")
+
+    def _p(self, tk: str, key: str):
+        """Эффективное значение параметра для тикера: per-ticker оверрайд или глобал."""
+        ov = self.ticker_overrides.get(tk)
+        if ov and key in ov and ov[key] is not None:
+            return ov[key]
+        return getattr(self.cfg.strategy, key)
+
     def _engine(self, tk: str) -> St8Engine:
         if tk not in self.engines:
             lot = self._lot(tk) if self.cfg.mode in ("tbank_sandbox", "tbank_real") else 1
-            self.engines[tk] = St8Engine(tk, self.cfg.strategy, lot_size=lot)
+            # per-ticker оверрайды: даём движку КОПИЮ strategy с наложенными значениями,
+            # чтобы движковые методы (exit_day по exit_offset_days, check_stop по stop_loss_pct)
+            # видели персональные параметры тикера
+            strat = self.cfg.strategy
+            ov = self.ticker_overrides.get(tk)
+            if ov:
+                strat = self.cfg.strategy.model_copy(update={
+                    k: ov[k] for k in self.PER_TICKER_KEYS
+                    if k in ov and ov[k] is not None and hasattr(self.cfg.strategy, k)})
+            self.engines[tk] = St8Engine(tk, strat, lot_size=lot)
         return self.engines[tk]
+
+    def _rebuild_engine(self, tk: str) -> None:
+        """Пересоздать движок тикера под новые оверрайды, СОХРАНИВ открытую позицию."""
+        old = self.engines.get(tk)
+        pos = old.position if old else None
+        self.engines.pop(tk, None)
+        eng = self._engine(tk)
+        if pos is not None:
+            eng.position = pos
+
+    def update_ticker(self, tk: str, params: dict) -> dict:
+        """Per-ticker калибровка: entry_days_before/exit_offset_days/min_div_yield_pct/
+        stop_loss_pct/entry_notional_rub поверх глобала. Переживает рестарт. Значение None
+        или отсутствие ключа снимает оверрайд (возврат к глобалу). Пересоздаёт движок,
+        сохраняя открытую позицию (событийная стратегия — параметры влияют на будущие входы)."""
+        if tk not in ST8_TICKERS:
+            raise ValueError(f"неизвестный тикер {tk}")
+        ranges = {"entry_days_before": (1, 30, int), "exit_offset_days": (0, 5, int),
+                  "min_div_yield_pct": (0, 20, float), "stop_loss_pct": (0, 30, float),
+                  "entry_notional_rub": (1000, 100_000_000, float)}
+        ov = dict(self.ticker_overrides.get(tk) or {})
+        for key, (lo, hi, cast) in ranges.items():
+            if key not in params:
+                continue
+            if params[key] is None:
+                ov.pop(key, None)               # снять оверрайд → глобал
+                continue
+            v = cast(params[key])
+            if not (lo <= v <= hi):
+                raise ValueError(f"{key}: вне [{lo}, {hi}]")
+            ov[key] = v
+        if ov:
+            self.ticker_overrides[tk] = ov
+        else:
+            self.ticker_overrides.pop(tk, None)
+        self._rebuild_engine(tk)
+        eff = {k: self._p(tk, k) for k in self.PER_TICKER_KEYS}
+        self.log_event("info", f"{tk}: параметры обновлены (вход −{eff['entry_days_before']}д, "
+                               f"выход ex−{eff['exit_offset_days']}, миндох {eff['min_div_yield_pct']}%, "
+                               f"стоп {eff['stop_loss_pct']}%, нотионал {int(eff['entry_notional_rub'])})")
+        self.save_session()
+        return {"ticker": tk, "overrides": self.ticker_overrides.get(tk, {}), "effective": eff}
 
     def _exec(self):
         """Ленивый St8Executor под текущий режим/счёт (смена любого — пересоздание)."""
@@ -376,15 +439,16 @@ class St8Session:
                    for e in self.engines.values() if e.position is not None)
         return max(0.0, base - used)
 
-    def _position_lots(self, px: float, unit_value: float) -> int:
+    def _position_lots(self, px: float, unit_value: float, tk: str | None = None) -> int:
         """Лоты входа из целевого нотионала: manual ₽ или % свободного кэша.
-        В tbank_real нотионал дополнительно режется потолком real_max_notional_rub."""
+        В tbank_real нотионал дополнительно режется потолком real_max_notional_rub.
+        tk задан → per-ticker entry_notional_rub (калибровка размера под эмитент)."""
         s = self.cfg.strategy
         target = 0.0
         if s.sizing_mode == "cash_pct" and s.entry_cash_pct > 0:
             target = self.free_cash_rub() * s.entry_cash_pct / 100.0
         if target <= 0:
-            target = s.entry_notional_rub
+            target = self._p(tk, "entry_notional_rub") if tk else s.entry_notional_rub
         cap = getattr(s, "real_max_notional_rub", 0.0)
         if self.cfg.mode == "tbank_real" and cap > 0:
             target = min(target, cap)      # боевой лимит объёма (пилот — малый размер)
@@ -582,7 +646,7 @@ class St8Session:
                     sp = (iq["offer"] - iq["bid"]) / iq["bid"] * 100
                 max_sp = self.cfg.strategy.max_spread_pct
                 if short_px and not (max_sp > 0 and sp is not None and sp > max_sp):
-                    lots = self._position_lots(short_px, uval)
+                    lots = self._position_lots(short_px, uval, tk)
                     try:
                         r = self._exec().open_short(tk, lots, short_px, fut_secid=fut)
                         eng.open(today, sev, short_px, 0.0, 0, side="short",
@@ -624,7 +688,7 @@ class St8Session:
                 self.log_missed(tk, today, ev.ex_date, f"спред {sp:.2f}% > {max_sp}% (дорогое исполнение)")
                 acted["missed"] += 1
                 continue
-            lots = self._position_lots(entry_px, uval)
+            lots = self._position_lots(entry_px, uval, tk)
             hlots = self._hedge_lots_for(entry_px, lots, uval)
             try:
                 r = self._exec().open(tk, lots, entry_px, hlots, self.hedge_px or 0,
@@ -797,6 +861,7 @@ class St8Session:
             "sleeping": self._sleeping,          # без дивидендов >года (не торгуются)
             "trades_tail": self.trades[-20:],    # хвост журнала для страницы /st8
             "strategy_cfg": self.cfg.strategy.model_dump(),
+            "ticker_overrides": self.ticker_overrides,
             "events": self.events[-20:],
         }
 
@@ -905,6 +970,7 @@ class St8Session:
         try:
             data = {"config": self.cfg.model_dump(), "trades": self.trades,
                     "enabled": self.enabled, "state": self.state,
+                    "ticker_overrides": self.ticker_overrides,
                     "exec_anchor": self.exec_anchor, "new_dividends": self.new_dividends[-100:],
                     "div_seen": self._div_seen, "missed": self.missed[-100:],
                     # позиции ПЕРСИСТЯТСЯ (ревизия 11.07: рестарт с открытой позицией
@@ -930,6 +996,11 @@ class St8Session:
         self.state.update(st)
         en = d.get("enabled") or {}
         self.enabled = {tk: bool(en.get(tk, tk in ST8_CORE or tk in ST8_EXTENDED)) for tk in ST8_TICKERS}
+        # per-ticker оверрайды (только известные тикеры и валидные ключи)
+        self.ticker_overrides = {
+            tk: {k: v for k, v in (ov or {}).items() if k in self.PER_TICKER_KEYS}
+            for tk, ov in (d.get("ticker_overrides") or {}).items() if tk in ST8_TICKERS}
+        self.ticker_overrides = {tk: ov for tk, ov in self.ticker_overrides.items() if ov}
         self.exec_anchor = d.get("exec_anchor") or None
         self.new_dividends = list(d.get("new_dividends") or [])
         self._div_seen = dict(d.get("div_seen") or {})

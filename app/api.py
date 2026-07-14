@@ -1746,6 +1746,19 @@ async def st8_flat_all(payload: dict):
     return _clean(await asyncio.to_thread(ST8.flat_all))
 
 
+@app.post("/st8/ticker-config")
+def st8_ticker_config(payload: dict):
+    """Per-ticker калибровка: entry_days_before/exit_offset_days/min_div_yield_pct/
+    stop_loss_pct/entry_notional_rub по тикеру, поверх глобала. null снимает оверрайд."""
+    tk = payload.get("ticker")
+    if not tk:
+        raise HTTPException(400, "нужен ticker")
+    try:
+        return _clean(ST8.update_ticker(str(tk), payload))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 @app.post("/st8/tick")
 async def st8_tick():
     """Ручной daily-тик: скан дивидендов + котировки + проверка календаря вход/выход +

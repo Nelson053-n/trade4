@@ -639,3 +639,84 @@ def test_position_lots_real_notional_cap():
     assert s._position_lots(700.0, 1.0) == 142         # 100к/700, не 500к/700
     s.cfg.mode = "tbank_sandbox"
     assert s._position_lots(700.0, 1.0) == 714         # песочница без потолка
+
+
+def test_per_ticker_override_applies_to_engine():
+    """Per-ticker оверрайд entry_days_before/stop применяется к движку тикера, не к другим."""
+    from app.st8.service import St8Session
+    s = St8Session()
+    s.update_ticker("ROSN", {"entry_days_before": 7, "stop_loss_pct": 3.0})
+    assert s._engine("ROSN").strat.entry_days_before == 7
+    assert s._engine("ROSN").strat.stop_loss_pct == 3.0
+    # другой тикер — глобальные значения
+    assert s._engine("MGNT").strat.entry_days_before == s.cfg.strategy.entry_days_before
+
+
+def test_per_ticker_notional_via_p():
+    """Нотионал: per-ticker через _p, остальные тикеры — глобал."""
+    from app.st8.service import St8Session
+    s = St8Session()
+    s.update_ticker("ROSN", {"entry_notional_rub": 50_000})
+    assert s._p("ROSN", "entry_notional_rub") == 50_000
+    assert s._p("MGNT", "entry_notional_rub") == s.cfg.strategy.entry_notional_rub
+
+
+def test_per_ticker_clear_override():
+    """None снимает конкретный оверрайд (возврат к глобалу), не трогая остальные."""
+    from app.st8.service import St8Session
+    s = St8Session()
+    s.update_ticker("ROSN", {"entry_days_before": 7, "stop_loss_pct": 3.0})
+    s.update_ticker("ROSN", {"entry_days_before": None})
+    eff = s.update_ticker("ROSN", {})["effective"]
+    assert eff["entry_days_before"] == s.cfg.strategy.entry_days_before   # снят
+    assert eff["stop_loss_pct"] == 3.0                                    # остался
+
+
+def test_per_ticker_validation():
+    """Гейты: неизвестный тикер и значение вне диапазона."""
+    import pytest
+    from app.st8.service import St8Session
+    s = St8Session()
+    with pytest.raises(ValueError, match="неизвестный тикер"):
+        s.update_ticker("XXXX", {"stop_loss_pct": 2})
+    with pytest.raises(ValueError, match="вне"):
+        s.update_ticker("MGNT", {"stop_loss_pct": 99})
+
+
+def test_per_ticker_persists():
+    """Оверрайды переживают рестарт (save→load)."""
+    import tempfile, os
+    from pathlib import Path
+    from app.st8.service import St8Session
+    s = St8Session()
+    tf = tempfile.mktemp(suffix=".json")
+    s._session_file = Path(tf)
+    s.update_ticker("ROSN", {"entry_days_before": 7, "stop_loss_pct": 3.0})
+    s.save_session()
+    s2 = St8Session()
+    s2._session_file = Path(tf)
+    s2.load_session()
+    assert s2._engine("ROSN").strat.entry_days_before == 7
+    assert s2.ticker_overrides.get("ROSN") == {"entry_days_before": 7, "stop_loss_pct": 3.0}
+    os.unlink(tf)
+
+
+def test_flat_all_closes_and_journals():
+    """flat_all закрывает открытую позицию и пишет её в журнал (paper)."""
+    from app.st8.service import St8Session
+    from app.st8.engine import St8Position
+    s = St8Session()
+    tk = list(__import__("app.st8.service", fromlist=["ST8_TICKERS"]).ST8_TICKERS)[0]
+    eng = s._engine(tk)
+    eng.position = St8Position(ticker=tk, entry_date="2026-10-01", ex_date="2026-10-15",
+                               lots=5, stock_entry=300.0, hedge_lots=0, hedge_entry=0.0,
+                               side="long", instrument="", unit_value=10.0)
+    s.market[tk] = {"bid": 310.0, "offer": 311.0, "last": 310.5}
+    before = len(s.trades)
+    r = s.flat_all()
+    assert len(r["closed"]) == 1
+    assert eng.position is None
+    assert len(s.trades) == before + 1
+    assert s.trades[-1]["reason"] == "flat_all"
+    # идемпотентность
+    assert s.flat_all()["closed"] == []
