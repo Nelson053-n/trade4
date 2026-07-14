@@ -862,6 +862,45 @@ class St8Session:
                         "time": q.get("time")})
         return out
 
+    def flat_all(self) -> dict:
+        """Паник-закрытие ВСЕХ открытых позиций ST8 по рынку (штатно: executor + журнал).
+        Лонг → продать акцию + откупить хедж IMOEXF (close); шорт → выкупить (close_short).
+        Воспроизводит выход из tick, но без гейтов плана/окна — закрываем немедленно.
+        Best-effort по котировке исполнителя; при её отсутствии ось пропускаем (не фиктивим)."""
+        closed, skipped = [], []
+        today = date.today().isoformat()
+        for tk in ST8_TICKERS:
+            eng = self.engines.get(tk)
+            if eng is None or eng.position is None:
+                continue
+            p = eng.position
+            is_short = p.side == "short"
+            fut = p.instrument or None
+            cq = (_iss_fut_quote(fut) or {}) if fut else self.market.get(tk, {})
+            # лонг продаём по bid, шорт выкупаем по offer
+            close_px = ((cq.get("offer") if is_short else cq.get("bid")) or cq.get("last"))
+            if close_px is None:
+                skipped.append({"ticker": tk, "reason": "нет котировки исполнителя"})
+                self.log_event("warn", f"{tk}: flat-all пропущен — нет котировки")
+                continue
+            try:
+                if is_short:
+                    self._exec().close_short(tk, p.lots, close_px, fut_secid=fut)
+                else:
+                    self._exec().close(tk, p.lots, close_px, p.hedge_lots,
+                                       self.hedge_px or 0, fut_secid=fut)
+                tr = eng.close(today, close_px, self.hedge_px or p.hedge_entry, "flat_all")
+                self.trades.append(_trade_dict(tr))
+                closed.append({"ticker": tk, "side": tr.side, "lots": tr.lots,
+                               "net_pnl_rub": tr.net_pnl_rub})
+                self.log_event("exit", f"{tk}: flat-all {eng_side_label(tr.side)} "
+                                       f"net {tr.net_pnl_rub:+.0f}₽")
+            except Exception as e:  # noqa: BLE001
+                skipped.append({"ticker": tk, "reason": str(e)[:80]})
+                self.log_event("warn", f"{tk}: flat-all ошибка — {str(e)[:80]}")
+        self.save_session()
+        return {"ok": True, "closed": closed, "skipped": skipped}
+
     def save_session(self) -> None:
         try:
             data = {"config": self.cfg.model_dump(), "trades": self.trades,

@@ -1737,6 +1737,15 @@ def st8_stop():
     return {"ok": True, "live": False}
 
 
+@app.post("/st8/control/flat-all")
+async def st8_flat_all(payload: dict):
+    """Паник-закрытие ВСЕХ позиций ST8 по рынку (требует confirm). Штатно: лонг → продать
+    акцию + откупить хедж IMOEXF, шорт → выкупить; журнал ведётся. НЕ гейтится trading_enabled."""
+    if not payload or not payload.get("confirm"):
+        raise HTTPException(400, "нужно подтверждение: {\"confirm\": true}")
+    return _clean(await asyncio.to_thread(ST8.flat_all))
+
+
 @app.post("/st8/tick")
 async def st8_tick():
     """Ручной daily-тик: скан дивидендов + котировки + проверка календаря вход/выход +
