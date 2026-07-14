@@ -207,6 +207,7 @@ a{color:var(--accent-2);text-decoration:none}
 .jscroll::-webkit-scrollbar{width:8px;height:8px}
 .jscroll::-webkit-scrollbar-thumb{background:var(--scroll-thumb);border-radius:8px}
 table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11.5px}
+#s9-trades tbody td{font-variant-numeric:tabular-nums}
 thead th{position:sticky;top:0;background:var(--panel);text-align:left;color:var(--ink-faint);
   font-weight:500;font-size:9.5px;letter-spacing:.8px;text-transform:uppercase;padding:7px 8px;border-bottom:1px solid var(--line)}
 tbody td{padding:7px 8px;border-bottom:1px solid var(--line-soft)}
@@ -1164,15 +1165,18 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
           <span><i style="border-top-color:var(--chart-line)"></i>цена (close)</span>
           <span><i style="border-top-color:var(--short);border-top-style:dashed"></i>Donchian канал</span>
           <span><i style="border-top-color:var(--warn);border-top-style:dashed"></i>ATR-трейл</span>
-          <span><i style="border-top-color:var(--ink-dim);border-top-style:dashed"></i>вход</span>
+          <span><i style="border-top-color:var(--ink-dim);border-top-style:dashed"></i>вход текущей</span>
+          <span><i style="border-top-color:var(--signal)"></i>сделка (полоса удержания: зелёная net≥0 / красная net&lt;0)</span>
         </div>
       </div>
 
       <div class="card">
-        <h2>Журнал сделок</h2>
+        <h2>Журнал сделок <span class="em">net — модельный P&amp;L движка, не факт счёта</span></h2>
         <div class="tblwrap">
-        <table id="s9-trades"><thead><tr><th>ось</th><th>сторона</th><th>период</th><th>лотов</th><th>вход</th><th>выход</th><th>net</th><th>причина</th></tr></thead><tbody></tbody></table>
+        <table id="s9-trades"><thead><tr><th>ось</th><th>сторона</th><th>период</th><th>лотов</th><th>вход</th><th>выход</th><th>net (модель)</th><th>причина</th></tr></thead><tbody></tbody></table>
         </div>
+        <div id="s9-trades-fact" class="note" style="color:var(--ink-dim)"></div>
+        <div class="note">«net (модель)» — расчёт движка по его ценам входа/выхода <b>(exit−entry)·лоты·пункт−комиссии</b>, а не факт счёта. Фактический P&amp;L смотри в KPI «вар.маржа (открыт.)» и в ленте операций счёта справа — <b>истина = счёт</b>.</div>
       </div>
     </div>
     <div>
@@ -2945,7 +2949,7 @@ function s8Init(){
 setInterval(s8Poll, 8000);
 
 // ══════════════════════════ ST9 · трендовая корзина ══════════════════════════
-let _s9snap=null, _s9chartAxis=null, _s9ledgerTick=0;
+let _s9snap=null, _s9chartAxis=null, _s9ledgerTick=0, _s9varmargin=null;
 async function s9api(path, method='GET', body=null){
   const o={method,headers:{},credentials:'same-origin'};
   if(body){o.headers['Content-Type']='application/json'; o.body=JSON.stringify(body);}
@@ -3048,6 +3052,7 @@ function s9RenderTrades(tail){
       +`<td style="color:${col}">${(net>=0?'+':'')+s9num(Math.round(net))}</td><td>${s4esc(t.reason||'')}</td>`;
     tb.appendChild(tr);
   });
+  s9RenderFact();
 }
 
 // лента операций счёта ST9 + честные KPI (кэш/вар.маржа)
@@ -3057,7 +3062,14 @@ async function s9Ledger(){
     const vm=d.varmargin_rub;
     if(vm!=null){ const el=$('s9-k-vm'); el.textContent=(vm>=0?'+':'')+s9num(Math.round(vm))+' ₽';
       el.classList.toggle('pos',vm>0); el.classList.toggle('neg',vm<0); }
+    _s9varmargin=(vm!=null?vm:null); s9RenderFact();
   }catch(e){ $('s9-ledger').innerHTML='<div class="lg"><span class="lk" style="color:var(--warn)">лента недоступна: '+s4esc(e.message)+'</span></div>'; }
+}
+// строка-сводка под журналом: фактический P&L = вар.маржа со счёта (истина)
+function s9RenderFact(){ const el=$('s9-trades-fact'); if(!el) return;
+  if(_s9varmargin==null){ el.textContent=''; return; }
+  const vm=_s9varmargin, col=vm>=0?'var(--signal)':'var(--loss)';
+  el.innerHTML='фактический P&amp;L (счёт, вар.маржа открыт.): <b style="color:'+col+';font-variant-numeric:tabular-nums">'+(vm>=0?'+':'')+s9num(Math.round(vm))+' ₽</b>';
 }
 
 // селектор оси над графиком (кнопки как #s5-chart-switch)
@@ -3109,7 +3121,8 @@ function s9PaintChart(data){
   const W=r.width,H=r.height; ctx.clearRect(0,0,W,H);
   $('s9-chart-cap').textContent=(data.secid?s4esc(data.secid):(_s9chartAxis||''))+(data.don?' · Donchian '+s4esc(data.don):'')+(data.interval_min?' · '+data.interval_min+'м':'');
   const line=getCSS('--chart-line'),grid=getCSS('--line'),ax=getCSS('--ink-faint'),
-        sh=getCSS('--short'),warn=getCSS('--warn'),inkd=getCSS('--ink-dim'),ink=getCSS('--ink');
+        sh=getCSS('--short'),warn=getCSS('--warn'),inkd=getCSS('--ink-dim'),ink=getCSS('--ink'),
+        sig=getCSS('--signal'),loss=getCSS('--loss');
   const bars=(data.bars||[]);
   const ML=52,MR=14,MT=14,MB=24, px0=ML,px1=W-MR,py0=MT,py1=H-MB;
   if(bars.length<2){ ctx.fillStyle=ax; ctx.font='12px IBM Plex Mono,monospace';
@@ -3133,6 +3146,35 @@ function s9PaintChart(data){
       if(!started){ ctx.moveTo(x,y); started=true; } else ctx.lineTo(x,y); });
     ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha=1; };
   drawStep('don_hi',sh); drawStep('don_lo',sh);
+  // ts → X: ближайший бар по времени; за правым краем — кламп к последнему бару
+  const tsToX=ts=>{ if(ts==null) return null;
+    if(ts>=bars[bars.length-1].ts) return X(bars.length-1);
+    if(ts<=bars[0].ts) return X(0);
+    let bi=0,bd=Infinity; bars.forEach((b,i)=>{ const d=Math.abs(b.ts-ts); if(d<bd){bd=d;bi=i;} }); return X(bi); };
+  // закрытые сделки: подсветка периода удержания + вертикали входа/выхода + уровни цен
+  (data.deals||[]).forEach(dl=>{
+    const xin=tsToX(dl.entry_ts), xout=tsToX(dl.exit_ts);
+    if(xin==null||xout==null) return;
+    const net=+dl.net_pnl_rub||0, zone=net>=0?sig:loss;
+    const sideCol=dl.side==='short'?sh:sig;
+    const xL=Math.min(xin,xout), xR=Math.max(xin,xout);
+    // полоса удержания (полупрозрачная, цвет по знаку net)
+    ctx.fillStyle=zone; ctx.globalAlpha=.09; ctx.fillRect(xL,py0,Math.max(1,xR-xL),py1-py0); ctx.globalAlpha=1;
+    // уровни entry/exit — короткие штрихи у своих краёв полосы
+    const yin=Y(dl.entry), yout=Y(dl.exit);
+    ctx.lineWidth=1.4;
+    ctx.strokeStyle=sideCol; ctx.beginPath(); ctx.moveTo(xin-5,yin); ctx.lineTo(xin+5,yin); ctx.stroke();
+    ctx.strokeStyle=inkd; ctx.beginPath(); ctx.moveTo(xout-5,yout); ctx.lineTo(xout+5,yout); ctx.stroke();
+    // вертикаль входа (сплошная, цвет по стороне)
+    ctx.strokeStyle=sideCol; ctx.globalAlpha=.75; ctx.lineWidth=1.2; ctx.beginPath(); ctx.moveTo(xin,py0); ctx.lineTo(xin,py1); ctx.stroke(); ctx.globalAlpha=1;
+    // вертикаль выхода (пунктир, ink-dim)
+    ctx.strokeStyle=inkd; ctx.globalAlpha=.7; ctx.lineWidth=1.2; ctx.setLineDash([3,3]); ctx.beginPath(); ctx.moveTo(xout,py0); ctx.lineTo(xout,py1); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha=1;
+    // подписи
+    ctx.font='9px IBM Plex Mono,monospace'; ctx.textBaseline='top'; ctx.textAlign='left';
+    ctx.fillStyle=sideCol; ctx.fillText('вход',xin+3,py0+2);
+    ctx.textAlign=xout>W-40?'right':'left';
+    ctx.fillStyle=inkd; ctx.fillText('выход',xout>W-40?xout-3:xout+3,py0+2);
+  });
   // линия close
   ctx.beginPath(); bars.forEach((b,i)=>{ const x=X(i),y=Y(b.c); i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
   ctx.strokeStyle=line; ctx.lineWidth=1.8; ctx.lineJoin='round'; ctx.stroke();
