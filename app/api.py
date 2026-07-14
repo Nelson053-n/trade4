@@ -426,10 +426,12 @@ async def lifespan(app: FastAPI):
     if ST9.state.get("live_intent"):
         ST9.start_live()
     _watchdog_task = asyncio.create_task(ST5.watchdog_loop())  # самовосстановление зависшего live-цикла
+    _watchdog9_task = asyncio.create_task(ST9.watchdog_loop())  # то же для st9 (позиция с плечом)
     _auto_bt_task = asyncio.create_task(_auto_backtest_loop())
     _digest_task = asyncio.create_task(_daily_digest_loop())   # вечерний TG-дайджест (23:55)
     yield
     _watchdog_task.cancel()
+    _watchdog9_task.cancel()
     _auto_bt_task.cancel()
     for s4 in ST4S.values():
         s4.save_session()

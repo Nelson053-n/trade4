@@ -78,6 +78,8 @@ class St9Session:
         self.last_tick_ts: int = 0                    # мс; наблюдаемость живости цикла
         self._hb_ts: float = 0.0                      # heartbeat-событие раз в час
         self._task = None
+        self._live_hb = 0.0                            # monotonic последнего успешного прохода run_live (watchdog)
+        self._watchdog_stale_min = 25                  # порог зависания цикла, мин (60м бары — редкие проходы)
 
     def log_event(self, kind: str, message: str) -> None:
         self.events.append({"ts": int(time.time() * 1000), "kind": kind, "message": message})
@@ -206,7 +208,11 @@ class St9Session:
         """Лоты входа из нотионала оси; в tbank_real нотионал режется потолком
         real_max_notional_rub (боевой лимит объёма — пилот на малом размере)."""
         if px <= 0 or pv <= 0:
-            return 1
+            # битая цена (ISS отдал 0/None) → ОТКАЗ входа, НЕ 1 лот вслепую: при px=0
+            # ref_px=0 отключал бы sanity-гейт в _order (условие ref_px>0) → вход по
+            # мусорной цене с непредсказуемым нотионалом. 0 лотов = вход не состоится.
+            self.log_event("warn", f"{icfg.secid}: вход отклонён — битая цена px={px} pv={pv}")
+            return 0
         target = icfg.entry_notional_rub
         cap = getattr(self.cfg.strategy, "real_max_notional_rub", 0.0)
         if self.cfg.mode == "tbank_real" and cap > 0:
@@ -615,16 +621,60 @@ class St9Session:
     async def run_live(self) -> None:
         import asyncio
         self.state["live"] = True
+        self._live_hb = time.monotonic()      # старт: ещё не завис
         while self.state["live"]:
             try:
                 # wait_for: зависший тик (DNS-фаза вне urllib-timeout) не убивает цикл
                 await asyncio.wait_for(asyncio.to_thread(self.tick),
                                        timeout=max(120.0, self.cfg.poll_seconds * 0.9))
+                self._live_hb = time.monotonic()   # проход завершён → watchdog спокоен
             except asyncio.TimeoutError:
                 self.log_event("warn", "тик завис (таймаут) — пропущен, цикл жив")
             except Exception as e:  # noqa: BLE001
                 self.log_event("warn", f"тик не удался: {str(e)[:100]}")
             await asyncio.sleep(self.cfg.poll_seconds)
+
+    def _watchdog_should_restart(self, now_mono: float, ts_sec: float | None = None) -> bool:
+        """Завис ли live-цикл. True ⇔ live И биржа открыта (forts live) И с последнего
+        успешного прохода прошло > _watchdog_stale_min мин. Биржу проверяем, чтобы НЕ
+        рестартовать ночью/в выходные (баров нет легитимно — не зависание)."""
+        if not self.state.get("live"):
+            return False
+        try:
+            from ..st5 import forts_schedule as sched
+            minute, _sec, dow = sched.msk_minute_dow(ts_sec)
+            if sched.forts_kind(minute, dow) != "live":
+                return False
+        except Exception:  # noqa: BLE001  нет расписания — не блокируем watchdog
+            pass
+        if self._live_hb <= 0:
+            return False
+        return (now_mono - self._live_hb) > self._watchdog_stale_min * 60
+
+    async def watchdog_loop(self) -> None:
+        """Сторож зависания live-цикла ST9 (канон st5): раз в 60с проверяет, при застое
+        отменяет залипшую run_live и поднимает новую. autoresume стартует цикл после
+        рестарта сервиса, но НЕ ловит зависание ПОСЛЕ старта — эта дыра для направленной
+        позиции с плечом критична (трейл перестаёт двигаться)."""
+        import asyncio
+        while True:
+            await asyncio.sleep(60)
+            try:
+                if not self._watchdog_should_restart(time.monotonic()):
+                    continue
+                stale = int((time.monotonic() - self._live_hb) / 60)
+                self.log_event("warn", f"watchdog: live-цикл ST9 завис ({stale}м) — перезапуск")
+                t = self._task
+                if t is not None and not t.done():
+                    t.cancel()
+                    try:
+                        await t
+                    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                        pass
+                self._task = None
+                self.start_live()
+            except Exception as e:  # noqa: BLE001
+                self.log_event("warn", f"watchdog ST9 ошибка: {e}")
 
     def start_live(self) -> None:
         import asyncio

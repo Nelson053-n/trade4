@@ -282,3 +282,44 @@ def test_st9_entry_lots_real_cap():
     assert s._entry_lots(icfg, 9_000.0, 1.0) == 11     # 100к/9к, не 500к/9к (55)
     s.cfg.mode = "tbank_sandbox"
     assert s._entry_lots(icfg, 9_000.0, 1.0) == 55
+
+
+def test_entry_lots_rejects_bad_price():
+    """Битая цена (px<=0 / pv<=0) → 0 лотов (отказ), не 1 вслепую (иначе обход sanity)."""
+    from app.st9.service import St9Session
+    s = St9Session()
+    icfg = s.cfg.instruments[0]
+    assert s._entry_lots(icfg, 0, 1000) == 0       # px=0 → отказ
+    assert s._entry_lots(icfg, 100, 0) == 0        # pv=0 → отказ
+    assert s._entry_lots(icfg, 100, 1) > 0         # норма → лоты есть
+
+
+def test_watchdog_predicate():
+    """Watchdog-предикат: рестарт только когда live + застой > порога + биржа открыта."""
+    import time
+    from app.st9.service import St9Session
+    s = St9Session()
+    now = time.monotonic()
+    assert s._watchdog_should_restart(now) is False        # не live
+    s.state["live"] = True
+    s._live_hb = 0
+    assert s._watchdog_should_restart(now) is False        # ещё не было прохода
+    s._live_hb = now                                        # свежий проход
+    assert s._watchdog_should_restart(now) is False        # не завис
+
+
+def test_watchdog_stale_triggers_in_market_hours():
+    """Застой > порога в торговое время → рестарт (проверяем через прямой ts буднего дня)."""
+    import time
+    import datetime
+    from app.st9.service import St9Session
+    s = St9Session()
+    s.state["live"] = True
+    s._live_hb = time.monotonic() - 40 * 60      # завис 40 мин (порог 25)
+    # будний день, 12:00 МСК = основная сессия FORTS (live)
+    monday_noon = datetime.datetime(2026, 7, 13, 9, 0, tzinfo=datetime.timezone.utc)  # 12:00 МСК
+    ts = monday_noon.timestamp()
+    assert s._watchdog_should_restart(time.monotonic(), ts_sec=ts) is True
+    # тот же застой в выходной → не рестарт (баров нет легитимно)
+    sunday_noon = datetime.datetime(2026, 7, 12, 9, 0, tzinfo=datetime.timezone.utc)
+    assert s._watchdog_should_restart(time.monotonic(), ts_sec=sunday_noon.timestamp()) is False
