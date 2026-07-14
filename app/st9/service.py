@@ -487,9 +487,17 @@ class St9Session:
             p = eng.position
             pos = {"side": p.side, "entry": p.entry, "lots": p.lots,
                    "trail": round(p.trail, 2), "entry_ts": p.entry_ts}
+        # закрытые сделки этой оси в окне баров — для отрисовки вход→выход на графике
+        t_lo = out[0]["ts"] if out else 0
+        deals = [{"side": t.get("side"), "entry": t.get("entry"), "exit": t.get("exit"),
+                  "lots": t.get("lots"), "entry_ts": t.get("entry_ts"),
+                  "exit_ts": t.get("exit_ts"), "net_pnl_rub": t.get("net_pnl_rub"),
+                  "reason": t.get("reason")}
+                 for t in self.trades
+                 if t.get("secid") == secid and (t.get("exit_ts") or 0) >= t_lo]
         return {"secid": secid, "trade_secid": trade_sec,
                 "don": f"{n_in}/{n_out}", "interval_min": icfg.interval_min,
-                "bars": out, "position": pos}
+                "bars": out, "position": pos, "deals": deals}
 
     def flat_all(self) -> dict:
         """Паник-закрытие ВСЕХ открытых осей по рынку (штатно: ордер + журнал + save).
