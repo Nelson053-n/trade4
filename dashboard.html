@@ -1109,6 +1109,24 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
         <div id="s8-p-msg" style="font-size:11px;color:var(--ink-dim);margin-top:6px"></div>
       </div>
       <div class="card">
+        <h2>Настройки по бумаге <span class="em">оверрайд глобальных параметров для одного тикера</span></h2>
+        <div class="fld"><label>бумага</label>
+          <select id="s8-t-ticker"></select></div>
+        <div class="params">
+          <div class="fld"><label>вход за (торг. дней)</label><input id="s8-t-entry" type="number" min="1" max="30" step="1"></div>
+          <div class="fld"><label>выход за (дней)</label><input id="s8-t-exit" type="number" min="0" max="5" step="1"></div>
+          <div class="fld"><label>мин. дивдоходность (%)</label><input id="s8-t-yield" type="number" step="0.5"></div>
+          <div class="fld"><label>стоп-лосс (% нотионала)</label><input id="s8-t-stop" type="number" step="1"></div>
+          <div class="fld"><label>нотионал входа ₽</label><input id="s8-t-notional" type="number" min="1000" step="1000"></div>
+        </div>
+        <div class="ctrls" style="margin-top:10px">
+          <button id="s8-t-save" class="btn">сохранить бумагу</button>
+          <button id="s8-t-reset" class="btn">сбросить к глобалу</button>
+        </div>
+        <div id="s8-t-msg" style="font-size:11px;color:var(--ink-dim);margin-top:6px"></div>
+        <div class="note">пусто = глобальное значение (плейсхолдер серым); сохранение переопределяет только заполненные поля. «●» у тикера = есть оверрайд. «Сбросить к глобалу» снимает все оверрайды бумаги.</div>
+      </div>
+      <div class="card">
         <h2>Бумаги вселенной <span class="em">16 ядро + 4 опц.</span></h2>
         <div id="s8-tickers" style="font-size:11px;line-height:1.9"></div>
       </div>
@@ -2736,7 +2754,7 @@ function s7Init(){
 setInterval(s7Poll, 5000);
 
 // ── ST8 · дивидендный набег ──
-let _s8snap=null;
+let _s8snap=null, _s8tickerSel=null;
 async function s8api(path, method='GET', body=null){
   const o={method,headers:{}}; if(body){o.headers['Content-Type']='application/json'; o.body=JSON.stringify(body);}
   const r=await fetch('/st8'+path,o); if(!r.ok) throw new Error((await r.json().catch(()=>({}))).detail||r.status); return r.json();
@@ -2779,6 +2797,8 @@ function s8Render(s){
   setv('s8-p-yield',cfg.min_div_yield_pct); setv('s8-p-stop',cfg.stop_loss_pct);
   if(document.activeElement!==$('s8-p-july')) $('s8-p-july').checked=!!cfg.skip_july;
   if(document.activeElement!==$('s8-p-hedge')) $('s8-p-hedge').checked=!!cfg.hedge_imoexf;
+  // пер-тикер оверрайды
+  s8FillTickerParams(s);
   // вселенная бумаг
   const en=new Set(s.tickers_enabled||[]);
   const slp=new Set(s.sleeping||[]);
@@ -2942,6 +2962,38 @@ function s8DrawEventChart(series, row){
 }
 addEventListener('resize',()=>{ if(_s5strat==='st8'&&_s8eventRow) s8DrawEventChart(_s8chartCache[_s8eventRow.ticker+_s8eventRow.ex_date]||[], _s8eventRow); });
 
+// пер-тикер настройки: заполнить селектор + поля (оверрайд как value, глобал как placeholder)
+function s8FillTickerParams(s){
+  const sel=$('s8-t-ticker'); if(!sel) return;
+  const ov=s.ticker_overrides||{};
+  // вселенная бумаг: включённые, иначе union CORE+EXT+OPT
+  const CORE=['MOEX','BSPB','IRAO','ROSN','MRKC','MGNT','GMKN','TATN','SIBN','TATNP','MRKP','PLZL','MAGN','NLMK','BELU','PHOR'];
+  const OPT=['RTKM','PIKK','FEES','KZOS'];
+  const EXT=['SELG','LSNGP','LKOH','NVTK','ALRS'];
+  let ids=(s.tickers_enabled||[]).slice();
+  if(!ids.length) ids=CORE.concat(EXT,OPT);
+  ids=Array.from(new Set(ids)).sort();
+  // подпись опции: «● » если у тикера есть оверрайд
+  const label=t=>(ov[t]&&Object.keys(ov[t]).length)?(t+' ●'):t;
+  const sig=ids.map(t=>label(t)).join('|');
+  if(sel.dataset.sig!==sig){
+    sel.innerHTML=ids.map(t=>`<option value="${s4esc(t)}">${s4esc(label(t))}</option>`).join('');
+    sel.dataset.sig=sig;
+    if(_s8tickerSel && ids.includes(_s8tickerSel)) sel.value=_s8tickerSel; else _s8tickerSel=sel.value;
+  }
+  const tk=sel.value; if(!tk) return;
+  const g=s.strategy_cfg||{}, o=ov[tk]||{};
+  // если поле в фокусе — не трогаем (юзер печатает)
+  const put=(id,okey,gkey)=>{ const el=$(id); if(!el||document.activeElement===el) return;
+    const gv=g[gkey]; el.placeholder=(gv!=null?('глобал: '+gv):'глобал');
+    el.value=(o[okey]!=null?o[okey]:''); };
+  put('s8-t-entry','entry_days_before','entry_days_before');
+  put('s8-t-exit','exit_offset_days','exit_offset_days');
+  put('s8-t-yield','min_div_yield_pct','min_div_yield_pct');
+  put('s8-t-stop','stop_loss_pct','stop_loss_pct');
+  put('s8-t-notional','entry_notional_rub','entry_notional_rub');
+}
+
 function s8Init(){
   $('s8-trading').onclick=async()=>{ try{ const on=!(_s8snap&&_s8snap.trading_enabled); await s8api('/control/trading?on='+on,'POST'); s8Poll(); }catch(e){alert(e.message);} };
   $('s8-start').onclick=async()=>{ try{ await s8api('/control/start','POST'); s8Poll(); }catch(e){alert(e.message);} };
@@ -2960,6 +3012,34 @@ function s8Init(){
       skip_july:$('s8-p-july').checked, hedge_imoexf:$('s8-p-hedge').checked});
     $('s8-p-msg').textContent='сохранено'; s8Poll(); s8LoadCalendar();
   }catch(e){ $('s8-p-msg').textContent='ошибка: '+e.message; } };
+  // пер-тикер: смена бумаги в селекторе → перезаполнить поля из snapshot
+  $('s8-t-ticker').onchange=()=>{ _s8tickerSel=$('s8-t-ticker').value; if(_s8snap) s8FillTickerParams(_s8snap); };
+  // показать effective в msg
+  const s8TickEff=(e)=>'вход '+e.entry_days_before+'д · выход '+e.exit_offset_days+'д · дивдох ≥'+e.min_div_yield_pct
+    +'% · стоп '+e.stop_loss_pct+'% · нотионал '+e.entry_notional_rub+'₽';
+  // сохранить: только заполненные поля (пусто = не менять)
+  $('s8-t-save').onclick=async()=>{ try{
+    const tk=$('s8-t-ticker').value;
+    const body={ticker:tk};
+    const grab=(id,key)=>{ const v=$(id).value.trim(); if(v!=='') body[key]=+v; };
+    grab('s8-t-entry','entry_days_before'); grab('s8-t-exit','exit_offset_days');
+    grab('s8-t-yield','min_div_yield_pct'); grab('s8-t-stop','stop_loss_pct');
+    grab('s8-t-notional','entry_notional_rub');
+    if(Object.keys(body).length===1){ $('s8-t-msg').textContent='нет заполненных полей — нечего сохранять'; return; }
+    const r=await s8api('/ticker-config','POST',body);
+    $('s8-t-msg').textContent='сохранено '+s4esc(r.ticker)+': '+s8TickEff(r.effective);
+    s8Poll();
+  }catch(e){ $('s8-t-msg').textContent='ошибка: '+e.message; } };
+  // сбросить бумагу к глобалу: все 5 ключей = null (снять оверрайды)
+  $('s8-t-reset').onclick=async()=>{ try{
+    const tk=$('s8-t-ticker').value;
+    const r=await s8api('/ticker-config','POST',{ticker:tk, entry_days_before:null, exit_offset_days:null,
+      min_div_yield_pct:null, stop_loss_pct:null, entry_notional_rub:null});
+    // очистить поля, чтобы сразу показать глобал-плейсхолдеры
+    ['s8-t-entry','s8-t-exit','s8-t-yield','s8-t-stop','s8-t-notional'].forEach(id=>$(id).value='');
+    $('s8-t-msg').textContent='сброшено к глобалу '+s4esc(r.ticker)+': '+s8TickEff(r.effective);
+    s8Poll();
+  }catch(e){ $('s8-t-msg').textContent='ошибка: '+e.message; } };
 }
 setInterval(s8Poll, 8000);
 
