@@ -1904,6 +1904,13 @@ def st9_trading(on: bool = True):
     return {"ok": True, "trading_enabled": on}
 
 
+@app.post("/st9/control/reset-dd-halt")
+def st9_reset_dd_halt():
+    """Сброс стопа просадки капитала ST9 (оператор оценил просадку и решил продолжить).
+    Входы включать отдельно через /st9/control/trading."""
+    return _clean(ST9.reset_dd_halt())
+
+
 @app.post("/st9/tick")
 async def st9_tick():
     """Ручной тик: свежие 60м бары → сигналы → исполнение."""

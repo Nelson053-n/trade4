@@ -80,6 +80,8 @@ class St9Session:
         self._task = None
         self._live_hb = 0.0                            # monotonic последнего успешного прохода run_live (watchdog)
         self._watchdog_stale_min = 25                  # порог зависания цикла, мин (60м бары — редкие проходы)
+        self._capital_peak = 0.0                       # пик капитала для стопа просадки (плечо)
+        self._dd_halted = False                        # сработал стоп просадки капитала → блок входов
 
     def log_event(self, kind: str, message: str) -> None:
         self.events.append({"ts": int(time.time() * 1000), "kind": kind, "message": message})
@@ -213,10 +215,19 @@ class St9Session:
             # мусорной цене с непредсказуемым нотионалом. 0 лотов = вход не состоится.
             self.log_event("warn", f"{icfg.secid}: вход отклонён — битая цена px={px} pv={pv}")
             return 0
+        s = self.cfg.strategy
         target = icfg.entry_notional_rub
-        cap = getattr(self.cfg.strategy, "real_max_notional_rub", 0.0)
+        # режим утилизации капитала: нотионал от % капитала на число осей (плечо)
+        go_pct = getattr(s, "go_target_pct", 0.0)
+        if go_pct > 0 and self.capital_rub > 0:
+            go_frac = getattr(s, "go_frac", 0.044) or 0.044
+            n_axes = max(1, len(self.cfg.instruments))
+            # ГО на ось = капитал×go_pct%/N; нотионал = ГО / go_frac
+            go_per_axis = self.capital_rub * (go_pct / 100.0) / n_axes
+            target = go_per_axis / go_frac
+        cap = getattr(s, "real_max_notional_rub", 0.0)
         if self.cfg.mode == "tbank_real" and cap > 0:
-            target = min(target, cap)
+            target = min(target, cap)     # боевой потолок (пилот) поверх любого сайзинга
         return max(1, int(target / (px * pv)))
 
     def _apply_signal(self, eng: St9Engine, sig: dict, icfg) -> None:
@@ -395,6 +406,7 @@ class St9Session:
                 # прежний безусловный сброс убивал позицию после ролла (ревизия 11.07)
                 self.log_event("info", f"{icfg.secid}: прогрет ({len(fresh)} баров), старт flat")
         self.refresh_capital()
+        self._capital_dd_guard()          # предохранитель просадки капитала (плечо)
         self.last_tick_ts = int(time.time() * 1000)
         if time.time() - self._hb_ts > 3600:          # heartbeat: тики st9 тихие,
             self._hb_ts = time.time()                 # без него живость не видна
@@ -598,6 +610,41 @@ class St9Session:
                 "atr_mult": icfg.atr_mult, "entry_notional_rub": icfg.entry_notional_rub,
                 "applied_to_engine": eng is not None}
 
+    def _capital_dd_guard(self) -> None:
+        """ПРЕДОХРАНИТЕЛЬ при плече: стоп на просадку КАПИТАЛА от пика. Трейл каждой позы
+        не спасает от хвостового разворота всего портфеля с плечом — этот guard тормозит
+        на уровне счёта. При capital < peak×(1−pct/100): flat всех осей + блок входов
+        (trading_enabled=False). Сбрасывается вручную (оператор оценил и перезапустил)."""
+        pct = getattr(self.cfg.strategy, "capital_dd_stop_pct", 0.0)
+        if pct <= 0 or self.capital_rub <= 0:
+            return
+        self._capital_peak = max(self._capital_peak, self.capital_rub)
+        if self._dd_halted:
+            return
+        floor = self._capital_peak * (1 - pct / 100.0)
+        if self.capital_rub < floor:
+            dd = (1 - self.capital_rub / self._capital_peak) * 100
+            self._dd_halted = True
+            self.cfg.trading_enabled = False           # блок входов (выходы/flat живут)
+            self.log_event("warn", f"🚨 СТОП ПРОСАДКИ КАПИТАЛА: {dd:.1f}% от пика "
+                                   f"{self._capital_peak:.0f} (порог {pct}%) — flat всех осей, входы СТОП")
+            try:
+                self.flat_all()
+            except Exception as e:  # noqa: BLE001
+                self.log_event("warn", f"flat при стопе просадки не удался: {str(e)[:80]}")
+            self.save_session()
+
+    def reset_dd_halt(self) -> dict:
+        """Сброс стопа просадки капитала (оператор оценил и решил продолжить). Сбрасывает
+        halt + переустанавливает пик на текущий капитал (чтобы не сработал сразу снова).
+        Входы включаются отдельно (trading_enabled) — осознанно."""
+        self._dd_halted = False
+        self._capital_peak = self.capital_rub
+        self.log_event("info", f"стоп просадки сброшен (пик → {self.capital_rub:.0f})")
+        self.save_session()
+        return {"dd_halted": False, "capital_peak_rub": round(self._capital_peak),
+                "trading_enabled": self.cfg.trading_enabled}
+
     def refresh_capital(self) -> None:
         if self.cfg.mode not in ("tbank_sandbox", "tbank_real") or not self.cfg.account_id:
             return
@@ -715,6 +762,11 @@ class St9Session:
             "trades_tail": self.trades[-20:],
             "last_tick_ts": self.last_tick_ts,
             "capital_rub": round(self.capital_rub) or None,
+            # утилизация капитала / плечо и предохранитель просадки (наблюдаемость)
+            "go_target_pct": self.cfg.strategy.go_target_pct,
+            "capital_dd_stop_pct": self.cfg.strategy.capital_dd_stop_pct,
+            "capital_peak_rub": round(self._capital_peak) or None,
+            "dd_halted": self._dd_halted,
             "events": self.events[-20:],
         }
 
@@ -749,6 +801,7 @@ class St9Session:
                     "exec_anchor": self.exec_anchor,
                     "contracts": self.contracts,
                     "axis_overrides": self.axis_overrides,
+                    "capital_peak": self._capital_peak, "dd_halted": self._dd_halted,
                     "positions": pos}
             self._session_file.write_text(json.dumps(data, ensure_ascii=False))
         except Exception:  # noqa: BLE001
@@ -782,6 +835,10 @@ class St9Session:
             except Exception:  # noqa: BLE001
                 pass
         # пер-ось оверрайды параметров поверх кодового реестра (переживают рестарт)
+        # стоп просадки капитала ПЕРЕЖИВАЕТ рестарт (иначе halt снялся бы молча и входы
+        # возобновились в просадке); сбрасывается только явным reset_dd_halt оператором
+        self._capital_peak = float(d.get("capital_peak") or 0.0)
+        self._dd_halted = bool(d.get("dd_halted"))
         self.axis_overrides = dict(d.get("axis_overrides") or {})
         for i in self.cfg.instruments:
             ov = self.axis_overrides.get(i.secid)

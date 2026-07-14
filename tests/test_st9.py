@@ -323,3 +323,49 @@ def test_watchdog_stale_triggers_in_market_hours():
     # тот же застой в выходной → не рестарт (баров нет легитимно)
     sunday_noon = datetime.datetime(2026, 7, 12, 9, 0, tzinfo=datetime.timezone.utc)
     assert s._watchdog_should_restart(time.monotonic(), ts_sec=sunday_noon.timestamp()) is False
+
+
+def test_sizing_by_capital_pct():
+    """Сайзинг go_target_pct: нотионал от % капитала на число осей (плечо). 0 = старый режим."""
+    from app.st9.service import St9Session
+    s = St9Session()
+    s.capital_rub = 500_000
+    icfg = s.cfg.instruments[0]
+    # выкл → по entry_notional_rub (100к / цена)
+    s.cfg.strategy.go_target_pct = 0.0
+    assert s._entry_lots(icfg, 77, 1000) == 1
+    # 15% капитала на 3 оси, go_frac 0.044 → нотионал ~570к/ось
+    s.cfg.strategy.go_target_pct = 15.0
+    lots = s._entry_lots(icfg, 77, 1000)
+    notional = lots * 77 * 1000
+    assert 450_000 < notional < 650_000     # порядок ~570к (округление лотов)
+
+
+def test_capital_dd_guard():
+    """Стоп просадки капитала: пик отслеживается, при пробое порога — flat + блок входов."""
+    from app.st9.service import St9Session
+    s = St9Session()
+    s.cfg.strategy.capital_dd_stop_pct = 15.0
+    s.cfg.trading_enabled = True
+    s.capital_rub = 500_000
+    s._capital_dd_guard()
+    assert s._capital_peak == 500_000 and s._dd_halted is False
+    s.capital_rub = 450_000        # DD 10% < 15% — не срабатывает
+    s._capital_dd_guard()
+    assert s._dd_halted is False and s.cfg.trading_enabled is True
+    s.capital_rub = 420_000        # DD 16% > 15% — срабатывает
+    s._capital_dd_guard()
+    assert s._dd_halted is True and s.cfg.trading_enabled is False
+
+
+def test_capital_dd_guard_off_by_default():
+    """Guard выключен при capital_dd_stop_pct=0 (не мешает старому режиму)."""
+    from app.st9.service import St9Session
+    s = St9Session()
+    s.cfg.strategy.capital_dd_stop_pct = 0.0
+    s.cfg.trading_enabled = True
+    s.capital_rub = 100_000
+    s._capital_dd_guard()
+    s.capital_rub = 10_000         # −90%, но guard выключен
+    s._capital_dd_guard()
+    assert s._dd_halted is False and s.cfg.trading_enabled is True
