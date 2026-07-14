@@ -72,6 +72,7 @@ class St9Session:
         self._bars_contract: dict[str, str] = {}      # asset -> контракт, чьи бары в движке
         self._pending_positions: dict[str, dict] = {}  # позиции session, ждущие движка (pv)
         self.contracts: dict[str, str] = {}           # asset -> контракт ОТКРЫТОЙ позиции (персист)
+        self.axis_overrides: dict[str, dict] = {}      # secid -> {don_enter,don_exit,atr_mult,notional} (персист поверх кода)
         self.capital_rub: float = 0.0
         self.exec_anchor: dict | None = None
         self.last_tick_ts: int = 0                    # мс; наблюдаемость живости цикла
@@ -540,6 +541,57 @@ class St9Session:
         self.save_session()
         return {"ok": True, "closed": closed, "partial": partial}
 
+    def update_axis(self, secid: str, params: dict) -> dict:
+        """Пер-ось настройки: don_enter/don_exit/atr_mult/entry_notional_rub.
+        Сигнальные параметры (don/atr) меняются ТОЛЬКО когда ось flat — иначе смена
+        трейла/окна на открытой позиции даёт рассинхрон с уже открытой ставкой.
+        Нотионал можно менять всегда (влияет лишь на будущий сайзинг)."""
+        icfg = next((i for i in self.cfg.instruments if i.secid == secid), None)
+        if icfg is None:
+            raise ValueError(f"неизвестная ось {secid}")
+        eng = self.engines.get(secid)
+        in_pos = eng is not None and eng.position is not None
+        signal_keys = ("don_enter", "don_exit", "atr_mult")
+        wants_signal = any(k in params and params[k] is not None for k in signal_keys)
+        if wants_signal and in_pos:
+            raise ValueError(f"{secid} в позиции — параметры сигналов меняются только на flat")
+
+        def _num(key, lo, hi, cur, cast=float):
+            if key not in params or params[key] is None:
+                return cur
+            v = cast(params[key])
+            if not (lo <= v <= hi):
+                raise ValueError(f"{key}: вне [{lo}, {hi}]")
+            return v
+
+        icfg.don_enter = _num("don_enter", 2, 200, icfg.don_enter, int)
+        icfg.don_exit = _num("don_exit", 1, 200, icfg.don_exit, int)
+        icfg.atr_mult = _num("atr_mult", 0.5, 10.0, icfg.atr_mult, float)
+        icfg.entry_notional_rub = _num("entry_notional_rub", 1000, 100_000_000,
+                                       icfg.entry_notional_rub, float)
+        # оверрайд для персиста: instruments перечитываются из КОДА при рестарте
+        # (реестр осей из кода, ловушка 09.07 с GAZR) — параметры храним отдельно и
+        # накладываем поверх кодового реестра при load_session
+        self.axis_overrides[secid] = {
+            "don_enter": icfg.don_enter, "don_exit": icfg.don_exit,
+            "atr_mult": icfg.atr_mult, "entry_notional_rub": icfg.entry_notional_rub}
+        # применить к живому движку (если создан): обновить поля + расширить буфер баров
+        if eng is not None:
+            eng.don_enter = icfg.don_enter
+            eng.don_exit = icfg.don_exit
+            eng.atr_mult = icfg.atr_mult
+            need = max(icfg.don_enter, icfg.don_exit, eng.atr_period) + 2
+            if eng.bars.maxlen < need + 60:            # окно выросло — расширить deque
+                from collections import deque as _dq
+                eng.bars = _dq(eng.bars, maxlen=need + 60)
+        self.log_event("info", f"{secid}: параметры обновлены "
+                               f"(Donchian {icfg.don_enter}/{icfg.don_exit}, "
+                               f"ATR×{icfg.atr_mult}, нотионал {int(icfg.entry_notional_rub)})")
+        self.save_session()
+        return {"secid": secid, "don_enter": icfg.don_enter, "don_exit": icfg.don_exit,
+                "atr_mult": icfg.atr_mult, "entry_notional_rub": icfg.entry_notional_rub,
+                "applied_to_engine": eng is not None}
+
     def refresh_capital(self) -> None:
         if self.cfg.mode not in ("tbank_sandbox", "tbank_real") or not self.cfg.account_id:
             return
@@ -646,6 +698,7 @@ class St9Session:
                     "state": self.state, "last_bar_ts": self._last_bar_ts,
                     "exec_anchor": self.exec_anchor,
                     "contracts": self.contracts,
+                    "axis_overrides": self.axis_overrides,
                     "positions": pos}
             self._session_file.write_text(json.dumps(data, ensure_ascii=False))
         except Exception:  # noqa: BLE001
@@ -678,6 +731,19 @@ class St9Session:
                 self.cfg.instruments = St9Config().instruments
             except Exception:  # noqa: BLE001
                 pass
+        # пер-ось оверрайды параметров поверх кодового реестра (переживают рестарт)
+        self.axis_overrides = dict(d.get("axis_overrides") or {})
+        for i in self.cfg.instruments:
+            ov = self.axis_overrides.get(i.secid)
+            if ov:
+                if "don_enter" in ov:
+                    i.don_enter = int(ov["don_enter"])
+                if "don_exit" in ov:
+                    i.don_exit = int(ov["don_exit"])
+                if "atr_mult" in ov:
+                    i.atr_mult = float(ov["atr_mult"])
+                if "entry_notional_rub" in ov:
+                    i.entry_notional_rub = float(ov["entry_notional_rub"])
         # миграция после фикса частичных баров 11.07: маркер, указывающий на НЕЗАКРЫТЫЙ
         # период (частичный бар успел обработаться), откатываем на 1мс — завершённая
         # версия бара переобработается, бэкфилл её не включит (bars ≤ last)

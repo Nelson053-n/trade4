@@ -1199,6 +1199,21 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
       </div>
 
       <div class="card">
+        <h2>Параметры осей <span class="em">Donchian/ATR/нотионал по инструменту</span></h2>
+        <div class="fld"><label>ось</label>
+          <select id="s9-p-axis"></select></div>
+        <div class="params">
+          <div class="fld"><label>Donchian вход</label><input id="s9-p-donin" type="number" min="2" max="200" step="1"></div>
+          <div class="fld"><label>Donchian выход</label><input id="s9-p-donout" type="number" min="1" max="200" step="1"></div>
+          <div class="fld"><label>ATR множитель</label><input id="s9-p-atr" type="number" min="0.5" max="10" step="0.1"></div>
+          <div class="fld"><label>нотионал ₽</label><input id="s9-p-notional" type="number" min="1000" step="1000"></div>
+        </div>
+        <button id="s9-p-save" class="btn" style="margin-top:10px">сохранить параметры оси</button>
+        <div id="s9-p-msg" style="font-size:11px;color:var(--ink-dim);margin-top:6px"></div>
+        <div class="note">Donchian/ATR меняются только когда ось flat (нет открытой позиции). Нотионал — всегда. Параметры переживают рестарт.</div>
+      </div>
+
+      <div class="card">
         <h2>Операции счёта <span class="em">истина: сделки и вар.маржа со счёта</span></h2>
         <div class="ledger" id="s9-ledger"></div>
         <div class="note">открытие позиции (9× продажа по 1 лоту) и вар.маржа живут только на счёте — журнал пишется лишь при закрытии. Лента показывает фактические операции.</div>
@@ -2978,6 +2993,9 @@ function s9Render(s){
   $('s9-armed-note').textContent = s.real_trading_armed?'Взведён — боевые ордера разрешены.':'Сейчас выключено.';
   $('s9-status-txt').textContent = 'Трендовая корзина — '+inst.length+' осей, открытых позиций '+openN;
 
+  // селектор осей для параметров + заполнение полей (если не в фокусе)
+  s9FillAxisParams(inst);
+
   // KPI (капитал искажён шортом → кэш/вар.маржа из ledger приоритетны, заполняются в s9Ledger)
   const setK=(id,txt,pos)=>{ const el=$(id); if(!el)return; el.textContent=txt; el.classList.toggle('pos',pos===1); el.classList.toggle('neg',pos===-1); };
   setK('s9-k-net', (netv>=0?'+':'')+s9num(netv)+' ₽', netv>0?1:(netv<0?-1:0));
@@ -3195,6 +3213,24 @@ async function s9Poll(){ if(_s5strat!=='st9') return;
   if((_s9ledgerTick++%4)===0) s9Ledger();
   s9DrawChart();
 }
+// селектор осей + поля параметров (заполняются из snapshot, если не в фокусе)
+let _s9axisSel=null;
+function s9FillAxisParams(inst){
+  const sel=$('s9-p-axis'); if(!sel) return;
+  const ids=inst.map(a=>a.secid);
+  // построить опции один раз (или при смене состава осей)
+  if(sel.options.length!==ids.length || Array.from(sel.options).some((o,i)=>o.value!==ids[i])){
+    sel.innerHTML=ids.map(id=>`<option value="${s4esc(id)}">${s4esc(id)}</option>`).join('');
+    if(_s9axisSel && ids.includes(_s9axisSel)) sel.value=_s9axisSel; else _s9axisSel=sel.value;
+  }
+  const cur=inst.find(a=>a.secid===sel.value); if(!cur) return;
+  // don приходит строкой "20/10" — разложить; notional_rub есть; atr_mult отдельно
+  const [di,doo]=(cur.don||'').split('/');
+  const setv=(id,v)=>{ const el=$(id); if(el && document.activeElement!==el && v!=null) el.value=v; };
+  setv('s9-p-donin', di); setv('s9-p-donout', doo);
+  setv('s9-p-atr', cur.atr_mult); setv('s9-p-notional', cur.notional_rub);
+}
+
 function s9Init(){
   $('s9-start').onclick=async()=>{ try{ await s9api('/control/start','POST'); s9Poll(); }catch(e){alert(e.message);} };
   $('s9-stop').onclick=async()=>{ try{ await s9api('/control/stop','POST'); s9Poll(); }catch(e){alert(e.message);} };
@@ -3206,6 +3242,16 @@ function s9Init(){
     if($('s9-c-tok').value.trim()) body.account_token=$('s9-c-tok').value.trim();
     await s9api('/connector','POST',body); $('s9-c-msg').textContent='применено'; $('s9-c-tok').value=''; s9Poll();
   }catch(e){ $('s9-c-msg').textContent='ошибка: '+e.message; } };
+  // параметры осей: смена оси в селекторе → перезаполнить поля из snapshot
+  $('s9-p-axis').onchange=()=>{ _s9axisSel=$('s9-p-axis').value; if(_s9snap) s9FillAxisParams(_s9snap.instruments||[]); };
+  $('s9-p-save').onclick=async()=>{ try{
+    const body={secid:$('s9-p-axis').value,
+      don_enter:+$('s9-p-donin').value, don_exit:+$('s9-p-donout').value,
+      atr_mult:+$('s9-p-atr').value, entry_notional_rub:+$('s9-p-notional').value};
+    const r=await s9api('/axis-config','POST',body);
+    $('s9-p-msg').textContent='сохранено: '+s4esc(r.secid)+' Donchian '+r.don_enter+'/'+r.don_exit+' ATR×'+r.atr_mult;
+    s9Poll();
+  }catch(e){ $('s9-p-msg').textContent='ошибка: '+e.message; } };
 }
 addEventListener('resize',()=>{ if(_s5strat==='st9') s9DrawChart(); });
 setInterval(s9Poll, 8000);

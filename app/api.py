@@ -1848,6 +1848,19 @@ async def st9_price_series(secid: str, days_back: int = 20):
     return _clean(await asyncio.to_thread(ST9.price_series, secid, days_back))
 
 
+@app.post("/st9/axis-config")
+def st9_axis_config(payload: dict):
+    """Пер-ось настройки: don_enter/don_exit/atr_mult/entry_notional_rub по secid.
+    Сигнальные параметры (don/atr) меняются только когда ось flat. Переживают рестарт."""
+    secid = payload.get("secid")
+    if not secid:
+        raise HTTPException(400, "нужен secid")
+    try:
+        return _clean(ST9.update_axis(str(secid), payload))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 @app.post("/st9/control/start")
 async def st9_start():
     ST9.start_live()
