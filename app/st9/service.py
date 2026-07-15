@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -84,6 +85,11 @@ class St9Session:
         self._dd_halted = False                        # сработал стоп просадки капитала → блок входов
         self.capital_sizing_rub = 0.0                  # ЧЕСТНЫЙ капитал (money+ГО) для сайзинга плеча
         self._go_lot_cache: dict[tuple, float] = {}    # (sec,side) -> ГО на лот (кэш, прогрев зовёт часто)
+        self._dd_breach_count = 0                      # подтверждение просадки (2 тика подряд, против битого чтения)
+        # RLock: tick (в потоке через to_thread) и мутирующие HTTP-эндпоинты (flat_all/
+        # update_axis/update_strategy) не должны пересекаться на движках/позициях (аудит #5:
+        # гонка → двойное закрытие). Reentrant — guard внутри tick зовёт flat_all.
+        self._lock = threading.RLock()
 
     def log_event(self, kind: str, message: str) -> None:
         self.events.append({"ts": int(time.time() * 1000), "kind": kind, "message": message})
@@ -265,6 +271,10 @@ class St9Session:
             return None
 
     def _apply_signal(self, eng: St9Engine, sig: dict, icfg) -> None:
+        with self._lock:                # против гонки с flat_all/update_* из HTTP (аудит #5)
+            self._apply_signal_locked(eng, sig, icfg)
+
+    def _apply_signal_locked(self, eng: St9Engine, sig: dict, icfg) -> None:
         ts = int(time.time() * 1000)
         sec = self._trade_secid(icfg)
         try:
@@ -557,6 +567,10 @@ class St9Session:
         В отличие от ручного скрипта делает И eng.close() И self.trades.append() — журнал
         не теряет запись. Закрытие на контракте ОТКРЫТИЯ (self.contracts) для квартальников.
         Гейт ордера (armed/cooldown в tbank_real) работает как в tick — flat не в обход."""
+        with self._lock:                # против гонки с tick (двойное закрытие, аудит #5)
+            return self._flat_all_locked()
+
+    def _flat_all_locked(self) -> dict:
         from ..st4 import tbank_sandbox as sb
         ts = int(time.time() * 1000)
         closed, partial = [], []
@@ -598,6 +612,10 @@ class St9Session:
         Сигнальные параметры (don/atr) меняются ТОЛЬКО когда ось flat — иначе смена
         трейла/окна на открытой позиции даёт рассинхрон с уже открытой ставкой.
         Нотионал можно менять всегда (влияет лишь на будущий сайзинг)."""
+        with self._lock:                # пересоздание движка не должно пересечься с tick
+            return self._update_axis_locked(secid, params)
+
+    def _update_axis_locked(self, secid: str, params: dict) -> dict:
         icfg = next((i for i in self.cfg.instruments if i.secid == secid), None)
         if icfg is None:
             raise ValueError(f"неизвестная ось {secid}")
@@ -654,21 +672,38 @@ class St9Session:
         cap = self.capital_sizing_rub or self.capital_rub
         if pct <= 0 or cap <= 0:
             return
-        self._capital_peak = max(self._capital_peak, cap)
+        # защита пика от АНОМАЛЬНОГО ВЫБРОСА (аудит #7): единичный битый cap (сбой API вернул
+        # мусор) навсегда подтянул бы пик вверх (max монотонен) → floor завышен → стоп НЕ
+        # сработает при реальной просадке. Пик не растёт скачком >15% за тик (капитал при
+        # плече 3× физически не может так прыгнуть мгновенно) — аномалию игнорируем.
+        if self._capital_peak > 0 and cap > self._capital_peak * 1.15:
+            self.log_event("warn", f"капитал скакнул аномально ({cap:.0f} vs пик "
+                                   f"{self._capital_peak:.0f}) — пик НЕ обновлён (защита стопа)")
+        else:
+            self._capital_peak = max(self._capital_peak, cap)
         if self._dd_halted:
             return
         floor = self._capital_peak * (1 - pct / 100.0)
-        if cap < floor:
-            dd = (1 - cap / self._capital_peak) * 100
-            self._dd_halted = True
-            self.cfg.trading_enabled = False           # блок входов (выходы/flat живут)
-            self.log_event("warn", f"🚨 СТОП ПРОСАДКИ КАПИТАЛА: {dd:.1f}% от пика "
-                                   f"{self._capital_peak:.0f} (порог {pct}%) — flat всех осей, входы СТОП")
-            try:
-                self.flat_all()
-            except Exception as e:  # noqa: BLE001
-                self.log_event("warn", f"flat при стопе просадки не удался: {str(e)[:80]}")
-            self.save_session()
+        if cap >= floor:
+            self._dd_breach_count = 0                  # просадки нет — сброс счётчика
+            return
+        # ПОДТВЕРЖДЕНИЕ: требуем просадку 2 тика ПОДРЯД, иначе единичное битое чтение cap
+        # (сбой API вернул заниженное) ложно закрыло бы все позиции с плечом (аудит #7).
+        self._dd_breach_count += 1
+        if self._dd_breach_count < 2:
+            self.log_event("warn", f"капитал ниже порога ({cap:.0f} < {floor:.0f}) — "
+                                   f"ждём подтверждения (тик {self._dd_breach_count}/2)")
+            return
+        dd = (1 - cap / self._capital_peak) * 100
+        self._dd_halted = True
+        self.cfg.trading_enabled = False               # блок входов (выходы/flat живут)
+        self.log_event("warn", f"🚨 СТОП ПРОСАДКИ КАПИТАЛА: {dd:.1f}% от пика "
+                               f"{self._capital_peak:.0f} (порог {pct}%) — flat всех осей, входы СТОП")
+        try:
+            self.flat_all()
+        except Exception as e:  # noqa: BLE001
+            self.log_event("warn", f"flat при стопе просадки не удался: {str(e)[:80]}")
+        self.save_session()
 
     def update_strategy(self, params: dict) -> dict:
         """Strategy-level параметры ST9: плечо (go_target_pct) и стоп просадки капитала

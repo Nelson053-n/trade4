@@ -342,7 +342,7 @@ def test_sizing_by_capital_pct():
 
 
 def test_capital_dd_guard():
-    """Стоп просадки капитала: пик отслеживается, при пробое порога — flat + блок входов."""
+    """Стоп просадки капитала: пик отслеживается, при пробое порога 2 тика подряд — flat + блок."""
     from app.st9.service import St9Session
     s = St9Session()
     s.cfg.strategy.capital_dd_stop_pct = 15.0
@@ -353,9 +353,40 @@ def test_capital_dd_guard():
     s.capital_rub = 450_000        # DD 10% < 15% — не срабатывает
     s._capital_dd_guard()
     assert s._dd_halted is False and s.cfg.trading_enabled is True
-    s.capital_rub = 420_000        # DD 16% > 15% — срабатывает
+    s.capital_rub = 420_000        # DD 16% > 15% — 1-й тик: ждём подтверждения
     s._capital_dd_guard()
+    assert s._dd_halted is False   # ещё не сработал (1/2)
+    s._capital_dd_guard()          # 2-й тик подряд — срабатывает
     assert s._dd_halted is True and s.cfg.trading_enabled is False
+
+
+def test_capital_dd_guard_ignores_anomaly_spike():
+    """Пик НЕ подтягивается аномальным выбросом капитала (защита стопа)."""
+    from app.st9.service import St9Session
+    s = St9Session()
+    s.cfg.strategy.capital_dd_stop_pct = 15.0
+    s.capital_rub = 500_000
+    s._capital_dd_guard()
+    assert s._capital_peak == 500_000
+    s.capital_rub = 700_000        # +40% скачок (аномалия, сбой API)
+    s._capital_dd_guard()
+    assert s._capital_peak == 500_000   # пик НЕ обновлён
+
+
+def test_capital_dd_guard_single_bad_read_no_flat():
+    """Единичное битое чтение вниз (1 тик) НЕ закрывает позиции — нужно 2 подтверждения."""
+    from app.st9.service import St9Session
+    s = St9Session()
+    s.cfg.strategy.capital_dd_stop_pct = 15.0
+    s.cfg.trading_enabled = True
+    s.capital_rub = 500_000
+    s._capital_dd_guard()
+    s.capital_rub = 400_000        # −20% (битое чтение)
+    s._capital_dd_guard()
+    assert s._dd_halted is False   # 1 тик — не флэтим
+    s.capital_rub = 500_000        # вернулось (было битое)
+    s._capital_dd_guard()
+    assert s._dd_halted is False and s._dd_breach_count == 0   # счётчик сброшен
 
 
 def test_capital_dd_guard_off_by_default():
@@ -432,3 +463,19 @@ def test_sizing_go_fallback_when_api_down():
     icfg = s.cfg.instruments[0]
     lots = s._entry_lots(icfg, 77, 1000, side="long")
     assert lots >= 1                             # фолбэк сработал, вход возможен
+
+
+def test_lock_reentrant_guard_flat():
+    """RLock реентерабелен: guard внутри tick зовёт flat_all — не дедлочит."""
+    from app.st9.service import St9Session
+    s = St9Session()
+    s.cfg.strategy.capital_dd_stop_pct = 15.0
+    s.cfg.trading_enabled = True
+    s.capital_rub = 500_000
+    s._capital_dd_guard()
+    s.capital_rub = 400_000
+    # два тика подряд → guard вызовет flat_all (берёт тот же RLock) — не должно зависнуть
+    with s._lock:                      # имитируем tick, держащий lock
+        s._capital_dd_guard()
+        s._capital_dd_guard()
+    assert s._dd_halted is True         # сработало без дедлока

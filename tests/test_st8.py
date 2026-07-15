@@ -834,3 +834,28 @@ def test_entry_rejected_without_imoexf_quote():
     # при наличии котировки — не голая
     s.hedge_px = 2800.0
     assert (s.cfg.strategy.hedge_imoexf and not s.hedge_px) is False
+
+
+def test_per_ticker_notional_priority_over_cash_pct():
+    """Per-ticker entry_notional_rub имеет приоритет над глобальным cash_pct (аудит #7)."""
+    from app.st8.service import St8Session
+    s = St8Session()
+    s.cfg.strategy.sizing_mode = "cash_pct"
+    s.cfg.strategy.entry_cash_pct = 25.0
+    # тикер с оверрайдом нотионала
+    s.update_ticker("ROSN", {"entry_notional_rub": 50_000})
+    # ROSN: должен использовать 50к (оверрайд), НЕ cash_pct
+    lots_rosn = s._position_lots(500.0, 1.0, "ROSN")
+    assert lots_rosn == 100          # 50000/500 = 100 (оверрайд применён)
+    # тикер без оверрайда — cash_pct (зависит от free_cash, проверяем что не 50к-логика)
+    # (в paper free_cash_rub может быть 0 → fallback на глобал entry_notional_rub)
+
+
+def test_position_has_stuck_counter():
+    """St8Position имеет счётчик застревания остатка (эскалация голой ноги)."""
+    from app.st8.engine import St8Position
+    p = St8Position(ticker="ROSN", entry_date="2026-10-01", ex_date="2026-10-15",
+                    lots=5, stock_entry=500.0, side="long")
+    assert p.stuck_ticks == 0
+    p.stuck_ticks += 1
+    assert p.stuck_ticks == 1

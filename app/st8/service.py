@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 import urllib.request
 from datetime import date, datetime, timedelta, timezone
@@ -136,6 +137,9 @@ class St8Session:
         self.events: list[dict] = []
         self.enabled = {tk: (tk in ST8_CORE or tk in ST8_EXTENDED) for tk in ST8_TICKERS}  # ядро+расширение вкл, опц. выкл
         self.ticker_overrides: dict[str, dict] = {}  # tk -> {entry_days_before,exit_offset_days,min_div_yield_pct,stop_loss_pct,entry_notional_rub} (персист, поверх глобала)
+        # RLock: tick и flat_all/update_ticker (все через to_thread → реальные потоки) не должны
+        # пересекаться на движках/позициях (аудит #10: гонка → двойное закрытие). Reentrant.
+        self._lock = threading.RLock()
         self.state = {"live": False, "live_intent": False}
         self.signal_view: dict[str, dict] = {}
         self._session_file = Path(__file__).resolve().parent.parent.parent / "session_state_8.json"
@@ -198,6 +202,10 @@ class St8Session:
         stop_loss_pct/entry_notional_rub поверх глобала. Переживает рестарт. Значение None
         или отсутствие ключа снимает оверрайд (возврат к глобалу). Пересоздаёт движок,
         сохраняя открытую позицию (событийная стратегия — параметры влияют на будущие входы)."""
+        with self._lock:                # пересоздание движка не должно пересечься с tick
+            return self._update_ticker_locked(tk, params)
+
+    def _update_ticker_locked(self, tk: str, params: dict) -> dict:
         if tk not in ST8_TICKERS:
             raise ValueError(f"неизвестный тикер {tk}")
         ranges = {"entry_days_before": (1, 30, int), "exit_offset_days": (0, 5, int),
@@ -445,10 +453,16 @@ class St8Session:
         tk задан → per-ticker entry_notional_rub (калибровка размера под эмитент)."""
         s = self.cfg.strategy
         target = 0.0
-        if s.sizing_mode == "cash_pct" and s.entry_cash_pct > 0:
+        # per-ticker entry_notional_rub имеет ПРИОРИТЕТ над глобальным cash_pct: если оператор
+        # явно задал нотионал для тикера, он не должен молча игнорироваться в cash_pct-режиме
+        # (аудит #7). Оверрайд только этого тикера, не глобальный дефолт.
+        ov = tk and self.ticker_overrides.get(tk, {}).get("entry_notional_rub")
+        if ov:
+            target = float(ov)
+        elif s.sizing_mode == "cash_pct" and s.entry_cash_pct > 0:
             target = self.free_cash_rub() * s.entry_cash_pct / 100.0
         if target <= 0:
-            target = self._p(tk, "entry_notional_rub") if tk else s.entry_notional_rub
+            target = s.entry_notional_rub
         cap = getattr(s, "real_max_notional_rub", 0.0)
         if self.cfg.mode == "tbank_real" and cap > 0:
             target = min(target, cap)      # боевой лимит объёма (пилот — малый размер)
@@ -561,7 +575,13 @@ class St8Session:
 
     def tick(self) -> dict:
         """Один daily-тик: скан дивидендов → котировки → для каждой бумаги проверить
-        вход (ex−N) / выход (ex−1 или стоп) → исполнить. Возвращает сводку действий."""
+        вход (ex−N) / выход (ex−1 или стоп) → исполнить. Возвращает сводку действий.
+        Под lock: не пересекаться с flat_all/update_ticker из HTTP (гонка, аудит #10).
+        ST8 событийный (раз в час) — блокировка на время тика приемлема."""
+        with self._lock:
+            return self._tick_locked()
+
+    def _tick_locked(self) -> dict:
         today = date.today().isoformat()
         acted = {"entered": [], "exited": [], "missed": 0}
         # календарь перезагружаем раз в день (проекция будущего в списке всегда «свежее»
@@ -656,13 +676,26 @@ class St8Session:
                     if s_closed < req_lots or (req_hedge > 0 and h_closed < req_hedge):
                         eng.position.lots = max(0, req_lots - s_closed)
                         eng.position.hedge_lots = max(0, req_hedge - h_closed)
+                        eng.position.stuck_ticks += 1
+                        naked = eng.position.lots == 0 and eng.position.hedge_lots > 0
                         self.log_event("warn", f"{tk}: 🚨 частичный выход — закрыто акция {s_closed}/"
-                                               f"{req_lots}, хедж {h_closed}/{req_hedge}; остаток ведём, "
-                                               f"выход повторится следующим тиком")
+                                               f"{req_lots}, хедж {h_closed}/{req_hedge}; остаток ведём "
+                                               f"(тик {eng.position.stuck_ticks})")
+                        # ЭСКАЛАЦИЯ (аудит #1/#5): остаток висит >=3 тиков или голая хедж-нога
+                        # (акция закрыта, хедж застрял = чистый шорт IMOEXF) → громкий алерт,
+                        # иначе застрявшая нога тихо теряется из events (кольцо 60).
+                        if eng.position.stuck_ticks >= 3 or naked:
+                            self.log_event("error", f"{tk}: 🚨🚨 ЗАСТРЯВШИЙ ОСТАТОК {eng.position.stuck_ticks} "
+                                                    f"тиков — акция {eng.position.lots}, хедж "
+                                                    f"{eng.position.hedge_lots}"
+                                                    f"{' (ГОЛАЯ хедж-нога!)' if naked else ''}; "
+                                                    f"нужен ручной flat/reconcile")
                         if eng.position.lots == 0 and eng.position.hedge_lots == 0:
                             eng.position = None   # всё же закрылось до нуля — обнулить
                         self.save_session()
                         continue
+                    if eng.position:
+                        eng.position.stuck_ticks = 0   # полное закрытие — сброс счётчика
                     tr = eng.close(today, close_px, self.hedge_px or eng.position.hedge_entry, reason)
                     self.trades.append(_trade_dict(tr))
                     acted["exited"].append(tk)
@@ -980,6 +1013,10 @@ class St8Session:
         Лонг → продать акцию + откупить хедж IMOEXF (close); шорт → выкупить (close_short).
         Воспроизводит выход из tick, но без гейтов плана/окна — закрываем немедленно.
         Best-effort по котировке исполнителя; при её отсутствии ось пропускаем (не фиктивим)."""
+        with self._lock:                # против гонки с tick (двойное закрытие, аудит #10)
+            return self._flat_all_locked()
+
+    def _flat_all_locked(self) -> dict:
         closed, skipped = [], []
         today = date.today().isoformat()
         for tk in ST8_TICKERS:
