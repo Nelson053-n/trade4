@@ -627,12 +627,17 @@ class St8Session:
                     # закрываем всё равно (риск важнее точности), пометив недостоверность.
                     hedge_active = (not is_short) and eng.position.hedge_lots > 0
                     if hedge_active and self.hedge_px is None:
-                        if planned and not stop and not overdue:
+                        # откладываем ТОЛЬКО пока не достигли ex-date (есть запас времени).
+                        # После ex-date держать сквозь гэп хуже недостоверного P&L хеджа —
+                        # форсируем выход (аудит 15.07: иначе устойчивый сбой IMOEXF = вечное
+                        # залипание планового лонга сквозь дивгэп).
+                        before_ex = today < eng.position.ex_date
+                        if planned and not stop and not overdue and before_ex:
                             self.log_event("warn", f"{tk}: плановый выход отложен — нет котировки "
-                                                   f"IMOEXF (P&L хеджа был бы фиктивным)")
+                                                   f"IMOEXF (есть запас до ex {eng.position.ex_date})")
                             continue
-                        self.log_event("warn", f"{tk}: 🚨 выход по стопу/фейлсейфу БЕЗ котировки "
-                                               f"IMOEXF — P&L хеджа в журнале недостоверен, сверь по счёту")
+                        self.log_event("warn", f"{tk}: 🚨 выход БЕЗ котировки IMOEXF (у ex-date/стоп) "
+                                               f"— P&L хеджа недостоверен, сверь по счёту")
                     reason = "stop" if stop else "exit"
                     req_lots = eng.position.lots
                     req_hedge = eng.position.hedge_lots
@@ -725,6 +730,13 @@ class St8Session:
                 acted["missed"] += 1
                 continue
             lots = self._position_lots(entry_px, uval, tk)
+            # ГЕЙТ ГОЛОЙ БЕТЫ: если хедж обязателен (hedge_imoexf), но котировки IMOEXF нет,
+            # _hedge_lots_for вернёт 0 → лонг открылся бы БЕЗ хеджа (голая бета 10 дней, в 2022
+            # −45%). Отказываем во входе (аудит 15.07): лучше пропустить, чем нехеджированно.
+            if self.cfg.strategy.hedge_imoexf and not self.hedge_px:
+                self.log_missed(tk, today, ev.ex_date, "нет котировки IMOEXF — хедж невозможен")
+                acted["missed"] += 1
+                continue
             hlots = self._hedge_lots_for(entry_px, lots, uval)
             try:
                 r = self._exec().open(tk, lots, entry_px, hlots, self.hedge_px or 0,

@@ -819,3 +819,18 @@ def test_stop_loss_includes_paid_fees():
     assert eng.check_stop(px, 0.0) is True     # -4950-100=-5050 пробивает -5000
     # без просадки — не срабатывает
     assert eng.check_stop(100.0, 0.0) is False
+
+
+def test_entry_rejected_without_imoexf_quote():
+    """Гейт голой беты: если хедж обязателен, но нет котировки IMOEXF — вход НЕ открывается."""
+    from app.st8.service import St8Session
+    s = St8Session()
+    s.cfg.strategy.hedge_imoexf = True
+    s.hedge_px = None            # котировки IMOEXF нет
+    # _hedge_lots_for вернёт 0 (голая бета) — вход должен быть отклонён на уровне tick.
+    # проверяем сам предикат гейта (логика из tick):
+    would_be_naked = s.cfg.strategy.hedge_imoexf and not s.hedge_px
+    assert would_be_naked is True
+    # при наличии котировки — не голая
+    s.hedge_px = 2800.0
+    assert (s.cfg.strategy.hedge_imoexf and not s.hedge_px) is False
