@@ -883,6 +883,9 @@ class St9Session:
             "trades_tail": self.trades[-20:],
             "last_tick_ts": self.last_tick_ts,
             "capital_rub": round(self.capital_rub) or None,
+            # ЧЕСТНЫЙ капитал (free+ГО) — для KPI дашборда; capital_rub (totalAmountPortfolio)
+            # искажён переоценкой шорта фьючерса и пугает оператора мусорной цифрой
+            "capital_sizing_rub": round(self.capital_sizing_rub) or None,
             # утилизация капитала / плечо и предохранитель просадки (наблюдаемость)
             "go_target_pct": self.cfg.strategy.go_target_pct,
             "capital_dd_stop_pct": self.cfg.strategy.capital_dd_stop_pct,

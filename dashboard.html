@@ -1166,7 +1166,7 @@ details p{font-size:12px;color:var(--ink-dim);line-height:1.6}
           <div class="kpi"><div class="k">net P&amp;L (закрыт.)</div><div class="v" id="s9-k-net">—</div></div>
           <div class="kpi"><div class="k">сделок</div><div class="v" id="s9-k-trades">—</div></div>
           <div class="kpi"><div class="k">открыто осей</div><div class="v" id="s9-k-open">—</div></div>
-          <div class="kpi"><div class="k">капитал (оц.)</div><div class="v" id="s9-k-cap">—</div></div>
+          <div class="kpi"><div class="k">капитал (free+ГО)</div><div class="v" id="s9-k-cap">—</div></div>
         </div>
       </div>
 
@@ -3081,7 +3081,9 @@ function s9Render(s){
   setK('s9-k-net', (netv>=0?'+':'')+s9num(netv)+' ₽', netv>0?1:(netv<0?-1:0));
   setK('s9-k-trades', s9num(s.trades_count||0));
   setK('s9-k-open', s9num(openN)+' / '+inst.length);
-  setK('s9-k-cap', s.capital_rub!=null?s9num(Math.round(s.capital_rub))+' ₽':'—');
+  // честный капитал (free+ГО), НЕ capital_rub (totalAmountPortfolio искажён шортом → пугает)
+  const capHonest = s.capital_sizing_rub!=null ? s.capital_sizing_rub : s.capital_rub;
+  setK('s9-k-cap', capHonest!=null?s9num(Math.round(capHonest))+' ₽':'—');
 
   s9RenderAxes(inst);
   s9RenderTrades(s.trades_tail||[]);
