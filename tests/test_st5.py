@@ -756,9 +756,12 @@ def test_forts_schedule_session_kinds():
     assert forts_kind(20 * 60, 3) == "live"          # вечерняя
     assert forts_kind(23 * 60 + 55, 3) == "closed"   # после 23:50
     assert forts_kind(3 * 60, 3) == "closed"         # ночь
-    # выходные — всегда closed
-    assert forts_kind(12 * 60, 6) == "closed"        # суббота
-    assert forts_kind(12 * 60, 0) == "closed"        # воскресенье
+    # выходные — сессия 10:00–19:00 БЕЗ клирингов (MOEX торгует сб/вс; сверено по ISS 18-19.07.2026)
+    assert forts_kind(12 * 60, 6) == "live"          # суббота, день
+    assert forts_kind(14 * 60 + 2, 6) == "live"      # суббота: в 14:00-14:05 клиринга НЕТ
+    assert forts_kind(18 * 60 + 50, 0) == "live"     # воскресенье: 18:45+ торгуется
+    assert forts_kind(9 * 60 + 30, 6) == "closed"    # суббота до 10:00
+    assert forts_kind(19 * 60 + 30, 0) == "closed"   # воскресенье после 19:00
 
 
 def test_forts_msk_minute_dow_known_ts():
@@ -926,7 +929,7 @@ def test_watchdog_should_restart_predicate():
     from app.st5.service import St5Session
     s = St5Session()
     MON_OPEN = 1782723600    # понедельник 12:00 МСК — FORTS открыт (forts_kind=='live')
-    SUN_CLOSED = 1782637200  # воскресенье 12:00 МСК — биржа закрыта
+    SUN_CLOSED = 1782666000  # воскресенье 20:00 МСК — закрыто (выходная сессия кончилась в 19:00)
     NOW = 100000.0           # произвольный monotonic-момент
     stale = s._watchdog_stale_min * 60
 

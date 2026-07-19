@@ -320,9 +320,9 @@ def test_watchdog_stale_triggers_in_market_hours():
     monday_noon = datetime.datetime(2026, 7, 13, 9, 0, tzinfo=datetime.timezone.utc)  # 12:00 МСК
     ts = monday_noon.timestamp()
     assert s._watchdog_should_restart(time.monotonic(), ts_sec=ts) is True
-    # тот же застой в выходной → не рестарт (баров нет легитимно)
-    sunday_noon = datetime.datetime(2026, 7, 12, 9, 0, tzinfo=datetime.timezone.utc)
-    assert s._watchdog_should_restart(time.monotonic(), ts_sec=sunday_noon.timestamp()) is False
+    # тот же застой ночью воскресенья (выходная сессия 10:00–19:00 уже закрыта) → не рестарт
+    sunday_night = datetime.datetime(2026, 7, 12, 18, 0, tzinfo=datetime.timezone.utc)  # 21:00 МСК
+    assert s._watchdog_should_restart(time.monotonic(), ts_sec=sunday_night.timestamp()) is False
 
 
 def test_sizing_by_capital_pct():
@@ -479,3 +479,57 @@ def test_lock_reentrant_guard_flat():
         s._capital_dd_guard()
         s._capital_dd_guard()
     assert s._dd_halted is True         # сработало без дедлока
+
+
+def test_tick_defers_bars_when_market_closed(monkeypatch):
+    """Гейт торгового окна: биржа закрыта (дневной бар GAZR «закрывается» в 00:00) —
+    бар откладывается: маркер не двигается, ордера нет; первым тиком после открытия
+    тот же бар обрабатывается и вход исполняется (инцидент 18.07: got=0, бар съеден)."""
+    import app.st9.service as svc
+    from app.st9.config import St9InstrumentCfg
+    s = svc.St9Session()
+    s.cfg.mode = "paper"
+    s.cfg.trading_enabled = True
+    icfg = St9InstrumentCfg(secid="USDRUBF", don_enter=5, don_exit=3)
+    s.cfg.instruments = [icfg]
+    s._pv_cache["USDRUBF"] = 1.0
+    eng = s._engine(icfg)
+    for i in range(20):                                 # прогрев окон тихим рынком
+        eng.step(Bar(ts=i, o=100, h=101, l=99, c=100), lots_for_entry=1)
+    s._last_bar_ts["USDRUBF"] = 19                      # не warmup: маркер уже есть
+    breakout = Bar(ts=20, o=100, h=106, l=100, c=105)   # пробой канала вверх
+    monkeypatch.setattr(svc, "iss_candles", lambda sec, frm, iv=60: [breakout])
+    orders = []
+    monkeypatch.setattr(s, "_order",
+                        lambda sec, lots, d, ref_px=0.0: orders.append((sec, lots)) or lots)
+    monkeypatch.setattr(s, "refresh_capital", lambda: None)
+    monkeypatch.setattr(s, "_capital_dd_guard", lambda: None)
+    monkeypatch.setattr(s, "_forts_open", lambda: False)      # биржа закрыта
+    s.tick()
+    assert not orders and eng.position is None
+    assert s._last_bar_ts["USDRUBF"] == 19              # бар НЕ съеден
+    monkeypatch.setattr(s, "_forts_open", lambda: True)       # открытие
+    s.tick()
+    assert orders and eng.position is not None and eng.position.side == "long"
+    assert s._last_bar_ts["USDRUBF"] == 20
+
+
+def test_tick_defers_roll_when_market_closed(monkeypatch):
+    """Ролл при закрытой бирже откладывается (не спамит 400 всю ночь), позиция цела."""
+    import app.st9.service as svc
+    s, icfg = _quarterly_session(monkeypatch)
+    s.cfg.instruments = [icfg]
+    eng = s._engine(icfg)
+    eng.open("long", 48_000.0, 2, 1, atr=500.0)
+    s.contracts["GAZR"] = "GZU6"
+    s._last_bar_ts["GAZR"] = 777
+    monkeypatch.setattr(s, "_resolve_contract", lambda c: "GZZ6")   # серия сменилась
+    monkeypatch.setattr(s, "refresh_capital", lambda: None)
+    monkeypatch.setattr(s, "_capital_dd_guard", lambda: None)
+    orders = []
+    monkeypatch.setattr(s, "_order",
+                        lambda sec, lots, d, ref_px=0.0: orders.append(sec) or lots)
+    monkeypatch.setattr(s, "_forts_open", lambda: False)
+    s.tick()
+    assert not orders                                   # ролл не стрелял в закрытую биржу
+    assert s.contracts["GAZR"] == "GZU6" and eng.position.lots == 2

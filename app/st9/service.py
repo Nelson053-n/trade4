@@ -72,6 +72,7 @@ class St9Session:
         self._contract_cache: dict[str, tuple] = {}   # asset -> (secid, дата резолва)
         self._bars_contract: dict[str, str] = {}      # asset -> контракт, чьи бары в движке
         self._pending_positions: dict[str, dict] = {}  # позиции session, ждущие движка (pv)
+        self._deferred_ts: dict[str, int] = {}         # secid -> ts отложенного бара (анти-спам лога)
         self.contracts: dict[str, str] = {}           # asset -> контракт ОТКРЫТОЙ позиции (персист)
         self.axis_overrides: dict[str, dict] = {}      # secid -> {don_enter,don_exit,atr_mult,notional} (персист поверх кода)
         self.capital_rub: float = 0.0
@@ -386,8 +387,21 @@ class St9Session:
             self.log_event("warn", f"{eng.secid}: ролл не удался: {str(e)[:80]}")
 
     # ---------- тик ----------
+    def _forts_open(self) -> bool:
+        """Торги FORTS идут сейчас. Гейт исполнения: дневной бар GAZR «закрывается» в 00:00
+        (биржа закрыта с 23:50) — без гейта каждый его сигнал улетал в закрытую биржу
+        (HTTP 400, инцидент 18.07), а бар съедался безвозвратно. При сбое расписания —
+        fail-open (торгуем как раньше), чтобы не заморозить выходы."""
+        try:
+            from ..st5 import forts_schedule as sched
+            minute, _sec, dow = sched.msk_minute_dow()
+            return sched.forts_kind(minute, dow) == "live"
+        except Exception:  # noqa: BLE001
+            return True
+
     def tick(self) -> dict:
         acted = {"signals": 0}
+        market_open = self._forts_open()
         self._try_restore_positions()
         for icfg in self.cfg.instruments:
             eng = self._engine(icfg)
@@ -400,7 +414,8 @@ class St9Session:
                 if not fresh_c:
                     continue
                 held_c = self.contracts.get(icfg.secid)
-                if eng.position is not None and held_c and held_c != fresh_c:
+                # ролл шлёт ордера — при закрытой бирже откладываем (ретрай тиком после открытия)
+                if eng.position is not None and held_c and held_c != fresh_c and market_open:
                     self._roll(eng, icfg, held_c, fresh_c)
                 trade_sec = fresh_c
                 if eng.position is not None and not held_c:
@@ -439,6 +454,14 @@ class St9Session:
                     self._last_bar_ts[icfg.secid] = b.ts
                 fresh = fresh[-1:]
             for b in fresh:       # warmup: БЕЗ сделок (иначе журнал засоряют входы истории)
+                if not warmup and not market_open:
+                    # биржа закрыта/клиринг: бар НЕ съедаем (маркер не двигаем) — сигнал
+                    # родится первым тиком после открытия и ордер пройдёт. Иначе вход
+                    # терялся навсегда: got=0, а бар уже обработан (инцидент GAZR 18.07)
+                    if self._deferred_ts.get(icfg.secid) != b.ts:
+                        self._deferred_ts[icfg.secid] = b.ts
+                        self.log_event("info", f"{icfg.secid}: бар отложен до открытия FORTS")
+                    break
                 self._last_bar_ts[icfg.secid] = b.ts
                 lots = self._entry_lots(icfg, b.c, eng.pv, "long", self._trade_secid(icfg))
                 sig = eng.step(b, lots_for_entry=lots)
