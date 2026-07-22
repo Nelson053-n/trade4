@@ -1612,21 +1612,18 @@ function s4fortsSession(min,sec,dow){
     if(inR(10*60,19*60)) return {kind:'live',txt:'торги идут — выходная сессия',count:'',color:'var(--signal)'};
     const wUntil=until(10*60);
     if(wUntil!==null) return {kind:'closed',txt:'торги закрыты',count:'до открытия '+(Math.floor(wUntil/3600)?Math.floor(wUntil/3600)+' ч ':'')+Math.floor(wUntil%3600/60)+' мин',color:'var(--ink-dim)'};
-    return {kind:'closed',txt:'торги закрыты',count:'открытие завтра '+(dow===6?'10:00':'09:00'),color:'var(--ink-dim)'};
+    return {kind:'closed',txt:'торги закрыты',count:'открытие завтра '+(dow===6?'10:00':'07:00'),color:'var(--ink-dim)'};
   }
-  if(inR(14*60,14*60+5))   return {kind:'warn',txt:'клиринг',count:'возобновление в 14:05',color:'var(--warn)'};
-  if(inR(18*60+45,19*60+5))return {kind:'warn',txt:'вечерний клиринг',count:'возобновление в 19:05',color:'var(--warn)'};
-  if(inR(9*60,10*60))      return {kind:'live',txt:'торги идут — утренняя сессия',count:'',color:'var(--signal)'};
-  if(inR(10*60,14*60)||inR(14*60+5,18*60+45)) return {kind:'live',txt:'торги идут — основная сессия',count:'',color:'var(--signal)'};
-  if(inR(19*60+5,23*60+50))return {kind:'live',txt:'торги идут — вечерняя сессия',count:'',color:'var(--signal)'};
-  // закрыто — считаем до открытия в 09:00 (сегодня или след. рабочий день)
-  const sUntil=until(9*60);
+  // будни: торги НЕПРЕРЫВНО 07:00–23:50, клиринги 14:00/18:45 торгов не прерывают (ISS 17.07.2026)
+  if(inR(7*60,23*60+50))   return {kind:'live',txt:'торги идут',count:'',color:'var(--signal)'};
+  // закрыто — считаем до открытия в 07:00 (сегодня или след. рабочий день)
+  const sUntil=until(7*60);
   const dd=v=>{ const h=Math.floor(v/3600),mm2=Math.floor(v%3600/60),ss=v%60;
     return (h?h+' ч ':'')+(mm2||h?String(mm2).padStart(h?2:1,'0')+' мин ':'')+(h?'':String(ss).padStart(2,'0')+' с'); };
   if(sUntil!==null && dow>=1 && dow<=5)
     return {kind:'closed',txt:'торги закрыты',count:'до открытия '+dd(sUntil),color:'var(--ink-dim)'};
-  // после закрытия (≥23:50): пн–чт → завтра 09:00, пт → завтра выходная сессия 10:00
-  return {kind:'closed',txt:'торги закрыты',count:'открытие завтра '+(dow===5?'10:00':'09:00'),color:'var(--ink-dim)'};
+  // после закрытия (≥23:50): пн–чт → завтра 07:00, пт → завтра выходная сессия 10:00
+  return {kind:'closed',txt:'торги закрыты',count:'открытие завтра '+(dow===5?'10:00':'07:00'),color:'var(--ink-dim)'};
 }
 function s4Clock(){
   const m=s4msk(Date.now());

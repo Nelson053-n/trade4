@@ -979,13 +979,13 @@ class St5Session:
         date_key = time.strftime("%Y-%m-%d", time.gmtime((ts_sec or time.time()) + 3 * 3600))
         kind = sched.forts_kind(minute, dow)
 
-        # напоминание за before_open_min до открытия (09:00) в будний день, один раз в день
+        # напоминание за before_open_min до открытия (07:00) в будний день, один раз в день
         n = self.cfg.notify
         if n.notify_before_open and sched.is_trading_day(dow):
             win_start = sched.OPEN_MIN - max(1, n.before_open_min)
             if win_start <= minute < sched.OPEN_MIN and self._sched_open_sent != date_key:
                 self._sched_open_sent = date_key
-                self._notify(f"🔔 <b>Биржа открывается через ~{n.before_open_min} мин</b> (09:00 МСК)\n"
+                self._notify(f"🔔 <b>Биржа открывается через ~{n.before_open_min} мин</b> (07:00 МСК)\n"
                              f"Открытых позиций: {self._open_count()} · режим {tg.esc(self.cfg.connector.mode)}")
 
         # дневная сводка при переходе сессия→закрыто (конец вечерней сессии), один раз в день

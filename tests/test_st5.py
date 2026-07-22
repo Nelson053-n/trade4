@@ -745,15 +745,17 @@ def test_normal_position_not_adopted():
 # ============================ Telegram-уведомления (st5) ============================
 
 def test_forts_schedule_session_kinds():
-    """forts_kind: сессии/клиринг/выходной по минуте дня и dow."""
+    """forts_kind: будни непрерывно 07:00–23:50, выходные 10:00–19:00, клиринги торгов не рвут."""
     from app.st5.forts_schedule import forts_kind
-    # будни (dow=3, среда)
-    assert forts_kind(9 * 60 + 30, 3) == "live"      # утренняя
-    assert forts_kind(12 * 60, 3) == "live"          # основная
-    assert forts_kind(14 * 60 + 2, 3) == "warn"      # дневной клиринг 14:00-14:05
-    assert forts_kind(15 * 60, 3) == "live"          # основная после клиринга
-    assert forts_kind(18 * 60 + 50, 3) == "warn"     # вечерний клиринг 18:45-19:05
-    assert forts_kind(20 * 60, 3) == "live"          # вечерняя
+    # будни (dow=3, среда): торги 07:00–23:50 без пауз (минутные бары ISS 17.07.2026)
+    assert forts_kind(7 * 60 + 5, 3) == "live"       # ранняя утренняя с 07:00
+    assert forts_kind(6 * 60 + 30, 3) == "closed"    # до 07:00 закрыто
+    assert forts_kind(9 * 60 + 30, 3) == "live"
+    assert forts_kind(12 * 60, 3) == "live"
+    assert forts_kind(14 * 60 + 2, 3) == "live"      # клиринг 14:00 торгов НЕ прерывает
+    assert forts_kind(15 * 60, 3) == "live"
+    assert forts_kind(18 * 60 + 50, 3) == "live"     # вечерний клиринг торгов НЕ прерывает
+    assert forts_kind(20 * 60, 3) == "live"
     assert forts_kind(23 * 60 + 55, 3) == "closed"   # после 23:50
     assert forts_kind(3 * 60, 3) == "closed"         # ночь
     # выходные — сессия 10:00–19:00 БЕЗ клирингов (MOEX торгует сб/вс; сверено по ISS 18-19.07.2026)
@@ -859,7 +861,7 @@ def test_notify_config_persists_round_trip(tmp_path):
 
 
 def test_schedule_tick_before_open_once(monkeypatch):
-    """_schedule_tick шлёт напоминание об открытии один раз в окне до 09:00, не на выходных."""
+    """_schedule_tick шлёт напоминание об открытии один раз в окне до 07:00, не на выходных."""
     import calendar
     from app.st5.service import St5Session
     s = St5Session()
@@ -868,15 +870,15 @@ def test_schedule_tick_before_open_once(monkeypatch):
     s.cfg.notify.before_open_min = 10
     sent = []
     monkeypatch.setattr(s, "_notify", lambda t: sent.append(t))
-    # пн 05:52 UTC = 08:52 МСК (в окне 08:50-09:00)
-    ts = calendar.timegm((2026, 6, 29, 5, 52, 0, 0, 0, 0))
+    # пн 03:52 UTC = 06:52 МСК (в окне 06:50-07:00)
+    ts = calendar.timegm((2026, 6, 29, 3, 52, 0, 0, 0, 0))
     s._schedule_tick(ts)
     s._schedule_tick(ts + 60)   # повтор в том же окне/дне — не дублирует
     assert sum(1 for m in sent if "открывается" in m) == 1
     # суббота в том же окне — молчит
     sent.clear()
     s._sched_open_sent = None
-    sat = calendar.timegm((2026, 6, 27, 5, 52, 0, 0, 0, 0))
+    sat = calendar.timegm((2026, 6, 27, 3, 52, 0, 0, 0, 0))
     s._schedule_tick(sat)
     assert not sent
 
