@@ -334,11 +334,12 @@ def test_sizing_by_capital_pct():
     # выкл → по entry_notional_rub (100к / цена)
     s.cfg.strategy.go_target_pct = 0.0
     assert s._entry_lots(icfg, 77, 1000) == 1
-    # 15% капитала на 3 оси, go_frac 0.044 → нотионал ~570к/ось
+    # 15% капитала на N осей реестра, go_frac 0.044
     s.cfg.strategy.go_target_pct = 15.0
     lots = s._entry_lots(icfg, 77, 1000)
     notional = lots * 77 * 1000
-    assert 450_000 < notional < 650_000     # порядок ~570к (округление лотов)
+    expected = 500_000 * 0.15 / len(s.cfg.instruments) / 0.044
+    assert abs(notional - expected) / expected < 0.15   # округление лотов
 
 
 def test_capital_dd_guard():
@@ -412,8 +413,10 @@ def test_update_strategy_leverage():
     assert s._capital_peak == 500_000          # пик от честного капитала
     # сайзинг теперь от честного капитала (не totalAmountPortfolio)
     icfg = s.cfg.instruments[0]
+    n_axes = len(s.cfg.instruments)            # движков нет → делитель = весь реестр
     notional = s._entry_lots(icfg, 77, 1000) * 77 * 1000
-    assert 450_000 < notional < 650_000        # ~570к при плече 15%/3 оси
+    expected = 500_000 * 0.15 / n_axes / 0.044
+    assert abs(notional - expected) / expected < 0.15   # в пределах округления лотов
 
 
 def test_sizing_uses_honest_capital():
@@ -426,7 +429,7 @@ def test_sizing_uses_honest_capital():
     icfg = s.cfg.instruments[0]
     notional = s._entry_lots(icfg, 77, 1000) * 77 * 1000
     # должен считать от 500к, не 578к
-    expected = 500_000 * 0.15 / 3 / 0.044
+    expected = 500_000 * 0.15 / len(s.cfg.instruments) / 0.044
     assert abs(notional - expected) / expected < 0.15   # в пределах округления лотов
 
 
@@ -449,8 +452,9 @@ def test_sizing_from_actual_go_per_lot():
     s._go_per_lot = lambda sec, side: 11_500.0
     icfg = s.cfg.instruments[0]
     lots = s._entry_lots(icfg, 77, 1000, side="long")
-    # целевое ГО на ось = 500к×15%/3 = 25000; лоты = 25000/11500 ≈ 2
-    assert lots == 2
+    # целевое ГО на ось = 500к×15%/N осей; лоты = ГО_оси/11500
+    expected = int(500_000 * 0.15 / len(s.cfg.instruments) / 11_500.0)
+    assert lots == max(1, expected)
 
 
 def test_sizing_go_fallback_when_api_down():
@@ -533,3 +537,43 @@ def test_tick_defers_roll_when_market_closed(monkeypatch):
     s.tick()
     assert not orders                                   # ролл не стрелял в закрытую биржу
     assert s.contracts["GAZR"] == "GZU6" and eng.position.lots == 2
+
+
+def test_imoexf_axis_registered():
+    """IMOEXF — третья НЕЗАВИСИМАЯ ось (диверсификатор, ревизия 25.07): часовая,
+    не квартальник. Валютные перпы (CNYRUBF/EURRUBF) сознательно НЕ добавлены:
+    corr к USDRUBF 0.91/0.84 — та же ставка на рубль, не диверсификация."""
+    from app.st9.config import St9Config
+    cfg = St9Config()
+    ax = {i.secid: i for i in cfg.instruments}
+    assert "IMOEXF" in ax
+    im = ax["IMOEXF"]
+    assert (im.don_enter, im.don_exit, im.atr_mult) == (45, 25, 6.0)
+    assert im.quarterly is False and im.interval_min == 60
+
+
+def test_optimized_params_applied():
+    """Параметры осей после свипа 25.07 (длинное окно входа + свободный трейл)."""
+    from app.st9.config import St9Config
+    ax = {i.secid: i for i in St9Config().instruments}
+    assert (ax["USDRUBF"].don_enter, ax["USDRUBF"].don_exit,
+            ax["USDRUBF"].atr_mult) == (70, 10, 5.0)
+    assert (ax["GLDRUBF"].don_enter, ax["GLDRUBF"].don_exit,
+            ax["GLDRUBF"].atr_mult) == (45, 16, 5.0)
+
+
+def test_leverage_divides_by_live_axes_only():
+    """Делитель плеча — ТОРГУЮЩИЕ оси: непрогретая ось (нет движка) не должна
+    молча забирать долю ГО и резать размер живых осей."""
+    from app.st9.service import St9Session
+    from app.st9.engine import St9Engine
+    s = St9Session()
+    s.capital_sizing_rub = 500_000
+    s.cfg.strategy.go_target_pct = 15.0
+    s._go_per_lot = lambda sec, side: 11_500.0
+    icfg = s.cfg.instruments[0]
+    # 2 живых движка из полного реестра → делим на 2, а не на len(instruments)
+    for sec in ("USDRUBF", "GLDRUBF"):
+        s.engines[sec] = St9Engine(sec, 70, 10, 5.0, 14, pv=1000.0)
+    lots = s._entry_lots(icfg, 77, 1000, side="long")
+    assert lots == int(500_000 * 0.15 / 2 / 11_500.0)

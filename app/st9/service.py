@@ -234,7 +234,13 @@ class St9Session:
         # ЧЕСТНЫЙ капитал (free+ГО), НЕ totalAmountPortfolio (искажён переоценкой шорта)
         cap_base = self.capital_sizing_rub or self.capital_rub
         if go_pct > 0 and cap_base > 0:
-            n_axes = max(1, len(self.cfg.instruments))
+            # делитель — ТОРГУЮЩИЕ оси (движок создан = pv получен, ось не на паузе),
+            # а не весь кодовый реестр: непрогретая/недоступная ось (GAZR греет дневное
+            # окно неделями) иначе молча забирает свою долю ГО и режет живые оси.
+            # До старта live движков нет — тогда честнее делить на весь реестр
+            # (консервативно: заниженный размер безопаснее завышенного).
+            n_axes = max(1, len(self.engines) if self.engines
+                         else len(self.cfg.instruments))
             go_per_axis = cap_base * (go_pct / 100.0) / n_axes   # целевое ГО на ось
             # лоты ПРЯМО из ФАКТИЧЕСКОГО ГО на лот (GetFuturesMargin), НЕ через
             # захардкоженный go_frac 0.044 — аудит 15.07: реальное ГО USDRUBF ≈0.15
