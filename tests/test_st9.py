@@ -577,3 +577,109 @@ def test_leverage_divides_by_live_axes_only():
         s.engines[sec] = St9Engine(sec, 70, 10, 5.0, 14, pv=1000.0)
     lots = s._entry_lots(icfg, 77, 1000, side="long")
     assert lots == int(500_000 * 0.15 / 2 / 11_500.0)
+
+
+# ============ наблюдаемость издержек исполнения (замер проскальзывания 27.07) ============
+
+def test_slip_rub_sign_and_math():
+    """Проскальзывание в ₽: отрицательное = филлы ХУЖЕ цен бара. Знак верен для обеих сторон."""
+    from app.st9.service import St9Session
+    from app.st9.engine import St9Trade
+    mk = lambda side, e, x, lots=2: St9Trade(secid="X", side=side, entry=e, exit=x,
+                                             lots=lots, entry_ts=0, exit_ts=1,
+                                             gross_pnl_rub=0, fees_rub=0, net_pnl_rub=0,
+                                             reason="trail")
+    # LONG: купили дороже (77.50 против 77.48) и продали дешевле (77.50 против 77.52)
+    tr = mk("long", 77.48, 77.52)
+    assert St9Session._slip_rub(tr, 77.50, 77.50, 1000.0) == -80.0     # 2 ноги × 2 лота × 0.02×1000
+    # SHORT: продали дешевле и откупили дороже — тоже минус
+    tr2 = mk("short", 100.0, 99.0)
+    assert St9Session._slip_rub(tr2, 99.9, 99.1, 1.0) == -0.4
+    # филлы ровно по бару → 0
+    assert St9Session._slip_rub(mk("long", 10.0, 11.0), 10.0, 11.0, 1.0) == 0.0
+
+
+def test_slip_rub_none_when_fill_unknown():
+    """Нет цены филла хотя бы одной ноги → None, НЕ 0: нулём врать нельзя."""
+    from app.st9.service import St9Session
+    from app.st9.engine import St9Trade
+    tr = St9Trade(secid="X", side="long", entry=1.0, exit=2.0, lots=1, entry_ts=0,
+                  exit_ts=1, gross_pnl_rub=0, fees_rub=0, net_pnl_rub=0, reason="trail")
+    assert St9Session._slip_rub(tr, None, 2.0, 1.0) is None
+    assert St9Session._slip_rub(tr, 1.0, None, 1.0) is None
+    assert St9Session._slip_rub(tr, 1.0, 2.0, 0) is None      # pv неизвестен
+
+
+def test_order_averages_fill_price_over_slices(monkeypatch):
+    """_order копит executedOrderPrice по 1-лотовым слайсам и делит на лоты:
+    executedOrderPrice — СУММА за слайс, не цена контракта (канон st4)."""
+    import app.st9.service as svc
+    from app.st4 import tbank_sandbox as sb
+    s = svc.St9Session()
+    s.cfg.mode = "tbank_sandbox"
+    s.cfg.account_id = "acc"
+    monkeypatch.setattr(sb, "find_future", lambda sec: {"uid": "u1"})
+    # РАЗНЫЕ цены (units+nano!) — иначе тест зелёный при любой логике усреднения
+    resp = iter([
+        {"lotsExecuted": "1", "executedOrderPrice": {"units": "78", "nano": 200000000}},
+        {"lotsExecuted": "0", "executedOrderPrice": {"units": "0", "nano": 0}},   # реджект
+        {"lotsExecuted": "1", "executedOrderPrice": {"units": "78", "nano": 800000000}},
+    ])
+    monkeypatch.setattr(sb, "post_order", lambda *a, **k: next(resp))
+    got = s._order("USDRUBF", 3, "BUY", ref_px=78.0)
+    assert got == 2                            # реджект-слайс не налился
+    assert abs(s._last_fill_px - 78.5) < 1e-9  # (78.2+78.8)/2, нулевой слайс отброшен
+
+
+def test_order_resets_fill_price_before_early_returns(monkeypatch):
+    """_last_fill_px общий на все оси: сброс ДО ранних return, иначе цена филла одной
+    оси залипает в сделке другой (tick обходит оси по очереди)."""
+    import app.st9.service as svc
+    s = svc.St9Session()
+    s.cfg.mode = "paper"                       # ранний return до цикла ордеров
+    s._last_fill_px = 78.5                     # «осталось» от предыдущей оси
+    assert s._order("GLDRUBF", 3, "BUY", ref_px=6000.0) == 3
+    assert s._last_fill_px is None             # чужая цена НЕ должна пережить вызов
+
+
+def test_entry_fill_not_stale_when_price_unknown(monkeypatch):
+    """Вход без цены филла СТИРАЕТ прошлую запись оси — иначе протухшее значение
+    фабрикует положительное проскальзывание («исполняемся лучше модели»)."""
+    import app.st9.service as svc
+    from app.st9.engine import Bar
+    s = svc.St9Session()
+    s.cfg.mode = "paper"                       # paper → _last_fill_px = None
+    s._entry_fill_px["USDRUBF"] = 70.0         # протухшее от давно закрытой сделки
+    icfg = next(i for i in s.cfg.instruments if i.secid == "USDRUBF")
+    eng = svc.St9Engine("USDRUBF", 5, 3, 3.0, 3, pv=1000.0)
+    s.engines["USDRUBF"] = eng
+    monkeypatch.setattr(s, "save_session", lambda: None)
+    sig = {"act": "open", "new_side": "long", "px": 78.0, "atr": 0.5}
+    s._apply_signal_locked(eng, sig, icfg)
+    assert "USDRUBF" not in s._entry_fill_px   # стёрта, а не унаследована
+
+
+def test_slippage_summary_counts_only_measured():
+    """Сводка издержек считает только сделки с измеренным проскальзыванием."""
+    from app.st9.service import St9Session
+    s = St9Session()
+    s.trades = [{"slip_rub": -100.0}, {"slip_rub": None}, {"slip_rub": -20.0}, {}]
+    r = s._slippage_summary()
+    assert r["measured"] == 2 and r["trades"] == 4
+    assert r["total_rub"] == -120.0 and r["worst_rub"] == -100.0
+    assert r["avg_rub"] == -60.0
+    assert St9Session()._slippage_summary()["measured"] == 0    # пустой журнал не падает
+
+
+def test_entry_fill_survives_restart(tmp_path, monkeypatch):
+    """Цена филла ВХОДА переживает рестарт — иначе проскальзывание сделки, открытой
+    до перезапуска, посчитать уже нечем."""
+    import app.st9.service as svc
+    s = svc.St9Session()
+    s._session_file = tmp_path / "s9.json"
+    s._entry_fill_px = {"USDRUBF": 78.25}
+    s.save_session()
+    s2 = svc.St9Session()
+    s2._session_file = tmp_path / "s9.json"
+    s2.load_session()
+    assert s2._entry_fill_px == {"USDRUBF": 78.25}

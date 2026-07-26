@@ -87,6 +87,8 @@ class St9Session:
         self.capital_sizing_rub = 0.0                  # ЧЕСТНЫЙ капитал (money+ГО) для сайзинга плеча
         self._go_lot_cache: dict[tuple, float] = {}    # (sec,side) -> ГО на лот (кэш, прогрев зовёт часто)
         self._dd_breach_count = 0                      # подтверждение просадки (2 тика подряд, против битого чтения)
+        self._last_fill_px: float | None = None        # средняя цена ПОСЛЕДНЕГО филла (наблюдаемость проскальзывания)
+        self._entry_fill_px: dict[str, float] = {}     # secid -> цена филла ВХОДА (персист, живёт до закрытия)
         # RLock: tick (в потоке через to_thread) и мутирующие HTTP-эндпоинты (flat_all/
         # update_axis/update_strategy) не должны пересекаться на движках/позициях (аудит #5:
         # гонка → двойное закрытие). Reentrant — guard внутри tick зовёт flat_all.
@@ -166,6 +168,10 @@ class St9Session:
 
         ⚠️ tbank_real: гейт на КАЖДЫЙ ордер (вход/выход/ролл) — armed+cooldown; идемпотентный
         orderId (ретрай не задвоит); sanity цены против ref_px (сигнальный бар)."""
+        # СБРОС ДО ВСЕХ return: _last_fill_px общий на оси, tick() обходит их по очереди.
+        # Без сброса цена филла оси A залипала бы в сделке оси B на любом раннем выходе
+        # (paper, боевой гейт, sanity) — журнал показывал бы чужое проскальзывание.
+        self._last_fill_px = None
         if self.cfg.mode not in ("tbank_sandbox", "tbank_real") or not self.cfg.account_id:
             return lots                    # paper: полный виртуальный филл
         real = self.cfg.mode == "tbank_real"
@@ -188,6 +194,8 @@ class St9Session:
             except Exception:  # noqa: BLE001  last_price недоступен — не блокируем
                 pass
         filled = 0
+        amount_sum = 0.0        # Σ executedOrderPrice по слайсам — для средней цены филла
+        priced_lots = 0         # лоты, по которым брокер вернул цену (не все могут)
         for i in range(lots):
             try:
                 if real:
@@ -206,9 +214,20 @@ class St9Session:
             if v is None:
                 v = resp.get("executedLots")
             try:
-                filled += int(float(v)) if v is not None else 1
+                got_i = int(float(v)) if v is not None else 1
             except (TypeError, ValueError):
-                filled += 1
+                got_i = 1
+            filled += got_i
+            # executedOrderPrice — СУММА за все лоты слайса, НЕ цена контракта (канон st4,
+            # tinkoff_executor.py:106): копим сумму и делим на лоты в самом конце.
+            try:
+                amt = sb._q_to_float(resp.get("executedOrderPrice"))
+                if amt and got_i > 0:
+                    amount_sum += amt
+                    priced_lots += got_i
+            except Exception:  # noqa: BLE001  цена филла не критична — только наблюдаемость
+                pass
+        self._last_fill_px = (amount_sum / priced_lots) if priced_lots > 0 else None
         return filled
 
     def _trade_secid(self, icfg) -> str:
@@ -277,6 +296,19 @@ class St9Session:
         except Exception:  # noqa: BLE001
             return None
 
+    @staticmethod
+    def _slip_rub(tr, entry_fill: float | None, exit_fill: float | None,
+                  pv: float) -> float | None:
+        """Проскальзывание сделки в ₽: насколько ФАКТИЧЕСКИЕ филлы хуже цен бара, по
+        которым движок посчитал P&L. Отрицательное = исполнились хуже модели (норма).
+        None, если брокер не вернул цену хотя бы одной ноги — врать нулём нельзя."""
+        if entry_fill is None or exit_fill is None or not pv:
+            return None
+        d = 1 if tr.side == "long" else -1
+        model = (tr.exit - tr.entry) * d
+        fact = (exit_fill - entry_fill) * d
+        return round((fact - model) * tr.lots * pv, 2)
+
     def _apply_signal(self, eng: St9Engine, sig: dict, icfg) -> None:
         with self._lock:                # против гонки с flat_all/update_* из HTTP (аудит #5)
             self._apply_signal_locked(eng, sig, icfg)
@@ -302,11 +334,23 @@ class St9Session:
                                            f"{closing.lots} — выход повторится следующим баром")
                     self.save_session()
                     return
+                exit_fill = self._last_fill_px
+                entry_fill = self._entry_fill_px.pop(icfg.secid, None)
                 tr = eng.close(sig["px"], ts, sig["reason"])
-                self.trades.append(tr.__dict__)
+                # НАБЛЮДАЕМОСТЬ ИЗДЕРЖЕК: журнал ведёт P&L по цене БАРА (sig["px"]) — это
+                # сознательно, менять экономику сделок здесь нельзя. Рядом кладём цены
+                # ФАКТИЧЕСКИХ филлов и проскальзывание в ₽: без них издержки исполнения
+                # неизмеримы (история операций sandbox через REST недоступна — 404).
+                rec = dict(tr.__dict__)
+                rec["entry_fill"] = entry_fill
+                rec["exit_fill"] = exit_fill
+                rec["slip_rub"] = self._slip_rub(tr, entry_fill, exit_fill, eng.pv)
+                self.trades.append(rec)
                 self.contracts.pop(icfg.secid, None)
+                slip_s = (f", проскальзывание {rec['slip_rub']:+.0f}₽"
+                          if rec["slip_rub"] is not None else "")
                 self.log_event("exit", f"{eng.secid}: выход {tr.side} ({tr.reason}) "
-                                       f"net {tr.net_pnl_rub:+.0f}₽")
+                                       f"net {tr.net_pnl_rub:+.0f}₽{slip_s}")
             if sig["act"] in ("open", "reverse") and self.cfg.trading_enabled:
                 side = sig["new_side"]
                 if icfg.quarterly:
@@ -323,10 +367,21 @@ class St9Session:
                     self.log_event("warn", f"{eng.secid}: вход не исполнен (0 лотов налито)")
                 else:
                     eng.open(side, sig["px"], got, ts, sig["atr"])
+                    # цена филла входа живёт до закрытия сделки (переживает рестарт).
+                    # Запись БЕЗУСЛОВНАЯ: при неизвестной цене ключ надо СТЕРЕТЬ, иначе
+                    # значение прошлой сделки приклеится к новой и сфабрикует
+                    # «выигрыш на исполнении» (положительный slip → ложный повод расти).
+                    if self._last_fill_px:
+                        self._entry_fill_px[icfg.secid] = self._last_fill_px
+                    else:
+                        self._entry_fill_px.pop(icfg.secid, None)
                     if icfg.quarterly:
                         self.contracts[icfg.secid] = sec
+                    fill_s = (f" (филл {self._last_fill_px:.4g})"
+                              if self._last_fill_px else "")
                     self.log_event("position", f"{eng.secid}: {side.upper()} {got}лот"
-                                               f"{' '+sec if sec!=eng.secid else ''} @ {sig['px']}")
+                                               f"{' '+sec if sec!=eng.secid else ''} @ {sig['px']}"
+                                               f"{fill_s}")
             self.save_session()
         except Exception as e:  # noqa: BLE001
             self.log_event("warn", f"{eng.secid}: исполнение не удалось: {str(e)[:80]}")
@@ -364,8 +419,14 @@ class St9Session:
                                        f"остаток {p.lots} на {old_sec}, повтор следующим тиком")
                 self.save_session()
                 return
+            exit_fill = self._last_fill_px
+            entry_fill = self._entry_fill_px.pop(icfg.secid, None)
             tr = eng.close(old_px, ts, "roll")
-            self.trades.append(tr.__dict__)
+            rec = dict(tr.__dict__)
+            rec["entry_fill"] = entry_fill
+            rec["exit_fill"] = exit_fill
+            rec["slip_rub"] = self._slip_rub(tr, entry_fill, exit_fill, eng.pv)
+            self.trades.append(rec)
             eng.pv = new_pv
             lots = self._entry_lots(icfg, new_px, new_pv, side, new_sec)
             got2 = self._order(new_sec, lots, "BUY" if side == "long" else "SELL",
@@ -379,6 +440,10 @@ class St9Session:
                 return
             atr_equiv = new_px * trail_off_pct / eng.atr_mult
             eng.open(side, new_px, got2, ts, atr_equiv)
+            if self._last_fill_px:      # филл НОВОГО контракта — база для след. сделки
+                self._entry_fill_px[icfg.secid] = self._last_fill_px
+            else:                       # цена неизвестна — стереть, не тащить старую
+                self._entry_fill_px.pop(icfg.secid, None)
             # бары чистим, last_bar_ts НЕ трогаем: следующий тик увидит «last>0, баров нет»
             # и сделает БЭКФИЛЛ индикаторов без сигналов. Прежний pop() уводил в ветку
             # «первого прогрева», которая стирала position — реальные лоты оставались
@@ -627,8 +692,14 @@ class St9Session:
                 partial.append({"secid": eng.secid, "closed": got, "left": p.lots})
                 self.log_event("warn", f"🚨 {eng.secid}: flat-all закрыл {got}, остаток {p.lots}")
                 continue
+            exit_fill = self._last_fill_px
+            entry_fill = self._entry_fill_px.pop(icfg.secid, None)
             tr = eng.close(px, ts, "flat_all")
-            self.trades.append(tr.__dict__)
+            rec = dict(tr.__dict__)
+            rec["entry_fill"] = entry_fill
+            rec["exit_fill"] = exit_fill
+            rec["slip_rub"] = self._slip_rub(tr, entry_fill, exit_fill, eng.pv)
+            self.trades.append(rec)
             self.contracts.pop(icfg.secid, None)
             closed.append({"secid": eng.secid, "side": tr.side, "lots": tr.lots,
                            "exit": tr.exit, "net_pnl_rub": tr.net_pnl_rub})
@@ -920,8 +991,23 @@ class St9Session:
             "capital_dd_stop_pct": self.cfg.strategy.capital_dd_stop_pct,
             "capital_peak_rub": round(self._capital_peak) or None,
             "dd_halted": self._dd_halted,
+            "slippage": self._slippage_summary(),
             "events": self.events[-20:],
         }
+
+    def _slippage_summary(self) -> dict:
+        """Сводка ИЗМЕРЕННОГО проскальзывания по закрытым сделкам. Показывает, насколько
+        фактические филлы разошлись с ценами бара, по которым движок считает P&L.
+        measured < len(trades) — норма: у сделок до внедрения замера цен филлов нет."""
+        vals = [t["slip_rub"] for t in self.trades
+                if isinstance(t, dict) and t.get("slip_rub") is not None]
+        if not vals:
+            return {"measured": 0, "trades": len(self.trades), "total_rub": None,
+                    "avg_rub": None, "worst_rub": None}
+        return {"measured": len(vals), "trades": len(self.trades),
+                "total_rub": round(sum(vals), 2),
+                "avg_rub": round(sum(vals) / len(vals), 2),
+                "worst_rub": round(min(vals), 2)}
 
     def _try_restore_positions(self) -> None:
         """Восстановить позиции из session в движки. Отложенно: если при загрузке pv был
@@ -955,6 +1041,7 @@ class St9Session:
                     "contracts": self.contracts,
                     "axis_overrides": self.axis_overrides,
                     "capital_peak": self._capital_peak, "dd_halted": self._dd_halted,
+                    "entry_fill_px": self._entry_fill_px,
                     "positions": pos}
             self._session_file.write_text(json.dumps(data, ensure_ascii=False))
         except Exception:  # noqa: BLE001
@@ -977,6 +1064,10 @@ class St9Session:
         self._last_bar_ts = {k: int(v) for k, v in (d.get("last_bar_ts") or {}).items()}
         self.exec_anchor = d.get("exec_anchor") or None
         self.contracts = dict(d.get("contracts") or {})
+        # цена филла ВХОДА живёт до закрытия сделки — переживает рестарт под позицией,
+        # иначе проскальзывание такой сделки посчитать уже нечем (None вместо вранья)
+        self._entry_fill_px = {k: float(v) for k, v in
+                               (d.get("entry_fill_px") or {}).items() if v}
         cfg = d.get("config")
         if cfg:
             try:
