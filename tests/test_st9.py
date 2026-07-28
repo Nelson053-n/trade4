@@ -618,7 +618,9 @@ def test_order_averages_fill_price_over_slices(monkeypatch):
     s = svc.St9Session()
     s.cfg.mode = "tbank_sandbox"
     s.cfg.account_id = "acc"
-    monkeypatch.setattr(sb, "find_future", lambda sec: {"uid": "u1"})
+    # basicAssetSize=1 → сумма филла равна котировке (GLDRUBF-подобный случай)
+    monkeypatch.setattr(sb, "find_future",
+                        lambda sec: {"uid": "u1", "basicAssetSize": {"units": "1", "nano": 0}})
     # РАЗНЫЕ цены (units+nano!) — иначе тест зелёный при любой логике усреднения
     resp = iter([
         {"lotsExecuted": "1", "executedOrderPrice": {"units": "78", "nano": 200000000}},
@@ -629,6 +631,24 @@ def test_order_averages_fill_price_over_slices(monkeypatch):
     got = s._order("USDRUBF", 3, "BUY", ref_px=78.0)
     assert got == 2                            # реджект-слайс не налился
     assert abs(s._last_fill_px - 78.5) < 1e-9  # (78.2+78.8)/2, нулевой слайс отброшен
+
+
+def test_fill_price_divided_by_basic_asset_size(monkeypatch):
+    """executedOrderPrice — СУММА В РУБЛЯХ за контракт, не котировка: делим на
+    basicAssetSize. Инцидент 28.07: филл IMOEXF (basicAssetSize=10) читался как
+    22146 против цены бара 2214 → проскальзывание «19932 тика»."""
+    import app.st9.service as svc
+    from app.st4 import tbank_sandbox as sb
+    s = svc.St9Session()
+    s.cfg.mode = "tbank_sandbox"
+    s.cfg.account_id = "acc"
+    monkeypatch.setattr(sb, "find_future",
+                        lambda sec: {"uid": "u1", "basicAssetSize": {"units": "10", "nano": 0}})
+    monkeypatch.setattr(sb, "post_order", lambda *a, **k: {
+        "lotsExecuted": "1",
+        "executedOrderPrice": {"units": "22146", "nano": 250000000}})   # 2214.625 × 10
+    assert s._order("IMOEXF", 1, "BUY", ref_px=2214.0) == 1
+    assert abs(s._last_fill_px - 2214.625) < 1e-6      # котировка, НЕ рублёвая сумма
 
 
 def test_order_resets_fill_price_before_early_returns(monkeypatch):
@@ -683,3 +703,23 @@ def test_entry_fill_survives_restart(tmp_path, monkeypatch):
     s2._session_file = tmp_path / "s9.json"
     s2.load_session()
     assert s2._entry_fill_px == {"USDRUBF": 78.25}
+
+
+def test_implausible_entry_fill_dropped_on_load(tmp_path):
+    """Битая цена филла из старого session (рублёвая сумма вместо котировки) не должна
+    пережить загрузку — иначе даст фиктивное проскальзывание в миллионы при закрытии."""
+    import json
+    import app.st9.service as svc
+    f = tmp_path / "s9.json"
+    f.write_text(json.dumps({
+        "entry_fill_px": {"IMOEXF": 22146.25, "GLDRUBF": 10250.9},
+        "positions": {"IMOEXF": {"side": "long", "entry": 2214.0, "lots": 8,
+                                 "entry_ts": 1, "trail": 2100.0, "fees_rub": 0.0},
+                      "GLDRUBF": {"side": "long", "entry": 10224.7, "lots": 16,
+                                  "entry_ts": 1, "trail": 10000.0, "fees_rub": 0.0}},
+    }, ensure_ascii=False))
+    s = svc.St9Session()
+    s._session_file = f
+    s.load_session()
+    assert "IMOEXF" not in s._entry_fill_px       # 22146 против 2214 — ×10, выброшена
+    assert s._entry_fill_px["GLDRUBF"] == 10250.9  # правдоподобная — сохранена

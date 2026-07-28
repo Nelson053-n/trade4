@@ -196,6 +196,13 @@ class St9Session:
         filled = 0
         amount_sum = 0.0        # Σ executedOrderPrice по слайсам — для средней цены филла
         priced_lots = 0         # лоты, по которым брокер вернул цену (не все могут)
+        # executedOrderPrice — СУММА В РУБЛЯХ за контракт, а НЕ котировка: чтобы получить
+        # цену в пунктах, делим на basicAssetSize (IMOEXF=10, USDRUBF=1000, GLDRUBF=1).
+        # Без этого филл IMOEXF выглядел как 22146 против цены бара 2214 (замер 28.07).
+        try:
+            bas = sb._q_to_float(sb.find_future(secid).get("basicAssetSize")) or 1.0
+        except Exception:  # noqa: BLE001
+            bas = 1.0
         for i in range(lots):
             try:
                 if real:
@@ -227,7 +234,8 @@ class St9Session:
                     priced_lots += got_i
             except Exception:  # noqa: BLE001  цена филла не критична — только наблюдаемость
                 pass
-        self._last_fill_px = (amount_sum / priced_lots) if priced_lots > 0 else None
+        # /bas — приводим рублёвую сумму к КОТИРОВКЕ, в которой движок считает P&L
+        self._last_fill_px = (amount_sum / priced_lots / bas) if priced_lots > 0 else None
         return filled
 
     def _trade_secid(self, icfg) -> str:
@@ -995,6 +1003,18 @@ class St9Session:
             "events": self.events[-20:],
         }
 
+    def _drop_implausible_entry_fills(self, positions: dict) -> None:
+        """Выбросить цены филлов, не похожие на котировку (>20% от цены входа позиции).
+        Файлы до фикса 28.07 хранят РУБЛЁВУЮ СУММУ (IMOEXF: 22146 при цене бара 2214) —
+        такая запись дала бы фиктивное проскальзывание в миллионы при закрытии."""
+        for sec, pd in positions.items():
+            fill = self._entry_fill_px.get(sec)
+            entry = (pd or {}).get("entry")
+            if fill and entry and abs(fill - entry) / entry > 0.20:
+                self._entry_fill_px.pop(sec, None)
+                self.log_event("warn", f"{sec}: цена филла входа {fill:.4g} не похожа на "
+                                       f"котировку (вход {entry}) — замер сброшен")
+
     def _slippage_summary(self) -> dict:
         """Сводка ИЗМЕРЕННОГО проскальзывания по закрытым сделкам. Показывает, насколько
         фактические филлы разошлись с ценами бара, по которым движок считает P&L.
@@ -1068,6 +1088,7 @@ class St9Session:
         # иначе проскальзывание такой сделки посчитать уже нечем (None вместо вранья)
         self._entry_fill_px = {k: float(v) for k, v in
                                (d.get("entry_fill_px") or {}).items() if v}
+        self._drop_implausible_entry_fills(d.get("positions") or {})
         cfg = d.get("config")
         if cfg:
             try:
