@@ -143,7 +143,8 @@ class St9Session:
             self.engines[icfg.secid] = St9Engine(
                 icfg.secid, icfg.don_enter, icfg.don_exit, icfg.atr_mult,
                 s.atr_period, pv=pv,
-                fee_per_lot=s.fee_per_lot, allow_short=s.allow_short)
+                fee_per_lot=s.fee_per_lot, allow_short=s.allow_short,
+                fee_pct_notional=s.fee_pct_notional)
         return self.engines[icfg.secid]
 
     # ---------- боевой контур: взвод реальной торговли (канон st5) ----------

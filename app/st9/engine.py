@@ -47,7 +47,8 @@ class St9Trade:
 class St9Engine:
     def __init__(self, secid: str, don_enter: int, don_exit: int,
                  atr_mult: float, atr_period: int, pv: float,
-                 fee_per_lot: float = 2.0, allow_short: bool = True):
+                 fee_per_lot: float = 0.0, allow_short: bool = True,
+                 fee_pct_notional: float = 0.05):
         self.secid = secid
         self.don_enter = don_enter
         self.don_exit = don_exit
@@ -55,12 +56,20 @@ class St9Engine:
         self.atr_period = atr_period
         self.pv = pv
         self.fee_per_lot = fee_per_lot
+        self.fee_pct_notional = fee_pct_notional
         self.allow_short = allow_short
         need = max(don_enter, don_exit, atr_period) + 2
         self.bars: deque[Bar] = deque(maxlen=need + 60)
         self.position: St9Position | None = None
         self.trades: list[St9Trade] = []
         self.last_signal: str = ""      # для снапшота/отладки
+
+    # ---------- издержки ----------
+    def _fee(self, px: float, lots: int) -> float:
+        """Комиссия ОДНОЙ стороны: % нотионала (px×pv×лоты) + опциональная ₽/лот.
+        Замер по счёту 30.07: ровно 0.05% нотионала, пропорционально ЦЕНЕ — поэтому
+        считается по цене каждой стороны отдельно, а не один раз при входе."""
+        return abs(px) * self.pv * lots * self.fee_pct_notional / 100.0 + lots * self.fee_per_lot
 
     # ---------- индикаторы ----------
     def _atr(self) -> float | None:
@@ -143,13 +152,13 @@ class St9Engine:
     def open(self, side: str, px: float, lots: int, ts: int, atr: float) -> None:
         trail = px - self.atr_mult * atr if side == "long" else px + self.atr_mult * atr
         self.position = St9Position(side=side, entry=px, lots=lots, entry_ts=ts,
-                                    trail=trail, fees_rub=lots * self.fee_per_lot)
+                                    trail=trail, fees_rub=self._fee(px, lots))
 
     def close(self, px: float, ts: int, reason: str) -> St9Trade:
         p = self.position
         d = 1 if p.side == "long" else -1
         gross = (px - p.entry) * d * p.lots * self.pv
-        fees = p.fees_rub + p.lots * self.fee_per_lot
+        fees = p.fees_rub + self._fee(px, p.lots)
         tr = St9Trade(secid=self.secid, side=p.side, entry=p.entry, exit=px,
                       lots=p.lots, entry_ts=p.entry_ts, exit_ts=ts,
                       gross_pnl_rub=round(gross, 2), fees_rub=round(fees, 2),

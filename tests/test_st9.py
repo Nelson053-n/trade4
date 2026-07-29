@@ -70,7 +70,7 @@ def test_reverse_on_counter_breakout():
 
 def test_pnl_long_short():
     """P&L: лонг зарабатывает на росте, шорт на падении; комиссии round-trip."""
-    e = _eng(fee_per_lot=2.0, pv=10.0)
+    e = _eng(fee_per_lot=2.0, pv=10.0, fee_pct_notional=0.0)
     e.open("long", 100.0, 3, 1, atr=1.0)
     tr = e.close(104.0, 2, "trail")
     assert abs(tr.gross_pnl_rub - 4 * 3 * 10) < 0.01      # +120
@@ -79,6 +79,33 @@ def test_pnl_long_short():
     e.open("short", 100.0, 2, 3, atr=1.0)
     tr2 = e.close(97.0, 4, "reverse")
     assert abs(tr2.gross_pnl_rub - 3 * 2 * 10) < 0.01     # +60
+
+
+def test_fee_is_pct_of_notional():
+    """Комиссия — 0.05% нотионала (px×pv×лоты) за сторону, считается по цене КАЖДОЙ
+    стороны отдельно (замер по счёту 30.07, 292 сделки: ровно 0.05000% на всех осях)."""
+    e = _eng(pv=10.0, fee_per_lot=0.0, fee_pct_notional=0.05)
+    e.open("long", 2000.0, 4, 1, atr=1.0)
+    tr = e.close(2500.0, 2, "trail")
+    fee_in = 2000.0 * 10 * 4 * 0.0005      # 40.0
+    fee_out = 2500.0 * 10 * 4 * 0.0005     # 50.0
+    assert abs(tr.fees_rub - (fee_in + fee_out)) < 0.01
+    # пропорциональна цене: выход дороже входа → комиссия выхода больше
+    assert fee_out > fee_in
+
+
+def test_fee_matches_real_broker_charges():
+    """Формула воспроизводит фактические списания со счёта (30.07): 0.05% нотионала
+    даёт 5.08 ₽/лот GLDRUBF, 11.07 ₽/лот IMOEXF, 39.19 ₽/лот USDRUBF."""
+    for pv, px, expect in ((1.0, 10163.0, 5.081), (10.0, 2214.0, 11.07), (1000.0, 78.4, 39.2)):
+        e = _eng(pv=pv, fee_per_lot=0.0, fee_pct_notional=0.05)
+        assert abs(e._fee(px, 1) - expect) < 0.02, f"pv={pv}"
+
+
+def test_fee_uses_absolute_price():
+    """Отрицательная цена (битые данные) не даёт отрицательную комиссию."""
+    e = _eng(pv=1.0, fee_per_lot=0.0, fee_pct_notional=0.05)
+    assert e._fee(-100.0, 2) > 0
 
 
 def test_no_signal_until_warmup():
