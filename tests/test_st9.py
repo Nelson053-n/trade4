@@ -81,6 +81,177 @@ def test_pnl_long_short():
     assert abs(tr2.gross_pnl_rub - 3 * 2 * 10) < 0.01     # +60
 
 
+def _sess_for_orders(mode="tbank_sandbox"):
+    """Голая сессия для тестов исполнения (без сети в конструкторе)."""
+    from app.st9.service import St9Session
+    from app.st9.config import St9Config
+    s = St9Session.__new__(St9Session)
+    s.cfg = St9Config()
+    s.cfg.mode = mode
+    s.cfg.account_id = "acc"
+    s.events = []
+    s.log_event = lambda k, m: s.events.append(m)
+    s._tick_cache = {}
+    s._last_fill_px = None
+    return s
+
+
+def test_limit_cap_accounts_for_requested_volume():
+    """Потолок берётся с уровня, где НАБИРАЕТСЯ объём заявки, а не с первого уровня:
+    иначе на тонком стакане лимит отсекает хвост и мы получаем недолив."""
+    from app.st4 import tbank_sandbox as sb
+    s = _sess_for_orders()
+    s._tick_cache["u"] = 0.5
+    book = {"asks": [{"price": 100.0, "qty": 2}, {"price": 100.5, "qty": 3},
+                     {"price": 101.0, "qty": 50}], "bids": []}
+    old = sb.order_book
+    sb.order_book = lambda uid, depth=10: book
+    try:
+        # 2 лота набираются на первом уровне → потолок 100.0 + 2 тика
+        assert s._limit_cap("u", True, 2) == 101.0
+        # 6 лотов требуют третьего уровня (2+3+50) → потолок 101.0 + 2 тика
+        assert s._limit_cap("u", True, 6) == 102.0
+    finally:
+        sb.order_book = old
+
+
+def test_limit_cap_is_marketable_not_passive():
+    """Для BUY потолок ВЫШЕ ask (не ниже): пассивная лимитка на пробое не исполнится
+    и сигнал будет потерян. Для SELL — ниже bid."""
+    from app.st4 import tbank_sandbox as sb
+    s = _sess_for_orders()
+    s._tick_cache["u"] = 0.1
+    book = {"asks": [{"price": 200.0, "qty": 99}], "bids": [{"price": 199.0, "qty": 99}]}
+    old = sb.order_book
+    sb.order_book = lambda uid, depth=10: book
+    try:
+        assert s._limit_cap("u", True, 1) > 200.0     # buy платит выше ask
+        assert s._limit_cap("u", False, 1) < 199.0    # sell отдаёт ниже bid
+    finally:
+        sb.order_book = old
+
+
+def test_limit_cap_none_when_tick_unknown():
+    """Неизвестный шаг цены → маркет, а НЕ лимит по некратной цене (биржа отвергнет).
+    Ровно эта дыра сделала лимитки st5 фикцией на полгода."""
+    from app.st4 import tbank_sandbox as sb
+    s = _sess_for_orders()
+    old_f, old_ob = sb.future_by_uid, sb.order_book
+    sb.future_by_uid = lambda uid: (_ for _ in ()).throw(RuntimeError("нет в справочнике"))
+    sb.order_book = lambda uid, depth=10: {"asks": [{"price": 100.0, "qty": 9}], "bids": []}
+    try:
+        assert s._limit_cap("u", True, 1) is None
+    finally:
+        sb.future_by_uid, sb.order_book = old_f, old_ob
+
+
+def test_limit_cap_rounds_to_tick():
+    """Лимит-цена кратна шагу: биржа отвергает некратные."""
+    from app.st4 import tbank_sandbox as sb
+    s = _sess_for_orders()
+    s._tick_cache["u"] = 0.25
+    old = sb.order_book
+    sb.order_book = lambda uid, depth=10: {"asks": [{"price": 10.13, "qty": 9}], "bids": []}
+    try:
+        cap = s._limit_cap("u", True, 1)
+        assert abs(cap / 0.25 - round(cap / 0.25)) < 1e-9, cap
+    finally:
+        sb.order_book = old
+
+
+def test_order_sends_single_order_for_all_lots():
+    """Весь объём одним ордером, а не N по 1 лоту: 17 лотов = 17 round-trip'ов,
+    цена успевает уйти (замер: ~1.1с только на сеть)."""
+    from app.st4 import tbank_sandbox as sb
+    s = _sess_for_orders()
+    sent = []
+    old = (sb.find_future, sb.post_order, sb.order_book, sb.future_by_uid)
+    sb.find_future = lambda x: {"uid": "u", "basicAssetSize": {"units": "1", "nano": 0}}
+    sb.future_by_uid = lambda uid: {"minPriceIncrement": {"units": "0", "nano": 100000000}}
+    sb.order_book = lambda uid, depth=10: {"asks": [{"price": 100.0, "qty": 99}],
+                                           "bids": [{"price": 99.0, "qty": 99}]}
+    def _post(acc, uid, lots, direction, oid, order_type="ORDER_TYPE_MARKET", price=None):
+        sent.append({"lots": lots, "type": order_type, "price": price})
+        return {"lotsExecuted": str(lots),
+                "executedOrderPrice": {"units": str(100 * lots), "nano": 0}}
+    sb.post_order = _post
+    try:
+        got = s._order("GLDRUBF", 17, "BUY", ref_px=100.0)
+    finally:
+        sb.find_future, sb.post_order, sb.order_book, sb.future_by_uid = old
+    assert got == 17
+    assert len(sent) == 1, f"ожидали 1 ордер, отправлено {len(sent)}"
+    assert sent[0]["lots"] == 17 and sent[0]["type"] == "ORDER_TYPE_LIMIT"
+
+
+def test_order_tops_up_with_market_when_limit_underfills():
+    """Недолив лимитки добирается МАРКЕТОМ: иначе движок считает позицию открытой
+    на запрошенный объём, а на счёте меньше — рассинхрон движок↔счёт."""
+    from app.st4 import tbank_sandbox as sb
+    s = _sess_for_orders()
+    sent = []
+    old = (sb.find_future, sb.post_order, sb.order_book, sb.future_by_uid)
+    sb.find_future = lambda x: {"uid": "u", "basicAssetSize": {"units": "1", "nano": 0}}
+    sb.future_by_uid = lambda uid: {"minPriceIncrement": {"units": "0", "nano": 100000000}}
+    sb.order_book = lambda uid, depth=10: {"asks": [{"price": 100.0, "qty": 99}],
+                                           "bids": [{"price": 99.0, "qty": 99}]}
+    def _post(acc, uid, lots, direction, oid, order_type="ORDER_TYPE_MARKET", price=None):
+        sent.append({"lots": lots, "type": order_type})
+        got = 6 if order_type == "ORDER_TYPE_LIMIT" else lots    # лимит налил не всё
+        return {"lotsExecuted": str(got),
+                "executedOrderPrice": {"units": str(100 * got), "nano": 0}}
+    sb.post_order = _post
+    try:
+        got = s._order("GLDRUBF", 10, "BUY", ref_px=100.0)
+    finally:
+        sb.find_future, sb.post_order, sb.order_book, sb.future_by_uid = old
+    assert got == 10, f"недолив не добран: {got}"
+    assert len(sent) == 2
+    assert sent[1]["type"] == "ORDER_TYPE_MARKET" and sent[1]["lots"] == 4
+
+
+def test_order_falls_back_to_market_when_book_unavailable():
+    """Стакан недоступен → маркет. Пропущенный выход опаснее лишнего тика."""
+    from app.st4 import tbank_sandbox as sb
+    s = _sess_for_orders()
+    sent = []
+    old = (sb.find_future, sb.post_order, sb.order_book, sb.future_by_uid)
+    sb.find_future = lambda x: {"uid": "u", "basicAssetSize": {"units": "1", "nano": 0}}
+    sb.future_by_uid = lambda uid: {"minPriceIncrement": {"units": "0", "nano": 100000000}}
+    def _boom(uid, depth=10): raise RuntimeError("стакан недоступен")
+    sb.order_book = _boom
+    def _post(acc, uid, lots, direction, oid, order_type="ORDER_TYPE_MARKET", price=None):
+        sent.append(order_type)
+        return {"lotsExecuted": str(lots), "executedOrderPrice": {"units": "100", "nano": 0}}
+    sb.post_order = _post
+    try:
+        assert s._order("GLDRUBF", 3, "BUY", ref_px=100.0) == 3
+    finally:
+        sb.find_future, sb.post_order, sb.order_book, sb.future_by_uid = old
+    assert sent == ["ORDER_TYPE_MARKET"]
+
+
+def test_limit_orders_can_be_disabled():
+    """Аварийный тумблер use_limit_orders=False возвращает чистый маркет."""
+    from app.st4 import tbank_sandbox as sb
+    s = _sess_for_orders()
+    s.cfg.strategy.use_limit_orders = False
+    sent = []
+    old = (sb.find_future, sb.post_order, sb.order_book, sb.future_by_uid)
+    sb.find_future = lambda x: {"uid": "u", "basicAssetSize": {"units": "1", "nano": 0}}
+    sb.future_by_uid = lambda uid: {"minPriceIncrement": {"units": "0", "nano": 100000000}}
+    sb.order_book = lambda uid, depth=10: {"asks": [{"price": 100.0, "qty": 99}], "bids": []}
+    def _post(acc, uid, lots, direction, oid, order_type="ORDER_TYPE_MARKET", price=None):
+        sent.append(order_type)
+        return {"lotsExecuted": str(lots), "executedOrderPrice": {"units": "100", "nano": 0}}
+    sb.post_order = _post
+    try:
+        s._order("GLDRUBF", 5, "BUY", ref_px=100.0)
+    finally:
+        sb.find_future, sb.post_order, sb.order_book, sb.future_by_uid = old
+    assert sent == ["ORDER_TYPE_MARKET"]
+
+
 def test_poll_seconds_comes_from_code_not_session(tmp_path):
     """poll_seconds берётся ИЗ КОДА, а не из session-файла (ловушка 30.07: смена
     600→60с была инертна на проде — старый session перетирал значение при загрузке).
@@ -436,7 +607,8 @@ def test_st9_real_order_blocked_when_not_armed(monkeypatch):
 
 
 def test_st9_real_order_armed_goes_live(monkeypatch):
-    """Взведённый real после cooldown: 1-лотовые ордера идут в боевой API, sha256-id."""
+    """Взведённый real после cooldown: ордер идёт в БОЕВОЙ API с sha256-id.
+    С 30.07 объём уходит ОДНИМ ордером (было N по 1 лоту) — проверяем и это."""
     import time
     import app.st9.service as svc
     from app.st4 import tbank_live as live, tbank_sandbox as sb
@@ -447,14 +619,19 @@ def test_st9_real_order_armed_goes_live(monkeypatch):
     calls = []
     monkeypatch.setattr(sb, "find_future", lambda sec: {"uid": "u1"})
     monkeypatch.setattr(sb, "last_price", lambda uid: 80.0)
+    monkeypatch.setattr(sb, "order_book",
+                        lambda uid, depth=10: {"asks": [{"price": 80.0, "qty": 99}],
+                                               "bids": [{"price": 79.9, "qty": 99}]})
+    monkeypatch.setattr(sb, "future_by_uid",
+                        lambda uid: {"minPriceIncrement": {"units": "0", "nano": 10000000}})
     monkeypatch.setattr(live, "post_order",
                         lambda acc, uid, lots, d, oid, **kw:
-                        calls.append(oid) or {"lotsExecuted": 1})
+                        calls.append(oid) or {"lotsExecuted": str(lots)})
     monkeypatch.setattr(sb, "post_order",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("sandbox path!")))
     assert s._order("USDRUBF", 3, "BUY", ref_px=80.0) == 3
-    assert len(calls) == 3 and all(len(o) == 32 and "-" not in o for o in calls)
-    assert len(set(calls)) == 3                        # id уникальны (дискриминатор i)
+    assert len(calls) == 1, f"объём должен уходить одним ордером, ушло {len(calls)}"
+    assert len(calls[0]) == 32 and "-" not in calls[0]      # sha256-id, не uuid
 
 
 def test_st9_real_price_sanity_blocks(monkeypatch):
@@ -818,8 +995,9 @@ def test_slip_rub_none_when_fill_unknown():
 
 
 def test_order_averages_fill_price_over_slices(monkeypatch):
-    """_order копит executedOrderPrice по 1-лотовым слайсам и делит на лоты:
-    executedOrderPrice — СУММА за слайс, не цена контракта (канон st4)."""
+    """executedOrderPrice — СУММА за лоты ордера, не цена контракта (канон st4):
+    делим на лоты. Проверяем на паре «лимит налил часть + добор маркетом»: цена
+    усредняется по ОБОИМ ордерам, а не берётся от последнего."""
     import app.st9.service as svc
     from app.st4 import tbank_sandbox as sb
     s = svc.St9Session()
@@ -828,16 +1006,20 @@ def test_order_averages_fill_price_over_slices(monkeypatch):
     # basicAssetSize=1 → сумма филла равна котировке (GLDRUBF-подобный случай)
     monkeypatch.setattr(sb, "find_future",
                         lambda sec: {"uid": "u1", "basicAssetSize": {"units": "1", "nano": 0}})
-    # РАЗНЫЕ цены (units+nano!) — иначе тест зелёный при любой логике усреднения
+    monkeypatch.setattr(sb, "future_by_uid",
+                        lambda uid: {"minPriceIncrement": {"units": "0", "nano": 100000000}})
+    monkeypatch.setattr(sb, "order_book",
+                        lambda uid, depth=10: {"asks": [{"price": 78.0, "qty": 99}],
+                                               "bids": [{"price": 77.9, "qty": 99}]})
+    # лимит налил 2 лота по 78.2 (сумма 156.4), добор маркетом 2 лота по 78.8 (157.6)
     resp = iter([
-        {"lotsExecuted": "1", "executedOrderPrice": {"units": "78", "nano": 200000000}},
-        {"lotsExecuted": "0", "executedOrderPrice": {"units": "0", "nano": 0}},   # реджект
-        {"lotsExecuted": "1", "executedOrderPrice": {"units": "78", "nano": 800000000}},
+        {"lotsExecuted": "2", "executedOrderPrice": {"units": "156", "nano": 400000000}},
+        {"lotsExecuted": "2", "executedOrderPrice": {"units": "157", "nano": 600000000}},
     ])
     monkeypatch.setattr(sb, "post_order", lambda *a, **k: next(resp))
-    got = s._order("USDRUBF", 3, "BUY", ref_px=78.0)
-    assert got == 2                            # реджект-слайс не налился
-    assert abs(s._last_fill_px - 78.5) < 1e-9  # (78.2+78.8)/2, нулевой слайс отброшен
+    got = s._order("USDRUBF", 4, "BUY", ref_px=78.0)
+    assert got == 4                              # 2 лимитом + 2 добором
+    assert abs(s._last_fill_px - 78.5) < 1e-9    # (156.4+157.6)/4 = 78.5
 
 
 def test_fill_price_divided_by_basic_asset_size(monkeypatch):

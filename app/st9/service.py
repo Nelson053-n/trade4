@@ -62,6 +62,9 @@ class St9Session:
     # ГО перечитываем раз в час: биржа меняет ставки редко, но в волатильность —
     # именно тогда, когда устаревшее значение опаснее всего (см. _go_per_lot)
     _GO_CACHE_TTL_SEC = 3600.0
+    # запас над лучшей встречной ценой для marketable-limit (в шагах цены).
+    # 0 = лимит ровно по встречной (риск недолива на дрожании), больше = ближе к маркету.
+    _LIMIT_SLACK_TICKS = 2
 
     def __init__(self):
         self.cfg = St9Config()
@@ -90,6 +93,7 @@ class St9Session:
         self._dd_halted = False                        # сработал стоп просадки капитала → блок входов
         self.capital_sizing_rub = 0.0                  # ЧЕСТНЫЙ капитал (money+ГО) для сайзинга плеча
         self._go_lot_cache: dict[tuple, tuple] = {}    # (sec,side) -> (ГО на лот, ts кэша)
+        self._tick_cache: dict[str, float] = {}        # uid -> шаг цены (справочник тяжёлый)
         self._dd_breach_count = 0                      # подтверждение просадки (2 тика подряд, против битого чтения)
         self._last_fill_px: float | None = None        # средняя цена ПОСЛЕДНЕГО филла (наблюдаемость проскальзывания)
         self._entry_fill_px: dict[str, float] = {}     # secid -> цена филла ВХОДА (персист, живёт до закрытия)
@@ -166,6 +170,60 @@ class St9Session:
         started = self.state.get("session_started") or 0
         return (time.time() - started) >= 600
 
+    def _tick_size(self, uid: str) -> float | None:
+        """Шаг цены инструмента по UID. Кэш обязателен: future_by_uid тянет ВЕСЬ
+        справочник фьючерсов (~5 МБ), звать его на каждый ордер нельзя.
+        ⚠️ Резолв строго по uid, а не по asset-коду: в справочнике лежат коды СЕРИЙ —
+        на этом сгорели лимитки st5 (find_future('SNGR') кидал исключение → tick=None →
+        все ордера уходили маркетом, а «лимитный режим» полгода был фикцией)."""
+        if uid in self._tick_cache:
+            return self._tick_cache[uid] or None
+        try:
+            from ..st4 import tbank_sandbox as sb
+            it = sb.future_by_uid(uid)
+            self._tick_cache[uid] = sb._q_to_float(it.get("minPriceIncrement"))
+        except Exception:  # noqa: BLE001
+            return None
+        return self._tick_cache.get(uid) or None
+
+    def _limit_cap(self, uid: str, is_buy: bool, lots: int) -> float | None:
+        """Потолок marketable-limit из стакана. Это НЕ пассивная лимитка: цена ставится
+        ЗА лучшей встречной (buy → выше ask), поэтому ордер исполняется сразу как
+        рыночный, но НЕ глубже потолка — защита от съедания стакана в плохой момент.
+        Для трендового пробоя это принципиально: пассивная лимитка на входе просто не
+        исполнится (цена уходит от нас), и сигнал будет потерян.
+
+        Потолок берём не от первого уровня, а от уровня, где НАБИРАЕТСЯ наш объём,
+        плюс запас _LIMIT_SLACK_TICKS. Иначе на тонком стакане лимит отсечёт хвост
+        заявки и мы получим частичный филл там, где маркет налил бы полностью.
+        None → маркет (стакан недоступен / шаг цены неизвестен — гарантия исполнения
+        важнее экономии: пропущенный выход опаснее лишнего тика проскальзывания)."""
+        try:
+            from ..st4 import tbank_sandbox as sb
+            tick = self._tick_size(uid)
+            if not tick or tick <= 0:
+                return None
+            ob = sb.order_book(uid, 10)
+            side = ob.get("asks") if is_buy else ob.get("bids")
+            if not side:
+                return None
+            # уровень, на котором накопится нужный объём
+            acc, px = 0, None
+            for lvl in side:
+                acc += int(lvl.get("qty") or 0)
+                px = float(lvl.get("price") or 0)
+                if acc >= lots:
+                    break
+            if not px or px <= 0:
+                return None
+            slack = self._LIMIT_SLACK_TICKS * tick
+            cap = px + slack if is_buy else px - slack
+            if cap <= 0:
+                return None
+            return round(round(cap / tick) * tick, 10)   # кратность шагу цены обязательна
+        except Exception:  # noqa: BLE001
+            return None
+
     # ---------- исполнение (перп, один инструмент — атомарность не нужна) ----------
     def _order(self, secid: str, lots: int, direction: str, ref_px: float = 0.0) -> int:
         """Market-ордера по 1 лоту (ёмкость). Возвращает ФАКТИЧЕСКИ исполненные лоты:
@@ -208,16 +266,28 @@ class St9Session:
             bas = sb._q_to_float(sb.find_future(secid).get("basicAssetSize")) or 1.0
         except Exception:  # noqa: BLE001
             bas = 1.0
-        for i in range(lots):
+        # MARKETABLE-LIMIT одним ордером на весь объём (30.07). Было: N ордеров по 1 лоту —
+        # 17 лотов = 17 HTTP round-trip'ов (~1.1с), каждый бьёт по стакану отдельно и цена
+        # успевает уйти. Один ордер + потолок цены убирают и лишнюю сеть, и хвост стакана.
+        # Потолок НЕ ставим на выходах-по-остатку: там важнее гарантия исполнения.
+        use_limit = getattr(self.cfg.strategy, "use_limit_orders", True)
+        cap = self._limit_cap(uid, direction == "BUY", lots) if use_limit else None
+        slices = [lots] if lots > 0 else []
+        for i, want in enumerate(slices):
             try:
+                otype = "ORDER_TYPE_LIMIT" if cap else "ORDER_TYPE_MARKET"
+                price = sb.price_q(cap) if cap else None
                 if real:
-                    raw = f"{self.cfg.account_id}|{uid}|1|{direction}|{i}|{int(time.time())}"
+                    raw = (f"{self.cfg.account_id}|{uid}|{want}|{direction}|{i}|"
+                           f"{int(time.time())}")
                     oid = _hl.sha256(raw.encode()).hexdigest()[:32]   # идемпотентный
-                    resp = live.post_order(self.cfg.account_id, uid, 1,
-                                           f"ORDER_DIRECTION_{direction}", oid)
+                    resp = live.post_order(self.cfg.account_id, uid, want,
+                                           f"ORDER_DIRECTION_{direction}", oid,
+                                           order_type=otype, price=price)
                 else:
-                    resp = sb.post_order(self.cfg.account_id, uid, 1,
-                                         f"ORDER_DIRECTION_{direction}", str(_uuid.uuid4()))
+                    resp = sb.post_order(self.cfg.account_id, uid, want,
+                                         f"ORDER_DIRECTION_{direction}", str(_uuid.uuid4()),
+                                         order_type=otype, price=price)
             except Exception as e:  # noqa: BLE001
                 self.log_event("warn", f"{secid}: ордер {direction} прерван "
                                        f"на {filled}/{lots}: {str(e)[:60]}")
@@ -226,9 +296,12 @@ class St9Session:
             if v is None:
                 v = resp.get("executedLots")
             try:
-                got_i = int(float(v)) if v is not None else 1
+                # ⚠️ поле отсутствует → считаем налитым ВЕСЬ объём слайса (канон проекта,
+                # st4/tinkoff_executor.py:108). Для лимитки это опаснее, чем для маркета:
+                # она МОЖЕТ не исполниться. Поэтому ниже — сверка и добор маркетом.
+                got_i = int(float(v)) if v is not None else want
             except (TypeError, ValueError):
-                got_i = 1
+                got_i = want
             filled += got_i
             # executedOrderPrice — СУММА за все лоты слайса, НЕ цена контракта (канон st4,
             # tinkoff_executor.py:106): копим сумму и делим на лоты в самом конце.
@@ -239,6 +312,33 @@ class St9Session:
                     priced_lots += got_i
             except Exception:  # noqa: BLE001  цена филла не критична — только наблюдаемость
                 pass
+        # ДОБОР МАРКЕТОМ: лимитка по своей природе может налить не всё (цена ушла за
+        # потолок). Оставлять недолив нельзя — движок считает позицию открытой на
+        # запрошенный объём, а на счёте меньше = рассинхрон. Добираем ОДИН раз, без
+        # потолка: гарантия исполнения важнее экономии на хвосте.
+        if cap and filled < lots:
+            rest = lots - filled
+            self.log_event("info", f"{secid}: лимит налил {filled}/{lots} — "
+                                   f"добор {rest} маркетом")
+            try:
+                if real:
+                    raw = (f"{self.cfg.account_id}|{uid}|{rest}|{direction}|top|"
+                           f"{int(time.time())}")
+                    oid = _hl.sha256(raw.encode()).hexdigest()[:32]
+                    resp = live.post_order(self.cfg.account_id, uid, rest,
+                                           f"ORDER_DIRECTION_{direction}", oid)
+                else:
+                    resp = sb.post_order(self.cfg.account_id, uid, rest,
+                                         f"ORDER_DIRECTION_{direction}", str(_uuid.uuid4()))
+                v = resp.get("lotsExecuted") or resp.get("executedLots")
+                got_i = int(float(v)) if v is not None else rest
+                filled += got_i
+                amt = sb._q_to_float(resp.get("executedOrderPrice"))
+                if amt and got_i > 0:
+                    amount_sum += amt
+                    priced_lots += got_i
+            except Exception as e:  # noqa: BLE001
+                self.log_event("warn", f"{secid}: добор маркетом не удался: {str(e)[:60]}")
         # /bas — приводим рублёвую сумму к КОТИРОВКЕ, в которой движок считает P&L
         self._last_fill_px = (amount_sum / priced_lots / bas) if priced_lots > 0 else None
         return filled
