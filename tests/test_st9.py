@@ -575,7 +575,8 @@ def test_imoexf_axis_registered():
     ax = {i.secid: i for i in cfg.instruments}
     assert "IMOEXF" in ax
     im = ax["IMOEXF"]
-    assert (im.don_enter, im.don_exit, im.atr_mult) == (45, 25, 6.0)
+    # окно выхода 35 (ревизия 30.07 на честной комиссии): 45/25 OOS не устоял
+    assert (im.don_enter, im.don_exit, im.atr_mult) == (45, 35, 6.0)
     assert im.quarterly is False and im.interval_min == 60
 
 
