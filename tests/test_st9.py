@@ -81,6 +81,120 @@ def test_pnl_long_short():
     assert abs(tr2.gross_pnl_rub - 3 * 2 * 10) < 0.01     # +60
 
 
+def test_go_divider_is_registry_not_created_engines():
+    """Делитель ГО не должен зависеть от того, сколько движков УЖЕ создано: они
+    создаются лениво внутри того же tick(), что сайзит входы (аудит 30.07, HIGH).
+    Ось №1 делила на 1 и забирала весь бюджет ГО — ×1.8 на первом тике после рестарта."""
+    from app.st9.service import St9Session
+    from app.st9.config import St9Config
+    s = St9Session.__new__(St9Session)
+    s.cfg = St9Config()
+    s.cfg.strategy.go_target_pct = 15.0
+    s.capital_sizing_rub = 2_000_000.0
+    s.capital_rub = 2_000_000.0
+    s.events = []
+    s.log_event = lambda k, m: None
+    s._go_per_lot = lambda sec, side: 15_000.0
+    s._trade_secid = lambda icfg: icfg.secid
+    n = len(s.cfg.instruments)
+    budget = 2_000_000 * 0.15
+    total_go = 0.0
+    s.engines = {}
+    for icfg in s.cfg.instruments:
+        s.engines[icfg.secid] = object()        # движок появляется ПЕРЕД сайзингом
+        total_go += s._entry_lots(icfg, 100.0, 10.0, "long", icfg.secid) * 15_000
+    assert total_go <= budget * 1.05, f"ГО {total_go} превысило бюджет {budget}"
+    # и первая ось не забирает больше своей доли
+    s.engines = {s.cfg.instruments[0].secid: object()}
+    first = s._entry_lots(s.cfg.instruments[0], 100.0, 10.0, "long", "X") * 15_000
+    assert first <= budget / n * 1.05
+
+
+def test_dd_guard_rearms_when_operator_resumes_entries():
+    """Стоп просадки не должен умирать навсегда: оператор возвращает входы штатным
+    /st9/control/trading, и защита обязана вернуться (аудит 30.07, HIGH — иначе
+    капитал мог падать на 60% при молчащем guard)."""
+    from app.st9.service import St9Session
+    from app.st9.config import St9Config
+    s = St9Session.__new__(St9Session)
+    s.cfg = St9Config()
+    s.cfg.strategy.capital_dd_stop_pct = 10.0
+    s.events = []
+    s.log_event = lambda k, m: None
+    s.save_session = lambda: None
+    flats = []
+    s.flat_all = lambda: flats.append(1)
+    s._capital_peak = 1_000_000.0
+    s._dd_halted = False
+    s._dd_breach_count = 0
+    s.capital_rub = 0.0
+    s.capital_sizing_rub = 880_000.0            # −12% > порога
+    s._capital_dd_guard(); s._capital_dd_guard()
+    assert s._dd_halted and len(flats) == 1
+    s.cfg.trading_enabled = True                # оператор вернул входы
+    s.capital_sizing_rub = 700_000.0            # падает дальше от НОВОГО пика
+    s._capital_dd_guard(); s._capital_dd_guard()
+    assert len(flats) == 2, "guard не сработал повторно — защита мертва"
+
+
+def test_refresh_capital_skips_update_when_margin_unknown():
+    """Недоступное ГО открытой оси НЕ должно занижать честный капитал: при плече это
+    фабриковало просадку и закрывало портфель по рынку (аудит 30.07, MED)."""
+    from app.st9.service import St9Session
+    from app.st9.config import St9Config
+    s = St9Session.__new__(St9Session)
+    s.cfg = St9Config()
+    s.cfg.mode = "tbank_sandbox"
+    s.cfg.account_id = "acc"
+    s.events = []
+    s.log_event = lambda k, m: None
+    s.trades = []
+    s.exec_anchor = None
+    s.contracts = {}
+    s.capital_rub = 0.0
+    s.capital_sizing_rub = 2_000_000.0          # прошлое честное значение
+    class _Eng:
+        def __init__(self): self.position = type("P", (), {"side": "long", "lots": 5})()
+    s.engines = {"USDRUBF": _Eng()}
+    from app.st4 import tbank_sandbox as sb
+    old = (sb.portfolio, sb.free_money_rub, sb.find_future, sb.futures_margin)
+    sb.portfolio = lambda a: {"totalAmountPortfolio": {"units": "2000000", "nano": 0}}
+    sb.free_money_rub = lambda a: 1_500_000.0
+    sb.find_future = lambda s_: {"uid": "u"}
+    def _boom(uid): raise RuntimeError("API down")
+    sb.futures_margin = _boom
+    try:
+        s.refresh_capital()
+    finally:
+        sb.portfolio, sb.free_money_rub, sb.find_future, sb.futures_margin = old
+    assert s.capital_sizing_rub == 2_000_000.0, "капитал занижен при недоступном ГО"
+
+
+def test_go_per_lot_not_poisoned_by_bad_read():
+    """Битое ГО (<=0) не кэшируется, иначе сайзинг навсегда падает в фолбэк go_frac
+    (×3.4 к плечу). Протухший кэш предпочтительнее фолбэка (аудит 30.07, MED)."""
+    from app.st9.service import St9Session
+    from app.st4 import tbank_sandbox as sb
+    s = St9Session.__new__(St9Session)
+    s._go_lot_cache = {}
+    calls = {"n": 0}
+    def _margin(uid):
+        calls["n"] += 1
+        return (0.0, 0.0) if calls["n"] == 1 else (12_000.0, 12_000.0)
+    # патчим АТРИБУТЫ модуля: `from ..st4 import tbank_sandbox` берёт его из пакета,
+    # а не из sys.modules — подмена ключа sys.modules работала бы лишь до первого
+    # импорта настоящего модуля (в одиночном прогоне «проходило», в наборе — нет)
+    old_ff, old_fm = sb.find_future, sb.futures_margin
+    sb.find_future = lambda x: {"uid": "u"}
+    sb.futures_margin = _margin
+    try:
+        assert s._go_per_lot("X", "long") is None      # битое чтение не кэшируется
+        assert s._go_per_lot("X", "long") == 12_000.0  # повтор берёт честное значение
+        assert s._go_lot_cache[("X", "long")][0] == 12_000.0
+    finally:
+        sb.find_future, sb.futures_margin = old_ff, old_fm
+
+
 def test_slip_rub_rejects_wrong_unit_fills():
     """Инцидент 30.07: filled-цена в РУБЛЁВОЙ СУММЕ (79310 при цене бара 79.06) дала
     фиктивные +739010₽ «выигрыша на исполнении». Гейт 20% → замер считается неизмеренным."""
@@ -628,9 +742,12 @@ def test_optimized_params_applied():
             ax["GLDRUBF"].atr_mult) == (45, 16, 5.0)
 
 
-def test_leverage_divides_by_live_axes_only():
-    """Делитель плеча — ТОРГУЮЩИЕ оси: непрогретая ось (нет движка) не должна
-    молча забирать долю ГО и резать размер живых осей."""
+def test_leverage_divider_independent_of_created_engines():
+    """Делитель плеча — ВЕСЬ РЕЕСТР, а не число созданных движков (пересмотр 30.07).
+    Раньше делили на len(engines) «чтобы непрогретая ось не забирала долю ГО», но
+    движки создаются лениво ВНУТРИ того же tick(), что сайзит входы → первая ось
+    делила на 1 и забирала весь бюджет (аудит: ×1.8 суммарно на первом тике после
+    рестарта, позиция держится днями). Размер не должен зависеть от момента рестарта."""
     from app.st9.service import St9Session
     from app.st9.engine import St9Engine
     s = St9Session()
@@ -638,11 +755,12 @@ def test_leverage_divides_by_live_axes_only():
     s.cfg.strategy.go_target_pct = 15.0
     s._go_per_lot = lambda sec, side: 11_500.0
     icfg = s.cfg.instruments[0]
-    # 2 живых движка из полного реестра → делим на 2, а не на len(instruments)
+    n = len(s.cfg.instruments)
+    expected = int(500_000 * 0.15 / n / 11_500.0)
+    assert s._entry_lots(icfg, 77, 1000, side="long") == expected   # движков ещё нет
     for sec in ("USDRUBF", "GLDRUBF"):
         s.engines[sec] = St9Engine(sec, 70, 10, 5.0, 14, pv=1000.0)
-    lots = s._entry_lots(icfg, 77, 1000, side="long")
-    assert lots == int(500_000 * 0.15 / 2 / 11_500.0)
+    assert s._entry_lots(icfg, 77, 1000, side="long") == expected   # и с движками то же
 
 
 # ============ наблюдаемость издержек исполнения (замер проскальзывания 27.07) ============

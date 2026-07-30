@@ -59,6 +59,10 @@ def iss_candles(secid: str, frm: str, interval_min: int = 60) -> list[Bar]:
 
 
 class St9Session:
+    # ГО перечитываем раз в час: биржа меняет ставки редко, но в волатильность —
+    # именно тогда, когда устаревшее значение опаснее всего (см. _go_per_lot)
+    _GO_CACHE_TTL_SEC = 3600.0
+
     def __init__(self):
         self.cfg = St9Config()
         self.engines: dict[str, St9Engine] = {}
@@ -85,7 +89,7 @@ class St9Session:
         self._capital_peak = 0.0                       # пик капитала для стопа просадки (плечо)
         self._dd_halted = False                        # сработал стоп просадки капитала → блок входов
         self.capital_sizing_rub = 0.0                  # ЧЕСТНЫЙ капитал (money+ГО) для сайзинга плеча
-        self._go_lot_cache: dict[tuple, float] = {}    # (sec,side) -> ГО на лот (кэш, прогрев зовёт часто)
+        self._go_lot_cache: dict[tuple, tuple] = {}    # (sec,side) -> (ГО на лот, ts кэша)
         self._dd_breach_count = 0                      # подтверждение просадки (2 тика подряд, против битого чтения)
         self._last_fill_px: float | None = None        # средняя цена ПОСЛЕДНЕГО филла (наблюдаемость проскальзывания)
         self._entry_fill_px: dict[str, float] = {}     # secid -> цена филла ВХОДА (персист, живёт до закрытия)
@@ -262,13 +266,14 @@ class St9Session:
         # ЧЕСТНЫЙ капитал (free+ГО), НЕ totalAmountPortfolio (искажён переоценкой шорта)
         cap_base = self.capital_sizing_rub or self.capital_rub
         if go_pct > 0 and cap_base > 0:
-            # делитель — ТОРГУЮЩИЕ оси (движок создан = pv получен, ось не на паузе),
-            # а не весь кодовый реестр: непрогретая/недоступная ось (GAZR греет дневное
-            # окно неделями) иначе молча забирает свою долю ГО и режет живые оси.
-            # До старта live движков нет — тогда честнее делить на весь реестр
-            # (консервативно: заниженный размер безопаснее завышенного).
-            n_axes = max(1, len(self.engines) if self.engines
-                         else len(self.cfg.instruments))
+            # ДЕЛИТЕЛЬ = ВЕСЬ РЕЕСТР осей, не len(self.engines) (аудит 30.07, HIGH).
+            # Движки создаются ЛЕНИВО, по одному, внутри того же цикла tick(), который
+            # сайзит входы: ось №1 делила на 1, №2 на 2, №3 на 3 → на ПЕРВОМ тике после
+            # каждого рестарта суммарное ГО выходило ×1.8 бюджета, а первая ось забирала
+            # его целиком (20 лотов USDRUBF при бюджете на 3 оси). Позиции держатся
+            # днями — перекос переживал рестарт. Реестр — величина постоянная, от
+            # порядка обхода и момента рестарта не зависит.
+            n_axes = max(1, len(self.cfg.instruments))
             go_per_axis = cap_base * (go_pct / 100.0) / n_axes   # целевое ГО на ось
             # лоты ПРЯМО из ФАКТИЧЕСКОГО ГО на лот (GetFuturesMargin), НЕ через
             # захардкоженный go_frac 0.044 — аудит 15.07: реальное ГО USDRUBF ≈0.15
@@ -290,20 +295,27 @@ class St9Session:
 
     def _go_per_lot(self, sec: str, side: str) -> float | None:
         """Фактическое ГО на 1 лот контракта (брокерский GetFuturesMargin), сторона важна.
-        Кэш на (sec, side) — ГО меняется биржей редко, а прогрев зовёт сотни раз/бар."""
+        Кэш на (sec, side) с TTL — прогрев зовёт сотни раз/бар, но вечный кэш опасен:
+        биржа поднимает ставки В ВОЛАТИЛЬНОСТЬ, ровно когда мы в просадке, а устаревшее
+        (заниженное) ГО дало бы двойной размер именно в стресс (аудит 30.07, MED).
+        Невалидное ГО (<=0 из-за пустого ответа API) НЕ кэшируется: иначе одно битое
+        чтение навсегда роняло сайзинг в фолбэк go_frac=0.044, а это ×3.4 к плечу."""
         key = (sec, side)
         cached = self._go_lot_cache.get(key)
-        if cached is not None:
-            return cached
+        if cached is not None and time.time() - cached[1] < self._GO_CACHE_TTL_SEC:
+            return cached[0]
         try:
             from ..st4 import tbank_sandbox as sb
             uid = sb.find_future(sec)["uid"]
             mlong, mshort = sb.futures_margin(uid)
             val = mlong if side == "long" else mshort
-            self._go_lot_cache[key] = val
+            if not val or val <= 0:
+                raise ValueError(f"ГО<=0 ({val})")
+            self._go_lot_cache[key] = (val, time.time())
             return val
         except Exception:  # noqa: BLE001
-            return None
+            # протухший кэш лучше, чем фолбэк go_frac (он завышает плечо ~3×)
+            return cached[0] if cached is not None else None
 
     @staticmethod
     def _slip_rub(tr, entry_fill: float | None, exit_fill: float | None,
@@ -402,7 +414,17 @@ class St9Session:
                                                f"{fill_s}")
             self.save_session()
         except Exception as e:  # noqa: BLE001
+            # ПЕРСИСТ ОБЯЗАТЕЛЕН И НА ОШИБКЕ (аудит 30.07, HIGH): между eng.close() и
+            # save_session() состояние движка уже изменено (позиция снята, сделка в
+            # журнале). Исключение посреди последовательности (сбой find_future на
+            # реверсе, atr=None) оставляло session-файл со СТАРОЙ позицией: после
+            # рестарта движок усыновлял позицию, которой на счёте нет, и первым же
+            # «выходом» слал реальный ордер — голая нога. Сделка при этом терялась.
             self.log_event("warn", f"{eng.secid}: исполнение не удалось: {str(e)[:80]}")
+            try:
+                self.save_session()
+            except Exception:  # noqa: BLE001
+                self.log_event("warn", f"{eng.secid}: 🚨 состояние НЕ сохранено после сбоя")
 
     def _roll(self, eng: St9Engine, icfg, old_sec: str, new_sec: str) -> None:
         """Ролл квартальника: закрыть трейд на старом контракте (reason=roll),
@@ -473,7 +495,14 @@ class St9Session:
                                    f"{side} {got2}лот @ {new_px} (net старого {tr.net_pnl_rub:+.0f}₽)")
             self.save_session()
         except Exception as e:  # noqa: BLE001
+            # тот же инвариант, что в _apply_signal_locked: старый контракт мог быть уже
+            # закрыт (eng.close выполнен), а исключение прилетело на открытии нового —
+            # без персиста session хранил бы позицию на СТАРОМ, уже проданном контракте
             self.log_event("warn", f"{eng.secid}: ролл не удался: {str(e)[:80]}")
+            try:
+                self.save_session()
+            except Exception:  # noqa: BLE001
+                self.log_event("warn", f"{eng.secid}: 🚨 состояние НЕ сохранено после сбоя ролла")
 
     # ---------- тик ----------
     def _forts_open(self) -> bool:
@@ -799,8 +828,20 @@ class St9Session:
                                    f"{self._capital_peak:.0f}) — пик НЕ обновлён (защита стопа)")
         else:
             self._capital_peak = max(self._capital_peak, cap)
+        # ЗАЩЁЛКА СНИМАЕТСЯ ВОЗОБНОВЛЕНИЕМ ВХОДОВ (аудит 30.07, HIGH). Раньше стояло
+        # безусловное `if self._dd_halted: return` — и стоп умирал навсегда: оператор
+        # возвращал входы штатным /st9/control/trading?on=true (тот путь _dd_halted не
+        # трогает), после чего капитал мог падать хоть на 60% — guard молчал, флэта не
+        # делал. Т.е. единственная портфельная защита при плече отключалась незаметно.
+        # Теперь halt держится, только пока входы реально заблокированы; вернули входы —
+        # вернулась и защита (пик уже пересчитан выше, floor поедет от нового пика).
         if self._dd_halted:
-            return
+            if not self.cfg.trading_enabled:
+                return
+            self._dd_halted = False
+            self._dd_breach_count = 0
+            self.log_event("info", "стоп просадки снят: входы возобновлены оператором — "
+                                   "предохранитель снова активен")
         floor = self._capital_peak * (1 - pct / 100.0)
         if cap >= floor:
             self._dd_breach_count = 0                  # просадки нет — сброс счётчика
@@ -856,8 +897,13 @@ class St9Session:
         halt + переустанавливает пик на текущий капитал (чтобы не сработал сразу снова).
         Входы включаются отдельно (trading_enabled) — осознанно."""
         self._dd_halted = False
-        self._capital_peak = self.capital_rub
-        self.log_event("info", f"стоп просадки сброшен (пик → {self.capital_rub:.0f})")
+        self._dd_breach_count = 0
+        # пик — из ТОЙ ЖЕ серии, что меряет guard (capital_sizing_rub), а не из
+        # capital_rub=totalAmountPortfolio (аудит 30.07): тот искажён mark-to-market и
+        # завышал пик → эффективный допуск был вдвое уже порога, а в paper/до первого
+        # чтения портфеля capital_rub=0 обнулял пик и глушил стоп совсем.
+        self._capital_peak = self.capital_sizing_rub or self.capital_rub
+        self.log_event("info", f"стоп просадки сброшен (пик → {self._capital_peak:.0f})")
         self.save_session()
         return {"dd_halted": False, "capital_peak_rub": round(self._capital_peak),
                 "trading_enabled": self.cfg.trading_enabled}
@@ -887,6 +933,7 @@ class St9Session:
             try:
                 free = sb.free_money_rub(self.cfg.account_id)
                 go_open = 0.0
+                missed = []                  # оси, чьё ГО прочитать НЕ удалось
                 for sec, eng in self.engines.items():
                     p = eng.position
                     if p is None:
@@ -894,10 +941,23 @@ class St9Session:
                     try:
                         uid = sb.find_future(self.contracts.get(sec, sec))["uid"]
                         mlong, mshort = sb.futures_margin(uid)
-                        go_open += (mlong if p.side == "long" else mshort) * p.lots
-                    except Exception:  # noqa: BLE001  ГО оси недоступно — пропустим
-                        pass
-                if free > 0:
+                        go = (mlong if p.side == "long" else mshort) * p.lots
+                        if go <= 0:          # 0 = _q_to_float на пустом ответе, не «ГО ноль»
+                            raise ValueError("ГО<=0")
+                        go_open += go
+                    except Exception:  # noqa: BLE001
+                        missed.append(sec)
+                # НЕ ОБНОВЛЯТЬ капитал, если ГО хоть одной открытой оси неизвестно
+                # (аудит 30.07, MED): при плече ГО ≈15% капитала, и потеря пары осей
+                # роняет «честный капитал» на треть — стоп просадки видел фиктивную
+                # просадку и закрывал ВЕСЬ портфель по рынку, хотя капитал не двигался.
+                # Подтверждение «2 тика подряд» тут не спасает: сбой API коррелирован
+                # между тиками, а не случаен. Лучше держать прошлое значение капитала
+                # (сайзинг чуть устареет), чем сфабриковать просадку.
+                if missed:
+                    self.log_event("warn", f"ГО недоступно по осям {','.join(missed)} — "
+                                           f"капитал не обновлён (защита от ложного стопа)")
+                elif free > 0:
                     self.capital_sizing_rub = float(free + go_open)
             except Exception:  # noqa: BLE001
                 pass
