@@ -81,6 +81,44 @@ def test_pnl_long_short():
     assert abs(tr2.gross_pnl_rub - 3 * 2 * 10) < 0.01     # +60
 
 
+def test_slip_rub_rejects_wrong_unit_fills():
+    """Инцидент 30.07: filled-цена в РУБЛЁВОЙ СУММЕ (79310 при цене бара 79.06) дала
+    фиктивные +739010₽ «выигрыша на исполнении». Гейт 20% → замер считается неизмеренным."""
+    from app.st9.service import St9Session
+    from app.st9.engine import St9Trade
+
+    def _tr(entry, exit_, lots, side="long"):
+        return St9Trade(secid="X", side=side, entry=entry, exit=exit_, lots=lots,
+                        entry_ts=1, exit_ts=2, gross_pnl_rub=0.0, fees_rub=0.0,
+                        net_pnl_rub=0.0, reason="flat_all")
+
+    # реальные числа инцидента: USDRUBF ×1000 и IMOEXF ×10
+    assert St9Session._slip_rub(_tr(79.06, 80.05, 1), 79310.0, 80050.0, 1000.0) is None
+    assert St9Session._slip_rub(_tr(2214.0, 2253.5, 8), 22146.25, 22535.0, 10.0) is None
+    # честный филл рядом с ценой бара — считается
+    got = St9Session._slip_rub(_tr(10293.7, 10429.7, 17), 10340.6, 10428.2, 1.0)
+    assert got is not None and got < 0        # исполнились хуже модели
+
+
+def test_slippage_summary_ignores_wrong_unit_records():
+    """Сводка не суммирует фиктивные записи (иначе avg +191436₽ как на проде 30.07)."""
+    from app.st9.service import St9Session
+    s = St9Session.__new__(St9Session)
+    s.trades = [
+        # фикция: филл ×1000 от цены бара
+        {"entry": 79.06, "exit": 80.05, "entry_fill": 79310.0, "exit_fill": 80050.0,
+         "slip_rub": 739010.0},
+        # честная запись
+        {"entry": 10293.7, "exit": 10429.7, "entry_fill": 10340.6, "exit_fill": 10428.2,
+         "slip_rub": -823.0},
+        # сделка без замера
+        {"entry": 100.0, "exit": 101.0, "slip_rub": None},
+    ]
+    r = s._slippage_summary()
+    assert r["measured"] == 1 and r["trades"] == 3
+    assert r["total_rub"] == -823.0 and r["worst_rub"] == -823.0
+
+
 def test_fee_is_pct_of_notional():
     """Комиссия — 0.05% нотионала (px×pv×лоты) за сторону, считается по цене КАЖДОЙ
     стороны отдельно (замер по счёту 30.07, 292 сделки: ровно 0.05000% на всех осях)."""

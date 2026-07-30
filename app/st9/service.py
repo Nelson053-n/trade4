@@ -310,9 +310,18 @@ class St9Session:
                   pv: float) -> float | None:
         """Проскальзывание сделки в ₽: насколько ФАКТИЧЕСКИЕ филлы хуже цен бара, по
         которым движок посчитал P&L. Отрицательное = исполнились хуже модели (норма).
-        None, если брокер не вернул цену хотя бы одной ноги — врать нулём нельзя."""
+        None, если брокер не вернул цену хотя бы одной ноги — врать нулём нельзя.
+
+        ГЕЙТ ПРАВДОПОДОБИЯ (инцидент 30.07): филл, расходящийся с ценой бара >20%, —
+        не проскальзывание, а другая ЕДИНИЦА (рублёвая сумма вместо котировки: филл
+        USDRUBF 79310 при цене 79.06 дал фиктивные +739010₽). Такие записи считаем
+        неизмеренными. Опасны именно ПОЛОЖИТЕЛЬНЫЕ — «выигрыш на исполнении» может
+        сойти за основание увеличить размер позиции."""
         if entry_fill is None or exit_fill is None or not pv:
             return None
+        for fill, bar_px in ((entry_fill, tr.entry), (exit_fill, tr.exit)):
+            if not bar_px or abs(fill - bar_px) / abs(bar_px) > 0.20:
+                return None
         d = 1 if tr.side == "long" else -1
         model = (tr.exit - tr.entry) * d
         fact = (exit_fill - entry_fill) * d
@@ -1016,12 +1025,30 @@ class St9Session:
                 self.log_event("warn", f"{sec}: цена филла входа {fill:.4g} не похожа на "
                                        f"котировку (вход {entry}) — замер сброшен")
 
+    @staticmethod
+    def _fills_plausible(t: dict) -> bool:
+        """Похожи ли цены филлов записи журнала на котировку (а не на рублёвую сумму).
+        Тот же порог 20%, что в _slip_rub/_drop_implausible_entry_fills.
+        Записи БЕЗ цен филлов признаём правдоподобными: их slip_rub посчитан корректно
+        (сделки до появления полей entry_fill/exit_fill) — проверять нечего."""
+        for fk, bk in (("entry_fill", "entry"), ("exit_fill", "exit")):
+            fill, bar_px = t.get(fk), t.get(bk)
+            if fill is None or not bar_px:
+                continue
+            if abs(fill - bar_px) / abs(bar_px) > 0.20:
+                return False
+        return True
+
     def _slippage_summary(self) -> dict:
         """Сводка ИЗМЕРЕННОГО проскальзывания по закрытым сделкам. Показывает, насколько
         фактические филлы разошлись с ценами бара, по которым движок считает P&L.
-        measured < len(trades) — норма: у сделок до внедрения замера цен филлов нет."""
+        measured < len(trades) — норма: у сделок до внедрения замера цен филлов нет.
+        Записи с филлами в другой ЕДИНИЦЕ (рублёвая сумма вместо котировки, сделки до
+        фикса 30.07) отбрасываются тем же гейтом 20%, что и в _slip_rub — иначе сводка
+        показывала бы фикцию вида avg +191436₽."""
         vals = [t["slip_rub"] for t in self.trades
-                if isinstance(t, dict) and t.get("slip_rub") is not None]
+                if isinstance(t, dict) and t.get("slip_rub") is not None
+                and self._fills_plausible(t)]
         if not vals:
             return {"measured": 0, "trades": len(self.trades), "total_rub": None,
                     "avg_rub": None, "worst_rub": None}
