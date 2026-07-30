@@ -81,6 +81,29 @@ def test_pnl_long_short():
     assert abs(tr2.gross_pnl_rub - 3 * 2 * 10) < 0.01     # +60
 
 
+def test_poll_seconds_comes_from_code_not_session(tmp_path):
+    """poll_seconds берётся ИЗ КОДА, а не из session-файла (ловушка 30.07: смена
+    600→60с была инертна на проде — старый session перетирал значение при загрузке).
+    Та же защита, что у реестра инструментов."""
+    import json
+    from app.st9.service import St9Session
+    from app.st9.config import St9Config
+    s = St9Session.__new__(St9Session)
+    s.engines = {}; s.trades = []; s.events = []
+    s.state = {"live": False, "live_intent": False}
+    s._last_bar_ts = {}; s._pv_cache = {}; s._pv_warned = set()
+    s._contract_cache = {}; s._bars_contract = {}; s._pending_positions = {}
+    s._deferred_ts = {}; s.contracts = {}; s.axis_overrides = {}
+    s.capital_rub = 0.0; s.exec_anchor = None; s.last_tick_ts = 0
+    s._entry_fill_px = {}; s._go_lot_cache = {}; s.cfg = St9Config()
+    f = tmp_path / "s9.json"
+    f.write_text(json.dumps({"config": {"poll_seconds": 600.0, "mode": "paper",
+                                        "account_id": "", "trading_enabled": True}}))
+    s._session_file = f
+    s.load_session()
+    assert s.cfg.poll_seconds == St9Config().poll_seconds == 60.0
+
+
 def test_go_divider_is_registry_not_created_engines():
     """Делитель ГО не должен зависеть от того, сколько движков УЖЕ создано: они
     создаются лениво внутри того же tick(), что сайзит входы (аудит 30.07, HIGH).
