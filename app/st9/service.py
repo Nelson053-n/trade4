@@ -74,6 +74,7 @@ class St9Session:
         self.state = {"live": False, "live_intent": False}
         self._session_file = Path(__file__).resolve().parent.parent.parent / "session_state_9.json"
         self._last_bar_ts: dict[str, int] = {}
+        self._saved_bar_ts: dict[str, int] = {}       # маркер баров на момент последнего save (персист по тикам)
         self._pv_cache: dict[str, float] = {}
         self._pv_warned: set[str] = set()             # анти-спам warn'ов «pv недоступен»
         self._contract_cache: dict[str, tuple] = {}   # asset -> (secid, дата резолва)
@@ -106,6 +107,10 @@ class St9Session:
         self.events.append({"ts": int(time.time() * 1000), "kind": kind, "message": message})
         if len(self.events) > EVENTS_LEN:
             del self.events[0]
+        # дубль в stdout → /var/log/trade4.log: events живут ТОЛЬКО в памяти процесса,
+        # без этого разбор инцидента возможен лишь через живой /st9/state (после
+        # рестарта история потеряна, а grep по логу давал ложный «движок мёртв»)
+        print(f"[st9] {datetime.now().strftime('%H:%M:%S')} {kind}: {message}", flush=True)
 
     def _pv(self, secid: str) -> float | None:
         """Пункт-стоимость ₽. None при сбое ISS: торговать с неизвестным pv НЕЛЬЗЯ —
@@ -697,6 +702,12 @@ class St9Session:
             self._hb_ts = time.time()                 # без него живость не видна
             npos = sum(1 for e in self.engines.values() if e.position)
             self.log_event("info", f"цикл жив: {len(self.cfg.instruments)} осей, позиций {npos}")
+        # персист при ПРОДВИЖЕНИИ по барам: save_session зовётся только по событиям
+        # (сделка/старт/ролл), поэтому во флэте файл замирал на днях и читался как
+        # «движок мёртв» (ложная тревога 03.08). Не каждый тик — только смена маркера.
+        if self._last_bar_ts != self._saved_bar_ts:
+            self._saved_bar_ts = dict(self._last_bar_ts)
+            self.save_session()
         return acted
 
     def ledger(self, days_back: int = 30) -> dict:
@@ -1316,6 +1327,7 @@ class St9Session:
             ts = self._last_bar_ts.get(i.secid)
             if ts and not bar_is_closed(ts, i.interval_min, now_ms):
                 self._last_bar_ts[i.secid] = ts - 1
+        self._saved_bar_ts = dict(self._last_bar_ts)   # база сравнения для персиста по тикам
         # восстановление открытых позиций — отложенно (движку нужен pv, ISS может лежать)
         self._pending_positions = dict(d.get("positions") or {})
         self._try_restore_positions()
