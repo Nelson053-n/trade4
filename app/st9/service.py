@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import urllib.request
@@ -230,6 +231,30 @@ class St9Session:
             return None
 
     # ---------- исполнение (перп, один инструмент — атомарность не нужна) ----------
+    def _cancel_rest(self, resp: dict, real: bool) -> None:
+        """Снять недолитый ЛИМИТНЫЙ ордер из стакана (канон st5, executor.py:153).
+
+        Без этого остаток висит в стакане до конца дня и наливается позже, когда цена
+        возвращается к потолку: на счёте становится БОЛЬШЕ лотов, чем ведёт движок.
+        Лишние — голая позиция без трейла, выход её не закроет (шлёт ордер только на
+        известный объём), и расхождение накапливается со следующими сделками.
+
+        Ошибка отмены не критична (ордер истечёт сам к концу сессии), но её надо
+        видеть: незамеченный висящий лимитник — источник рассинхрона."""
+        oid = resp.get("orderId")
+        if not oid:
+            return
+        try:
+            if real:
+                from ..st4 import tbank_live as _live
+                _live.cancel_order(self.cfg.account_id, oid)
+            else:
+                from ..st4 import tbank_sandbox as _sb
+                _sb.cancel_order(self.cfg.account_id, oid)
+        except Exception as e:  # noqa: BLE001
+            self.log_event("warn", f"не снят остаток лимитки {str(oid)[:12]}: "
+                                   f"{str(e)[:60]}")
+
     def _order(self, secid: str, lots: int, direction: str, ref_px: float = 0.0) -> int:
         """Market-ордера по 1 лоту (ёмкость). Возвращает ФАКТИЧЕСКИ исполненные лоты:
         отказ в середине серии не должен оставлять слепые лоты (движок ≠ счёт).
@@ -278,6 +303,7 @@ class St9Session:
         use_limit = getattr(self.cfg.strategy, "use_limit_orders", True)
         cap = self._limit_cap(uid, direction == "BUY", lots) if use_limit else None
         slices = [lots] if lots > 0 else []
+        last_resp: dict = {}          # ответ последней лимитки — для отмены остатка
         for i, want in enumerate(slices):
             try:
                 otype = "ORDER_TYPE_LIMIT" if cap else "ORDER_TYPE_MARKET"
@@ -297,6 +323,7 @@ class St9Session:
                 self.log_event("warn", f"{secid}: ордер {direction} прерван "
                                        f"на {filled}/{lots}: {str(e)[:60]}")
                 break
+            last_resp = resp if isinstance(resp, dict) else {}
             v = resp.get("lotsExecuted")
             if v is None:
                 v = resp.get("executedLots")
@@ -324,6 +351,13 @@ class St9Session:
         # потолка: гарантия исполнения важнее экономии на хвосте.
         if cap and filled < lots:
             rest = lots - filled
+            # СНАЧАЛА снять остаток лимитки из стакана, ПОТОМ добирать (канон st5,
+            # executor.py:153). Иначе висящий ордер нальётся позже, когда цена вернётся
+            # к потолку, и на счёте окажется БОЛЬШЕ лотов, чем ведёт движок: лишние —
+            # голая направленная позиция без трейла, которую некому закрыть (выход шлёт
+            # ордер лишь на известный движку объём). Порядок важен: отмена до добора,
+            # иначе между ними остаётся то же окно.
+            self._cancel_rest(last_resp, real)
             self.log_event("info", f"{secid}: лимит налил {filled}/{lots} — "
                                    f"добор {rest} маркетом")
             try:
@@ -464,9 +498,14 @@ class St9Session:
                     got += self._order(close_sec, closing.lots - got, direction,
                                        ref_px=sig["px"])
                 if got < closing.lots:
-                    # частичное закрытие: движок ведёт ОСТАТОК (трейл продолжает защищать),
-                    # сделка не фиксируется — P&L закрытой части покажет счёт (execution_gap)
-                    closing.lots -= got
+                    # ЧАСТИЧНОЕ ЗАКРЫТИЕ: движок ведёт ОСТАТОК (трейл продолжает защищать),
+                    # а закрытая часть фиксируется как сделка — иначе её P&L терялся бы
+                    # навсегда, а комиссия входа за полный объём висела на остатке
+                    # (аудит 10.08, HIGH-3). Выход по остатку повторится, когда step()
+                    # снова даст сигнал — трейл его гарантирует.
+                    if got > 0:
+                        ptr = eng.close_partial(sig["px"], got, ts, sig["reason"] + "_partial")
+                        self.trades.append(dict(ptr.__dict__))
                     self.log_event("warn", f"🚨 {eng.secid}: закрыто {got} лотов, остаток "
                                            f"{closing.lots} — выход повторится следующим баром")
                     self.save_session()
@@ -561,7 +600,11 @@ class St9Session:
             if got < p.lots:
                 got += self._order(old_sec, p.lots - got, direction, ref_px=old_px)
             if got < p.lots:
-                p.lots -= got
+                # закрытую часть фиксируем сделкой (аудит 10.08, HIGH-3) — иначе её P&L
+                # теряется, а входная комиссия за полный объём остаётся на остатке
+                if got > 0:
+                    ptr = eng.close_partial(old_px, got, ts, "roll_partial")
+                    self.trades.append(dict(ptr.__dict__))
                 self.log_event("warn", f"🚨 {eng.secid}: ролл прерван — закрыто {got}, "
                                        f"остаток {p.lots} на {old_sec}, повтор следующим тиком")
                 self.save_session()
@@ -847,8 +890,9 @@ class St9Session:
             if got <= 0:
                 self.log_event("warn", f"{eng.secid}: flat-all не исполнен (0 лотов)")
                 continue
-            if got < p.lots:                 # частичное: ведём остаток, сделку не фиксируем
-                p.lots -= got
+            if got < p.lots:                 # частичное: ведём остаток, закрытую часть — в журнал
+                ptr = eng.close_partial(px, got, ts, "flat_all_partial")
+                self.trades.append(dict(ptr.__dict__))
                 partial.append({"secid": eng.secid, "closed": got, "left": p.lots})
                 self.log_event("warn", f"🚨 {eng.secid}: flat-all закрыл {got}, остаток {p.lots}")
                 continue
@@ -1264,9 +1308,19 @@ class St9Session:
                     "capital_peak": self._capital_peak, "dd_halted": self._dd_halted,
                     "entry_fill_px": self._entry_fill_px,
                     "positions": pos}
-            self._session_file.write_text(json.dumps(data, ensure_ascii=False))
-        except Exception:  # noqa: BLE001
-            pass
+            # АТОМАРНО: пишем во временный файл рядом и подменяем os.replace (аудит 10.08).
+            # write_text рвёт файл на середине при OOM (на этом сервере OOM срабатывал) —
+            # load_session тогда падает на битом JSON и стартует БЕЗ позиций, тогда как
+            # лоты живут на счёте. Замена атомарна в пределах одной ФС, поэтому tmp
+            # кладём в тот же каталог.
+            tmp = self._session_file.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False))
+            os.replace(tmp, self._session_file)
+        except Exception as e:  # noqa: BLE001
+            # НЕ глотать: обработчики в _apply_signal рассчитывают увидеть провал персиста
+            # (их ветка «🚨 состояние НЕ сохранено» была недостижима, пока save_session
+            # возвращался молча). Диск полон/права слетели — оператор должен знать.
+            self.log_event("warn", f"🚨 состояние НЕ сохранено: {str(e)[:80]}")
 
     def load_session(self) -> bool:
         if not self._session_file.exists():

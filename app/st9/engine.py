@@ -167,6 +167,31 @@ class St9Engine:
         self.position = None
         return tr
 
+    def close_partial(self, px: float, lots: int, ts: int, reason: str) -> St9Trade:
+        """Зафиксировать ЧАСТЬ позиции как сделку, остаток продолжает жить.
+
+        Аудит 10.08 (HIGH-3): при недоливе на выходе движок уменьшал `lots` и молча
+        уходил — P&L фактически закрытых лотов не попадал в журнал НИКОГДА, а комиссия
+        входа за полный объём оставалась висеть на остатке (сделка по остатку несла
+        чужие издержки). Комментарий обещал, что разницу «покажет execution_gap», но
+        такого механизма у st9 нет.
+
+        Комиссия входа делится ПРОПОРЦИОНАЛЬНО закрытой доле: закрытая часть забирает
+        свою долю, остаток сохраняет свою."""
+        p = self.position
+        d = 1 if p.side == "long" else -1
+        gross = (px - p.entry) * d * lots * self.pv
+        entry_fee_part = p.fees_rub * lots / p.lots if p.lots else 0.0
+        fees = entry_fee_part + self._fee(px, lots)
+        tr = St9Trade(secid=self.secid, side=p.side, entry=p.entry, exit=px,
+                      lots=lots, entry_ts=p.entry_ts, exit_ts=ts,
+                      gross_pnl_rub=round(gross, 2), fees_rub=round(fees, 2),
+                      net_pnl_rub=round(gross - fees, 2), reason=reason)
+        self.trades.append(tr)
+        p.lots -= lots
+        p.fees_rub -= entry_fee_part      # остаток несёт только СВОЮ долю входной комиссии
+        return tr
+
     def unrealized_rub(self, px: float) -> float:
         p = self.position
         if p is None:

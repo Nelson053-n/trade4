@@ -565,7 +565,9 @@ def test_open_uses_actually_filled_lots(monkeypatch):
 
 
 def test_partial_close_keeps_remainder(monkeypatch):
-    """Частичное закрытие: движок ведёт остаток (трейл защищает), сделка не фиксируется."""
+    """Частичное закрытие: движок ведёт остаток (трейл защищает), а закрытая часть
+    ФИКСИРУЕТСЯ сделкой. Прежде сделка не записывалась вовсе и её P&L терялся
+    навсегда — аудит 10.08 (HIGH-3) признал это дефектом учёта, не задумкой."""
     import app.st9.service as svc
     from app.st9.config import St9InstrumentCfg
     s = svc.St9Session()
@@ -578,7 +580,10 @@ def test_partial_close_keeps_remainder(monkeypatch):
     monkeypatch.setattr(s, "_order", lambda sec, lots, d, ref_px=0.0: next(calls, 0))
     s._apply_signal(eng, {"act": "close", "px": 81.0, "reason": "trail"}, icfg)
     assert eng.position is not None and eng.position.lots == 2
-    assert not s.trades
+    assert len(s.trades) == 1
+    assert s.trades[0]["lots"] == 3                    # (81−80)×3×1000 = 3000₽ gross
+    assert abs(s.trades[0]["gross_pnl_rub"] - 3000.0) < 1e-6
+    assert s.trades[0]["reason"] == "trail_partial"
 
 
 def test_engine_paused_when_pv_unavailable(monkeypatch):
@@ -1038,6 +1043,114 @@ def test_fill_price_divided_by_basic_asset_size(monkeypatch):
         "executedOrderPrice": {"units": "22146", "nano": 250000000}})   # 2214.625 × 10
     assert s._order("IMOEXF", 1, "BUY", ref_px=2214.0) == 1
     assert abs(s._last_fill_px - 2214.625) < 1e-6      # котировка, НЕ рублёвая сумма
+
+
+def test_save_session_is_atomic_and_reports_failure(tmp_path, monkeypatch):
+    """АУДИТ 10.08: персист атомарен (tmp+os.replace) и НЕ глотает ошибку.
+
+    write_text рвал файл на середине при OOM → load_session падал на битом JSON и
+    стартовал БЕЗ позиций, пока лоты живут на счёте. А молчаливый except делал
+    недостижимой ветку «🚨 состояние НЕ сохранено» в обработчиках _apply_signal."""
+    import app.st9.service as svc
+    s = svc.St9Session()
+    s._session_file = tmp_path / "session_state_9.json"
+    s.save_session()
+    assert s._session_file.exists()
+    assert not (tmp_path / "session_state_9.json.tmp").exists()   # tmp убран за собой
+
+    # провал записи обязан быть виден в событиях, а не проглочен
+    def _boom(*a, **k):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(svc.Path, "write_text", _boom)
+    s.save_session()                                   # не должно бросить наружу
+    assert any("НЕ сохранено" in (e.get("message") or "") for e in s.events)
+
+
+def test_close_partial_journals_pnl_and_splits_entry_fee():
+    """АУДИТ 10.08 HIGH-3: закрытая часть попадает в журнал, входная комиссия делится.
+
+    Было: при недоливе движок делал lots -= got и молча уходил — P&L закрытых лотов
+    терялся НАВСЕГДА, а комиссия входа за полный объём оставалась на остатке."""
+    from app.st9.engine import St9Engine
+    eng = St9Engine(secid="USDRUBF", don_enter=20, don_exit=10, atr_mult=3.0,
+                    atr_period=14, pv=1000.0, fee_pct_notional=0.05)
+    eng.open("long", 80.0, 10, 1000, atr=1.0)
+    entry_fee = eng.position.fees_rub                 # 80×1000×10×0.0005 = 400
+    assert abs(entry_fee - 400.0) < 1e-6
+
+    tr = eng.close_partial(82.0, 4, 2000, "trail_partial")
+    # gross закрытой части: (82-80)×1×4×1000 = 8000 — раньше терялся целиком
+    assert abs(tr.gross_pnl_rub - 8000.0) < 1e-6
+    assert tr.lots == 4
+    # комиссия части: 4/10 входной (160) + выходная 82×1000×4×0.0005 (164)
+    assert abs(tr.fees_rub - (160.0 + 164.0)) < 1e-6
+
+    # остаток несёт ТОЛЬКО свою долю входной комиссии, не всю
+    assert eng.position.lots == 6
+    assert abs(eng.position.fees_rub - 240.0) < 1e-6
+
+    # закрытие остатка: комиссия входа не задваивается
+    tr2 = eng.close(83.0, 3000, "trail")
+    assert tr2.lots == 6
+    assert abs(tr2.fees_rub - (240.0 + 83.0 * 1000 * 6 * 0.0005)) < 1e-6
+    # суммарная входная комиссия по обеим сделкам = ровно исходные 400₽
+    assert abs((160.0 + 240.0) - entry_fee) < 1e-6
+
+
+def test_partial_limit_cancels_rest_before_market_topup(monkeypatch):
+    """АУДИТ 10.08 HIGH-1: недолитый лимитник ОБЯЗАН быть снят из стакана до добора.
+
+    Иначе он наливается позже (цена вернулась к потолку) и на счёте оказывается БОЛЬШЕ
+    лотов, чем ведёт движок: лишние — голая позиция без трейла, выход её не закроет.
+    Канон st5 (executor.py:153). Проверяем И факт отмены, И ПОРЯДОК: отмена строго
+    перед добором, иначе между ними остаётся то же окно."""
+    import app.st9.service as svc
+    from app.st4 import tbank_sandbox as sb
+    s = svc.St9Session()
+    s.cfg.mode = "tbank_sandbox"
+    s.cfg.account_id = "acc"
+    monkeypatch.setattr(sb, "find_future",
+                        lambda sec: {"uid": "u1", "basicAssetSize": {"units": "1", "nano": 0}})
+    monkeypatch.setattr(sb, "future_by_uid",
+                        lambda uid: {"minPriceIncrement": {"units": "0", "nano": 100000000}})
+    monkeypatch.setattr(sb, "order_book",
+                        lambda uid, depth=10: {"asks": [{"price": 78.0, "qty": 99}],
+                                               "bids": [{"price": 77.9, "qty": 99}]})
+    calls = []
+    # лимит налил 4 из 10 и вернул orderId; добор маркетом на остаток
+    resp = iter([
+        {"lotsExecuted": "4", "orderId": "oid-limit-1",
+         "executedOrderPrice": {"units": "78", "nano": 0}},
+        {"lotsExecuted": "6", "executedOrderPrice": {"units": "79", "nano": 0}},
+    ])
+
+    def _post(*a, **k):
+        calls.append("order")
+        return next(resp)
+
+    monkeypatch.setattr(sb, "post_order", _post)
+    monkeypatch.setattr(sb, "cancel_order",
+                        lambda acc, oid: calls.append(f"cancel:{oid}"))
+    got = s._order("USDRUBF", 10, "BUY", ref_px=78.0)
+    assert got == 10                                   # 4 лимитом + 6 добором
+    assert calls == ["order", "cancel:oid-limit-1", "order"], calls
+
+
+def test_cancel_rest_failure_is_logged_not_fatal(monkeypatch):
+    """Отмена не удалась — ордер истечёт сам, но операцию нельзя проглотить молча:
+    незамеченный висящий лимитник и есть источник рассинхрона."""
+    import app.st9.service as svc
+    from app.st4 import tbank_sandbox as sb
+    s = svc.St9Session()
+    s.cfg.account_id = "acc"
+
+    def _boom(acc, oid):
+        raise RuntimeError("сеть легла")
+
+    monkeypatch.setattr(sb, "cancel_order", _boom)
+    s._cancel_rest({"orderId": "oid-x"}, real=False)   # не должно бросить
+    assert any("не снят остаток" in (e.get("message") or "") for e in s.events)
 
 
 def test_fill_price_multilot_with_basic_asset_size(monkeypatch):
