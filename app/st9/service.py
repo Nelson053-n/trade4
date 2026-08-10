@@ -308,12 +308,13 @@ class St9Session:
             except (TypeError, ValueError):
                 got_i = want
             filled += got_i
-            # executedOrderPrice — СУММА за все лоты слайса, НЕ цена контракта (канон st4,
-            # tinkoff_executor.py:106): копим сумму и делим на лоты в самом конце.
+            # executedOrderPrice — рублёвая сумма ЗА ОДИН КОНТРАКТ (px×basicAssetSize),
+            # БЕЗ множителя лотов: замер 10.08 на проде (USDRUBF 2 лота, bas=1000) дал
+            # 40.38 при цене бара 80.61 — ровно px/лоты. Взвешиваем по лотам сами.
             try:
                 amt = sb._q_to_float(resp.get("executedOrderPrice"))
                 if amt and got_i > 0:
-                    amount_sum += amt
+                    amount_sum += amt * got_i
                     priced_lots += got_i
             except Exception:  # noqa: BLE001  цена филла не критична — только наблюдаемость
                 pass
@@ -340,11 +341,12 @@ class St9Session:
                 filled += got_i
                 amt = sb._q_to_float(resp.get("executedOrderPrice"))
                 if amt and got_i > 0:
-                    amount_sum += amt
+                    amount_sum += amt * got_i
                     priced_lots += got_i
             except Exception as e:  # noqa: BLE001
                 self.log_event("warn", f"{secid}: добор маркетом не удался: {str(e)[:60]}")
-        # /bas — приводим рублёвую сумму к КОТИРОВКЕ, в которой движок считает P&L
+        # amount_sum взвешен по лотам выше → /priced_lots даёт сумму за КОНТРАКТ,
+        # /bas приводит её к КОТИРОВКЕ, в которой движок считает P&L.
         self._last_fill_px = (amount_sum / priced_lots / bas) if priced_lots > 0 else None
         return filled
 

@@ -995,9 +995,9 @@ def test_slip_rub_none_when_fill_unknown():
 
 
 def test_order_averages_fill_price_over_slices(monkeypatch):
-    """executedOrderPrice — СУММА за лоты ордера, не цена контракта (канон st4):
-    делим на лоты. Проверяем на паре «лимит налил часть + добор маркетом»: цена
-    усредняется по ОБОИМ ордерам, а не берётся от последнего."""
+    """executedOrderPrice — рублёвая сумма ЗА ОДИН контракт: усредняем ВЗВЕШЕННО по
+    лотам. Проверяем на паре «лимит налил часть + добор маркетом»: цена усредняется
+    по ОБОИМ ордерам с весом их объёма, а не берётся от последнего."""
     import app.st9.service as svc
     from app.st4 import tbank_sandbox as sb
     s = svc.St9Session()
@@ -1011,15 +1011,15 @@ def test_order_averages_fill_price_over_slices(monkeypatch):
     monkeypatch.setattr(sb, "order_book",
                         lambda uid, depth=10: {"asks": [{"price": 78.0, "qty": 99}],
                                                "bids": [{"price": 77.9, "qty": 99}]})
-    # лимит налил 2 лота по 78.2 (сумма 156.4), добор маркетом 2 лота по 78.8 (157.6)
+    # лимит налил 2 лота по 78.2, добор маркетом 2 лота по 78.8 (сумма ЗА КОНТРАКТ)
     resp = iter([
-        {"lotsExecuted": "2", "executedOrderPrice": {"units": "156", "nano": 400000000}},
-        {"lotsExecuted": "2", "executedOrderPrice": {"units": "157", "nano": 600000000}},
+        {"lotsExecuted": "2", "executedOrderPrice": {"units": "78", "nano": 200000000}},
+        {"lotsExecuted": "2", "executedOrderPrice": {"units": "78", "nano": 800000000}},
     ])
     monkeypatch.setattr(sb, "post_order", lambda *a, **k: next(resp))
     got = s._order("USDRUBF", 4, "BUY", ref_px=78.0)
     assert got == 4                              # 2 лимитом + 2 добором
-    assert abs(s._last_fill_px - 78.5) < 1e-9    # (156.4+157.6)/4 = 78.5
+    assert abs(s._last_fill_px - 78.5) < 1e-9    # (78.2×2 + 78.8×2)/4 = 78.5
 
 
 def test_fill_price_divided_by_basic_asset_size(monkeypatch):
@@ -1038,6 +1038,31 @@ def test_fill_price_divided_by_basic_asset_size(monkeypatch):
         "executedOrderPrice": {"units": "22146", "nano": 250000000}})   # 2214.625 × 10
     assert s._order("IMOEXF", 1, "BUY", ref_px=2214.0) == 1
     assert abs(s._last_fill_px - 2214.625) < 1e-6      # котировка, НЕ рублёвая сумма
+
+
+def test_fill_price_multilot_with_basic_asset_size(monkeypatch):
+    """РЕГРЕССИЯ 10.08: много лотов И basicAssetSize>1 одновременно. Прежние два теста
+    брали либо 1 лот на слайс, либо bas=1 — комбинация, живущая в проде, не покрывалась,
+    и лишнее деление на лоты прошло незамеченным. Симптом: USDRUBF 2 лота дал филл
+    40.38 при цене бара 80.61 (ровно px/лоты) → slip_rub=None гейтом правдоподобия,
+    замер издержек молча умер после перехода на ордер одним объёмом (fc4d827)."""
+    import app.st9.service as svc
+    from app.st4 import tbank_sandbox as sb
+    s = svc.St9Session()
+    s.cfg.mode = "tbank_sandbox"
+    s.cfg.account_id = "acc"
+    monkeypatch.setattr(sb, "find_future",
+                        lambda sec: {"uid": "u1", "basicAssetSize": {"units": "1000", "nano": 0}})
+    monkeypatch.setattr(sb, "future_by_uid",
+                        lambda uid: {"minPriceIncrement": {"units": "0", "nano": 10000000}})
+    monkeypatch.setattr(sb, "order_book",
+                        lambda uid, depth=10: {"asks": [{"price": 80.7, "qty": 999}],
+                                               "bids": [{"price": 80.6, "qty": 999}]})
+    # 2 лота одним ордером; сумма ЗА КОНТРАКТ = 80.61 × bas(1000) = 80610
+    monkeypatch.setattr(sb, "post_order", lambda *a, **k: {
+        "lotsExecuted": "2", "executedOrderPrice": {"units": "80610", "nano": 0}})
+    assert s._order("USDRUBF", 2, "BUY", ref_px=80.61) == 2
+    assert abs(s._last_fill_px - 80.61) < 1e-6         # котировка, НЕ 40.305
 
 
 def test_order_resets_fill_price_before_early_returns(monkeypatch):
