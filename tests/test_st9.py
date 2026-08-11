@@ -715,9 +715,10 @@ def test_sizing_by_capital_pct():
     s = St9Session()
     s.capital_rub = 500_000
     icfg = s.cfg.instruments[0]
-    # выкл → по entry_notional_rub (100к / цена)
+    # выкл → по entry_notional_rub оси (величина берётся из конфига, не хардкодом:
+    # размер менялся 100к→400к 11.08, тест проверяет МЕХАНИКУ, а не число)
     s.cfg.strategy.go_target_pct = 0.0
-    assert s._entry_lots(icfg, 77, 1000) == 1
+    assert s._entry_lots(icfg, 77, 1000) == int(icfg.entry_notional_rub / (77 * 1000))
     # 15% капитала на N осей реестра, go_frac 0.044
     s.cfg.strategy.go_target_pct = 15.0
     lots = s._entry_lots(icfg, 77, 1000)
@@ -1043,6 +1044,27 @@ def test_fill_price_divided_by_basic_asset_size(monkeypatch):
         "executedOrderPrice": {"units": "22146", "nano": 250000000}})   # 2214.625 × 10
     assert s._order("IMOEXF", 1, "BUY", ref_px=2214.0) == 1
     assert abs(s._last_fill_px - 2214.625) < 1e-6      # котировка, НЕ рублёвая сумма
+
+
+def test_entry_notional_is_400k_and_margin_stays_safe():
+    """РАЗМЕР 400к/ось (решение оператора 11.08) + проверка, что ГО в стрессе не
+    подходит к капиталу. При 100к утилизация была 4.1% ГО → 3.3%/год на счёт 764к.
+
+    ГО берётся ФАКТИЧЕСКОЕ (замер GetFuturesMargin 11.08), не go_frac=0.044 — та
+    константа занижает ГО втрое и служит лишь аварийным фолбэком."""
+    from app.st9.config import St9Config
+    cfg = St9Config()
+    assert [i.entry_notional_rub for i in cfg.instruments] == [400_000.0] * 3
+
+    capital = 764_003
+    # (ГО на лот, цена, pv) — факт с брокера
+    axes = {"USDRUBF": (12336, 82.26, 1000.0),
+            "GLDRUBF": (1260, 11536.30, 1.0),
+            "IMOEXF": (2287, 2313.50, 10.0)}
+    go_total = sum(int(400_000 / (px * pv)) * go for go, px, pv in axes.values())
+    assert go_total / capital < 0.20              # ~17% — обычный режим
+    # биржа поднимает ГО вдвое в волатильность, ровно когда мы в просадке
+    assert go_total * 2 / capital < 0.40          # ~34% — запас до маржин-колла есть
 
 
 def test_save_session_is_atomic_and_reports_failure(tmp_path, monkeypatch):
