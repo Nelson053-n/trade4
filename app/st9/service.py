@@ -414,7 +414,10 @@ class St9Session:
             # его целиком (20 лотов USDRUBF при бюджете на 3 оси). Позиции держатся
             # днями — перекос переживал рестарт. Реестр — величина постоянная, от
             # порядка обхода и момента рестарта не зависит.
-            n_axes = max(1, len(self.cfg.instruments))
+            # ...но выведенные из состава оси (entries_enabled=False) в делитель НЕ идут:
+            # они больше не входят, а место в бюджете занимали бы — ровно та цена простоя
+            # (≈3.5 п.п. годовых), из-за которой 30.07 выключали GAZR.
+            n_axes = max(1, sum(1 for i in self.cfg.instruments if i.entries_enabled))
             go_per_axis = cap_base * (go_pct / 100.0) / n_axes   # целевое ГО на ось
             # лоты ПРЯМО из ФАКТИЧЕСКОГО ГО на лот (GetFuturesMargin), НЕ через
             # захардкоженный go_frac 0.044 — аудит 15.07: реальное ГО USDRUBF ≈0.15
@@ -527,7 +530,11 @@ class St9Session:
                           if rec["slip_rub"] is not None else "")
                 self.log_event("exit", f"{eng.secid}: выход {tr.side} ({tr.reason}) "
                                        f"net {tr.net_pnl_rub:+.0f}₽{slip_s}")
-            if sig["act"] in ("open", "reverse") and self.cfg.trading_enabled:
+            # ВЫХОД выше уже исполнен — гейт стоит ТОЛЬКО на открытии. Ось с
+            # entries_enabled=False доживает открытую позицию под трейлом и больше
+            # не входит (вывод из состава корзины без голых лотов на счёте).
+            if (sig["act"] in ("open", "reverse") and self.cfg.trading_enabled
+                    and icfg.entries_enabled):
                 side = sig["new_side"]
                 if icfg.quarterly:
                     pv = self._pv(sec)       # pv контракта (может отличаться между сериями)
@@ -1258,6 +1265,7 @@ class St9Session:
             "instruments": [
                 {"secid": i.secid, "don": f"{i.don_enter}/{i.don_exit}",
                  "notional_rub": i.entry_notional_rub,
+                 "entries_enabled": i.entries_enabled,   # False = ось на выводе
                  "position": (lambda p: {"side": p.side, "entry": p.entry, "lots": p.lots,
                                          "trail": round(p.trail, 2)} if p else None)(
                      self.engines.get(i.secid).position if i.secid in self.engines else None),

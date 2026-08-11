@@ -290,17 +290,18 @@ def test_go_divider_is_registry_not_created_engines():
     s.log_event = lambda k, m: None
     s._go_per_lot = lambda sec, side: 15_000.0
     s._trade_secid = lambda icfg: icfg.secid
-    n = len(s.cfg.instruments)
+    n = sum(1 for i in s.cfg.instruments if i.entries_enabled)
     budget = 2_000_000 * 0.15
     total_go = 0.0
     s.engines = {}
-    for icfg in s.cfg.instruments:
+    live = [i for i in s.cfg.instruments if i.entries_enabled]   # выведенные не входят
+    for icfg in live:
         s.engines[icfg.secid] = object()        # движок появляется ПЕРЕД сайзингом
         total_go += s._entry_lots(icfg, 100.0, 10.0, "long", icfg.secid) * 15_000
     assert total_go <= budget * 1.05, f"ГО {total_go} превысило бюджет {budget}"
     # и первая ось не забирает больше своей доли
-    s.engines = {s.cfg.instruments[0].secid: object()}
-    first = s._entry_lots(s.cfg.instruments[0], 100.0, 10.0, "long", "X") * 15_000
+    s.engines = {live[0].secid: object()}
+    first = s._entry_lots(live[0], 100.0, 10.0, "long", "X") * 15_000
     assert first <= budget / n * 1.05
 
 
@@ -723,7 +724,7 @@ def test_sizing_by_capital_pct():
     s.cfg.strategy.go_target_pct = 15.0
     lots = s._entry_lots(icfg, 77, 1000)
     notional = lots * 77 * 1000
-    expected = 500_000 * 0.15 / len(s.cfg.instruments) / 0.044
+    expected = 500_000 * 0.15 / sum(1 for i in s.cfg.instruments if i.entries_enabled) / 0.044
     assert abs(notional - expected) / expected < 0.15   # округление лотов
 
 
@@ -798,7 +799,7 @@ def test_update_strategy_leverage():
     assert s._capital_peak == 500_000          # пик от честного капитала
     # сайзинг теперь от честного капитала (не totalAmountPortfolio)
     icfg = s.cfg.instruments[0]
-    n_axes = len(s.cfg.instruments)            # движков нет → делитель = весь реестр
+    n_axes = sum(1 for i in s.cfg.instruments if i.entries_enabled)            # движков нет → делитель = весь реестр
     notional = s._entry_lots(icfg, 77, 1000) * 77 * 1000
     expected = 500_000 * 0.15 / n_axes / 0.044
     assert abs(notional - expected) / expected < 0.15   # в пределах округления лотов
@@ -814,7 +815,7 @@ def test_sizing_uses_honest_capital():
     icfg = s.cfg.instruments[0]
     notional = s._entry_lots(icfg, 77, 1000) * 77 * 1000
     # должен считать от 500к, не 578к
-    expected = 500_000 * 0.15 / len(s.cfg.instruments) / 0.044
+    expected = 500_000 * 0.15 / sum(1 for i in s.cfg.instruments if i.entries_enabled) / 0.044
     assert abs(notional - expected) / expected < 0.15   # в пределах округления лотов
 
 
@@ -838,7 +839,7 @@ def test_sizing_from_actual_go_per_lot():
     icfg = s.cfg.instruments[0]
     lots = s._entry_lots(icfg, 77, 1000, side="long")
     # целевое ГО на ось = 500к×15%/N осей; лоты = ГО_оси/11500
-    expected = int(500_000 * 0.15 / len(s.cfg.instruments) / 11_500.0)
+    expected = int(500_000 * 0.15 / sum(1 for i in s.cfg.instruments if i.entries_enabled) / 11_500.0)
     assert lots == max(1, expected)
 
 
@@ -961,7 +962,8 @@ def test_leverage_divider_independent_of_created_engines():
     s.cfg.strategy.go_target_pct = 15.0
     s._go_per_lot = lambda sec, side: 11_500.0
     icfg = s.cfg.instruments[0]
-    n = len(s.cfg.instruments)
+    # реестр ЖИВЫХ осей (выведенные из состава долю бюджета не занимают, 11.08)
+    n = sum(1 for i in s.cfg.instruments if i.entries_enabled)
     expected = int(500_000 * 0.15 / n / 11_500.0)
     assert s._entry_lots(icfg, 77, 1000, side="long") == expected   # движков ещё нет
     for sec in ("USDRUBF", "GLDRUBF"):
@@ -1044,6 +1046,54 @@ def test_fill_price_divided_by_basic_asset_size(monkeypatch):
         "executedOrderPrice": {"units": "22146", "nano": 250000000}})   # 2214.625 × 10
     assert s._order("IMOEXF", 1, "BUY", ref_px=2214.0) == 1
     assert abs(s._last_fill_px - 2214.625) < 1e-6      # котировка, НЕ рублёвая сумма
+
+
+def test_disabled_axis_blocks_entry_but_keeps_exit(monkeypatch):
+    """ВЫВОД ОСИ ИЗ СОСТАВА (GLDRUBF, 11.08): новых входов нет, ВЫХОД работает.
+
+    Флаг, а не удаление из реестра: удалять ось с ОТКРЫТОЙ позицией нельзя — лоты
+    остались бы на счёте без трейла и без выхода (голая позиция)."""
+    import app.st9.service as svc
+    from app.st9.config import St9InstrumentCfg
+    s = svc.St9Session()
+    s.cfg.mode = "paper"
+    icfg = St9InstrumentCfg(secid="USDRUBF", entries_enabled=False)
+    s._pv_cache["USDRUBF"] = 1000.0
+    eng = s._engine(icfg)
+    monkeypatch.setattr(s, "_order", lambda *a, **k: 5)
+
+    # вход НЕ должен состояться
+    s._apply_signal(eng, {"act": "open", "new_side": "long", "px": 80.0, "atr": 0.5}, icfg)
+    assert eng.position is None
+
+    # ...но выход по уже открытой позиции обязан работать
+    eng.open("long", 80.0, 5, 1, atr=0.5)
+    s._apply_signal(eng, {"act": "close", "px": 82.0, "reason": "trail"}, icfg)
+    assert eng.position is None and len(s.trades) == 1
+
+    # и reverse не должен открывать встречную — только закрыть
+    eng.open("long", 80.0, 5, 1, atr=0.5)
+    s._apply_signal(eng, {"act": "reverse", "new_side": "short", "px": 78.0,
+                          "reason": "reverse", "atr": 0.5}, icfg)
+    assert eng.position is None
+
+
+def test_disabled_axis_excluded_from_margin_divider():
+    """Выведенная ось не занимает долю бюджета ГО при плече — иначе оставшиеся оси
+    сайзятся меньше, чем должны (цена простоя GAZR, 30.07: ≈3.5 п.п. годовых)."""
+    import app.st9.service as svc
+    s = svc.St9Session()
+    s.capital_sizing_rub = 600_000
+    s.cfg.strategy.go_target_pct = 15.0
+    monkeypatch_go = 10_000.0
+    s._go_lot_cache[("USDRUBF", "long")] = (monkeypatch_go, __import__("time").time())
+    icfg = next(i for i in s.cfg.instruments if i.secid == "USDRUBF")
+    lots_3axes = s._entry_lots(icfg, 80.0, 1000.0, "long", "USDRUBF")
+
+    # GLDRUBF выведена → бюджет делится на 2 живые оси, не на 3
+    live = sum(1 for i in s.cfg.instruments if i.entries_enabled)
+    assert live == 2
+    assert lots_3axes == int(600_000 * 0.15 / live / monkeypatch_go)
 
 
 def test_execution_gap_detects_hidden_costs():
