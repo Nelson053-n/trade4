@@ -1048,6 +1048,93 @@ def test_fill_price_divided_by_basic_asset_size(monkeypatch):
     assert abs(s._last_fill_px - 2214.625) < 1e-6      # котировка, НЕ рублёвая сумма
 
 
+def test_backtest_dd_is_mark_to_market():
+    """АУДИТ 12.08: stats() считал просадку по ЗАКРЫТЫМ СДЕЛКАМ — плавающий убыток
+    открытой позиции в неё не входил, хотя именно его видит оператор на счёте и
+    именно он грозит маржин-коллом. Занижение 1.15-1.19× на осях st9.
+
+    Синтетика: цена растёт, потом глубоко проваливается и восстанавливается ДО выхода.
+    По закрытым сделкам просадки нет вовсе, mark-to-market — есть."""
+    from app.st9.backtest import run, stats, portfolio_dd, _dd_from_curve
+
+    # чистая проверка расчёта: провал 100 -> 60 -> 120
+    assert _dd_from_curve([0, 100, 60, 120]) == 40
+    assert _dd_from_curve([0, -50, -20]) == 50
+
+    # портфель: просадки осей НЕ складываются, если разнесены во времени
+    a = {1: 0.0, 2: -100.0, 3: 0.0}
+    b = {1: 0.0, 2: 0.0, 3: -100.0}
+    assert portfolio_dd({"a": a, "b": b}) == 100          # не 200
+
+    # ...и складываются, когда совпадают
+    c = {1: 0.0, 2: -100.0, 3: 0.0}
+    assert portfolio_dd({"a": a, "c": c}) == 200
+
+
+def test_backtest_stats_backward_compatible():
+    """stats(trades) без curve обязан работать как раньше — на него опираются
+    прежние вызовы; dd тогда = просадка по закрытым сделкам, dd_mtm = None."""
+    from app.st9.backtest import stats
+    from app.st9.engine import St9Trade
+    mk = lambda net: St9Trade(secid="X", side="long", entry=1.0, exit=1.0, lots=1,
+                              entry_ts=0, exit_ts=0, gross_pnl_rub=net,
+                              fees_rub=0.0, net_pnl_rub=net, reason="trail")
+    st = stats([mk(100), mk(-40), mk(20)])
+    assert st["dd"] == 40 and st["dd_closed"] == 40 and st["dd_mtm"] is None
+
+
+def test_daily_loss_limit_blocks_entry(monkeypatch):
+    """АУДИТ 12.08: daily_loss_limit_rub был МЁРТВОЙ РУЧКОЙ — объявлен в конфиге,
+    менялся через API, но в service.py не читался ни разу. Оператор получал
+    подтверждение и нулевую защиту, что опаснее отсутствия ручки."""
+    import time
+    import app.st9.service as svc
+    from app.st9.config import St9InstrumentCfg
+    s = svc.St9Session()
+    s.cfg.mode = "paper"
+    s.cfg.strategy.daily_loss_limit_rub = 5_000.0
+    now_ms = int(time.time() * 1000)
+
+    # убыток дня в пределах лимита — вход разрешён
+    s.trades = [{"net_pnl_rub": -3_000, "exit_ts": now_ms}]
+    assert s._daily_loss_hit() is None
+
+    # лимит пробит — вход блокируется
+    s.trades.append({"net_pnl_rub": -2_500, "exit_ts": now_ms})
+    assert s._daily_loss_hit() == -5_500
+
+    icfg = St9InstrumentCfg(secid="USDRUBF")
+    s._pv_cache["USDRUBF"] = 1000.0
+    eng = s._engine(icfg)
+    monkeypatch.setattr(s, "_order", lambda *a, **k: 5)
+    s._apply_signal(eng, {"act": "open", "new_side": "long", "px": 80.0, "atr": 0.5}, icfg)
+    assert eng.position is None                      # вход НЕ состоялся
+    assert any("дневной лимит" in (e.get("message") or "") for e in s.events)
+
+    # ...но ВЫХОД от лимита не зависит: иначе позиция залипла бы навсегда
+    eng.open("long", 80.0, 5, 1, atr=0.5)
+    s._apply_signal(eng, {"act": "close", "px": 82.0, "reason": "trail"}, icfg)
+    assert eng.position is None
+
+
+def test_daily_loss_limit_counts_only_today_msk():
+    """Лимит считает P&L ТЕКУЩЕГО дня по МСК, вчерашние убытки не блокируют сегодня.
+    ⚠️ exit_ts — настоящий epoch (time.time()), а не сдвинутая шкала баров
+    _now_ms_frame: смешивать их нельзя, обе стороны считаются от UTC+3."""
+    import time
+    import app.st9.service as svc
+    s = svc.St9Session()
+    s.cfg.strategy.daily_loss_limit_rub = 5_000.0
+    now_ms = int(time.time() * 1000)
+    s.trades = [{"net_pnl_rub": -50_000, "exit_ts": now_ms - 3 * 86400 * 1000}]
+    assert s._daily_loss_hit() is None               # позавчерашний убыток не в счёт
+    s.trades.append({"net_pnl_rub": -6_000, "exit_ts": now_ms})
+    assert s._daily_loss_hit() == -6_000             # только сегодняшний
+
+    s.cfg.strategy.daily_loss_limit_rub = 0.0        # 0 = выключен
+    assert s._daily_loss_hit() is None
+
+
 def test_disabled_axis_blocks_entry_but_keeps_exit(monkeypatch):
     """ВЫВОД ОСИ ИЗ СОСТАВА (GLDRUBF, 11.08): новых входов нет, ВЫХОД работает.
 

@@ -64,35 +64,83 @@ def load_bars(secid: str, days: int, interval: int = 60) -> list[Bar]:
 
 
 def run(secid, don_enter, don_exit, atr_mult, bars, notional=100_000.0,
-        fee_pct=0.05, slip_pct=0.0, allow_short=True):
-    """Прогон. slip_pct — проскальзывание в % на сторону (ухудшает цену исполнения)."""
+        fee_pct=0.05, slip_pct=0.0, allow_short=True, curve=None):
+    """Прогон. slip_pct — проскальзывание в % на сторону (ухудшает цену исполнения).
+
+    curve: если передать dict, в него пишется equity ПО КАЖДОМУ БАРУ
+    (реализованное + плавающее) — нужно для честной mark-to-market просадки,
+    см. `stats(..., curve=...)` и `portfolio_dd`."""
     pv = PV[secid]
     eng = St9Engine(secid=secid, don_enter=don_enter, don_exit=don_exit,
                     atr_mult=atr_mult, atr_period=14, pv=pv,
                     fee_pct_notional=fee_pct, allow_short=allow_short)
     trades = []
+    realized = 0.0
     for b in bars:
         lots = max(1, int(notional / (b.c * pv)))
         sig = eng.step(b, lots)
-        if not sig:
-            continue
-        px = sig["px"]
-        if sig["act"] in ("close", "reverse"):
-            # проскальзывание на выходе: исполняемся хуже цены бара
-            d = 1 if eng.position.side == "long" else -1
-            px_exec = px * (1 - slip_pct / 100 * d)
-            trades.append(eng.close(px_exec, b.ts, sig["reason"]))
-        if sig["act"] in ("open", "reverse"):
-            side = sig["new_side"]
-            d = 1 if side == "long" else -1
-            px_exec = px * (1 + slip_pct / 100 * d)
-            eng.open(side, px_exec, lots, b.ts, sig["atr"])
+        if sig:
+            px = sig["px"]
+            if sig["act"] in ("close", "reverse"):
+                # проскальзывание на выходе: исполняемся хуже цены бара
+                d = 1 if eng.position.side == "long" else -1
+                px_exec = px * (1 - slip_pct / 100 * d)
+                tr = eng.close(px_exec, b.ts, sig["reason"])
+                trades.append(tr)
+                realized += tr.net_pnl_rub
+            if sig["act"] in ("open", "reverse"):
+                side = sig["new_side"]
+                d = 1 if side == "long" else -1
+                px_exec = px * (1 + slip_pct / 100 * d)
+                eng.open(side, px_exec, lots, b.ts, sig["atr"])
+        if curve is not None:
+            unreal = eng.unrealized_rub(b.c) if eng.position else 0.0
+            curve[b.ts] = realized + unreal
     return trades
 
 
-def stats(trades):
+def _dd_from_curve(points) -> float:
+    """Максимальная просадка по последовательности значений equity."""
+    peak = 0.0
+    dd = 0.0
+    for eq in points:
+        peak = max(peak, eq)
+        dd = max(dd, peak - eq)
+    return dd
+
+
+def portfolio_dd(curves: dict) -> float:
+    """Mark-to-market просадка ПОРТФЕЛЯ из нескольких осей.
+
+    Складывать `dd` отдельных осей нельзя — их просадки не совпадают по времени.
+    Строим общую кривую по объединённой шкале баров, каждая ось держит последнее
+    известное значение (оси торгуются на разных инструментах, бары не выровнены).
+
+    curves: {secid: {ts: equity}} — заполняются через run(..., curve=d)."""
+    if not curves:
+        return 0.0
+    ts_all = sorted({t for c in curves.values() for t in c})
+    last = {k: 0.0 for k in curves}
+    total = []
+    for ts in ts_all:
+        for k, c in curves.items():
+            if ts in c:
+                last[k] = c[ts]
+        total.append(sum(last.values()))
+    return round(_dd_from_curve(total))
+
+
+def stats(trades, curve=None):
+    """Метрики прогона.
+
+    ⚠️ dd: если передан `curve` (из run(..., curve=d)) — просадка MARK-TO-MARKET, то
+    есть с плавающим убытком открытой позиции. Именно её видит оператор на счёте и
+    именно она грозит маржин-коллом. Без curve считается просадка ПО ЗАКРЫТЫМ СДЕЛКАМ
+    — она СИСТЕМАТИЧЕСКИ ЗАНИЖЕНА (аудит 12.08: в 1.15-1.19× по осям st9), потому что
+    убыток внутри открытой позиции в неё не попадает. Для решений о размере позиции
+    брать только mark-to-market."""
     if not trades:
-        return dict(n=0, net=0, gross=0, fees=0, pf=0.0, win="0/0", dd=0)
+        return dict(n=0, net=0, gross=0, fees=0, pf=0.0, win="0/0", dd=0, dd_mtm=None)
     net = sum(t.net_pnl_rub for t in trades)
     gross = sum(t.gross_pnl_rub for t in trades)
     fees = sum(t.fees_rub for t in trades)
@@ -101,11 +149,14 @@ def stats(trades):
     dn = -sum(t.net_pnl_rub for t in trades if t.net_pnl_rub < 0)
     pf = up / dn if dn else float("inf")
     eq = 0.0
-    peak = 0.0
-    dd = 0.0
+    closed = []
     for t in trades:
         eq += t.net_pnl_rub
-        peak = max(peak, eq)
-        dd = max(dd, peak - eq)
+        closed.append(eq)
+    dd_closed = _dd_from_curve(closed)
+    dd_mtm = _dd_from_curve([curve[k] for k in sorted(curve)]) if curve else None
     return dict(n=len(trades), net=round(net), gross=round(gross), fees=round(fees),
-                pf=round(pf, 2), win=f"{wins}/{len(trades)}", dd=round(dd))
+                pf=round(pf, 2), win=f"{wins}/{len(trades)}",
+                dd=round(dd_mtm if dd_mtm is not None else dd_closed),
+                dd_closed=round(dd_closed),
+                dd_mtm=round(dd_mtm) if dd_mtm is not None else None)

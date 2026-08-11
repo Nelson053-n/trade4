@@ -388,6 +388,32 @@ class St9Session:
         """Что реально торгуем: перп = secid; квартальник = текущий контракт."""
         return (self._resolve_contract(icfg) or icfg.secid) if icfg.quarterly else icfg.secid
 
+    def _daily_loss_hit(self) -> float | None:
+        """Достигнут ли дневной лимит убытка. Возвращает P&L дня (₽) при пробое, иначе None.
+
+        Аудит 12.08: параметр объявлен в конфиге и меняется через API, но в st9 НЕ ЧИТАЛСЯ
+        НИ РАЗУ — оператор, выставивший лимит, получал подтверждение и нулевую защиту.
+        Это опаснее отсутствия ручки. Реализация по канону st7 (service.py:186).
+
+        Гейтит ТОЛЬКО ВХОД: выходы/flat/ролл от лимита не зависят, иначе при пробое
+        позиция залипла бы (закрыть нельзя) — тот же принцип, что у trading_enabled.
+
+        День — по МСК (торговая сессия FORTS). ⚠️ exit_ts сделок пишется через
+        time.time() — это НАСТОЯЩИЙ epoch, а не сдвинутая шкала баров `_now_ms_frame`;
+        смешивать их нельзя, поэтому день считается от UTC+3 по обеим сторонам."""
+        lim = getattr(self.cfg.strategy, "daily_loss_limit_rub", 0.0)
+        if not lim or lim <= 0:
+            return None
+
+        def _msk_day(ms: float) -> str:
+            return datetime.fromtimestamp(ms / 1000, timezone.utc).astimezone(
+                timezone(timedelta(hours=3))).strftime("%Y-%m-%d")
+
+        today = _msk_day(time.time() * 1000)
+        day_net = sum(t.get("net_pnl_rub", 0) for t in self.trades
+                      if t.get("exit_ts") and _msk_day(t["exit_ts"]) == today)
+        return day_net if day_net < -abs(lim) else None
+
     def _entry_lots(self, icfg, px: float, pv: float, side: str = "long",
                     sec: str | None = None) -> int:
         """Лоты входа. При плече (go_target_pct>0) — из ФАКТИЧЕСКОГО ГО на лот; иначе из
@@ -535,6 +561,13 @@ class St9Session:
             # не входит (вывод из состава корзины без голых лотов на счёте).
             if (sig["act"] in ("open", "reverse") and self.cfg.trading_enabled
                     and icfg.entries_enabled):
+                day_net = self._daily_loss_hit()
+                if day_net is not None:
+                    self.log_event("warn", f"🚨 {eng.secid}: дневной лимит убытка "
+                                           f"{self.cfg.strategy.daily_loss_limit_rub:.0f}₽ "
+                                           f"достигнут (день {day_net:+.0f}₽) — вход отменён")
+                    self.save_session()
+                    return
                 side = sig["new_side"]
                 if icfg.quarterly:
                     pv = self._pv(sec)       # pv контракта (может отличаться между сериями)
@@ -1283,6 +1316,9 @@ class St9Session:
             # СВЕРКА С ИСТИНОЙ: «факт счёта − модель журнала» с момента якоря. Отрицательное
             # = журнал рисует больше, чем принёс счёт (скрытые издержки исполнения).
             "execution_gap_rub": self._execution_gap(),
+            # дневной лимит убытка: величина и факт срабатывания (0 = выключен)
+            "daily_loss_limit_rub": self.cfg.strategy.daily_loss_limit_rub,
+            "daily_loss_hit": self._daily_loss_hit(),
             # утилизация капитала / плечо и предохранитель просадки (наблюдаемость)
             "go_target_pct": self.cfg.strategy.go_target_pct,
             "capital_dd_stop_pct": self.cfg.strategy.capital_dd_stop_pct,
