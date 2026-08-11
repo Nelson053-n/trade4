@@ -1046,6 +1046,61 @@ def test_fill_price_divided_by_basic_asset_size(monkeypatch):
     assert abs(s._last_fill_px - 2214.625) < 1e-6      # котировка, НЕ рублёвая сумма
 
 
+def test_execution_gap_detects_hidden_costs():
+    """АУДИТ 10.08 MED-1: сверка журнала со СЧЁТОМ. До 11.08 exec_anchor писался и
+    персистился, но НЕ ЧИТАЛСЯ — канон «истина = счёт» у ST9 не был реализован."""
+    import app.st9.service as svc
+    s = svc.St9Session()
+    s.cfg.mode = "tbank_sandbox"
+    s.cfg.account_id = "acc"
+    s.exec_anchor = {"capital_sizing": 500_000.0, "net": 0.0, "account_id": "acc"}
+
+    # журнал говорит +10 000, счёт вырос ровно на столько → расхождения нет
+    s.trades = [{"net_pnl_rub": 10_000}]
+    s.capital_sizing_rub = 510_000.0
+    assert s._execution_gap() == 0
+
+    # журнал говорит +10 000, а счёт принёс только 7 000 → скрытые издержки 3 000
+    s.capital_sizing_rub = 507_000.0
+    assert s._execution_gap() == -3000
+
+    # чужой счёт / нет якоря / paper — сверять нечего
+    s.cfg.account_id = "other"
+    assert s._execution_gap() is None
+    s.cfg.account_id = "acc"
+    s.exec_anchor = None
+    assert s._execution_gap() is None
+
+
+def test_execution_gap_ignores_legacy_anchor():
+    """Якорь старого формата (на totalAmountPortfolio, без capital_sizing) НЕ годится:
+    сверка модели с mark-to-market серией дала бы «разрыв» размером с переоценку
+    фьючерса, а не с издержками. Такой якорь игнорируется до перестановки."""
+    import app.st9.service as svc
+    s = svc.St9Session()
+    s.cfg.mode = "tbank_sandbox"
+    s.cfg.account_id = "acc"
+    s.capital_sizing_rub = 500_000.0
+    s.exec_anchor = {"capital": 900_000.0, "net": 0.0, "account_id": "acc"}
+    assert s._execution_gap() is None
+
+
+def test_execution_gap_none_while_position_price_unknown():
+    """Открытая позиция без прогретых баров (сразу после рестарта): unrealized посчитать
+    нечем, а без него разрыв показал бы фикцию размером с позицию → None."""
+    import app.st9.service as svc
+    from app.st9.config import St9InstrumentCfg
+    s = svc.St9Session()
+    s.cfg.mode = "tbank_sandbox"
+    s.cfg.account_id = "acc"
+    s.capital_sizing_rub = 500_000.0
+    s.exec_anchor = {"capital_sizing": 500_000.0, "net": 0.0, "account_id": "acc"}
+    s._pv_cache["USDRUBF"] = 1000.0
+    eng = s._engine(St9InstrumentCfg(secid="USDRUBF"))
+    eng.open("long", 80.0, 2, 1, atr=0.5)      # позиция есть, баров нет
+    assert s._execution_gap() is None
+
+
 def test_entry_notional_is_400k_and_margin_stays_safe():
     """РАЗМЕР 400к/ось (решение оператора 11.08) + проверка, что ГО в стрессе не
     подходит к капиталу. При 100к утилизация была 4.1% ГО → 3.3%/год на счёт 764к.

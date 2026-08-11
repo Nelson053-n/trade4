@@ -357,8 +357,14 @@ async def _daily_digest_loop():
                      if _dtm.datetime.fromtimestamp(t.get("exit_ts", 0) / 1000, MSK)
                      .strftime("%Y-%m-%d") == day)
             open9 = sum(1 for e in ST9.engines.values() if e.position is not None)
+            # капитал — ЧЕСТНЫЙ (free+ГО), как на дашборде. capital_rub здесь показывал
+            # totalAmountPortfolio с нотионалом фьючерсов: оператор видел из одного
+            # движка две разные цифры «капитала» (аудит 10.08, MED-2).
+            cap9 = ST9.capital_sizing_rub or ST9.capital_rub
+            gap9 = ST9._execution_gap()
+            gap_s = f" · разрыв со счётом {gap9:+.0f}₽" if gap9 is not None else ""
             lines.append(f"ST9: {c9} сд, {n9:+.0f}₽ · открыто {open9}"
-                         f" · капитал {ST9.capital_rub:,.0f}₽".replace(",", " "))
+                         f" · капитал {cap9:,.0f}₽".replace(",", " ") + gap_s)
             # ── ПОСДЕЛОЧНАЯ СВЕРКА журнал↔счёт по каждому движку (боевая песочная торговля) ──
             lines.append("— <b>сверка сделок ↔ счёт</b> —")
             for name, acc, jfee in _daily_ledger_recon(day, MSK):

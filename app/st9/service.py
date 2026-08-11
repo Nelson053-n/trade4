@@ -1065,6 +1065,42 @@ class St9Session:
         return {"dd_halted": False, "capital_peak_rub": round(self._capital_peak),
                 "trading_enabled": self.cfg.trading_enabled}
 
+    def _execution_gap(self) -> float | None:
+        """Разница «факт счёта − модельный журнал» с момента якоря (₽).
+
+        Отрицательная = скрытая стоимость исполнения: спред, проскальзывание, филлы мимо
+        журнала. Канон проекта «истина = счёт, журналы врут» до 11.08 у ST9 не был
+        реализован вовсе — exec_anchor писался и персистился, но НЕ ЧИТАЛСЯ (аудит 10.08,
+        MED-1). При размере 400к/ось цена незамеченного расхождения выросла вчетверо.
+
+        База — capital_sizing_rub (free + фактическое ГО), НЕ totalAmountPortfolio:
+        последний искажён mark-to-market фьючерсов (завышал ~на 77к) и сам же код в трёх
+        местах называет его недостоверным. Сверять модель с искажённой серией бессмысленно.
+
+        None — нет якоря, не sandbox/real, чужой счёт или капитал ещё не прочитан."""
+        a = self.exec_anchor
+        if a is None or self.cfg.mode not in ("tbank_sandbox", "tbank_real"):
+            return None
+        if a.get("account_id") != self.cfg.account_id:
+            return None
+        base = a.get("capital_sizing")
+        if not base:            # якорь старого формата (до 11.08) — сверять не с чем
+            return None
+        cap = self.capital_sizing_rub
+        if not cap:
+            return None
+        net = sum(t.get("net_pnl_rub", 0) for t in self.trades)
+        unreal = 0.0
+        for eng in self.engines.values():
+            if eng.position is None:
+                continue
+            if not eng.bars:    # после рестарта окна ещё пусты — цены нет
+                return None     # без unrealized разрыв покажет фикцию размером с позицию
+            unreal += eng.unrealized_rub(eng.bars[-1].c)
+        model_delta = (net + unreal) - a.get("net", 0.0)
+        fact_delta = cap - float(base)
+        return round(fact_delta - model_delta)
+
     def refresh_capital(self) -> None:
         if self.cfg.mode not in ("tbank_sandbox", "tbank_real") or not self.cfg.account_id:
             return
@@ -1078,10 +1114,6 @@ class St9Session:
             total = sb._q_to_float(pf.get("totalAmountPortfolio") or pf.get("totalAmountCurrencies"))
             if total and total > 0:
                 self.capital_rub = float(total)
-                if self.exec_anchor is None:
-                    net = sum(t.get("net_pnl_rub", 0) for t in self.trades)
-                    self.exec_anchor = {"capital": float(total), "net": net,
-                                        "account_id": self.cfg.account_id}
             # ЧЕСТНЫЙ капитал для СAЙЗИНГА плеча = свободные деньги + ФАКТИЧЕСКОЕ ГО открытых
             # позиций. НЕ totalAmountPortfolio (искажён mark-to-market фьючерса, завысил бы
             # ~на 77к) и НЕ top-key "blocked" (там валютные блокировки, не фьючерсное ГО —
@@ -1116,6 +1148,15 @@ class St9Session:
                                            f"капитал не обновлён (защита от ложного стопа)")
                 elif free > 0:
                     self.capital_sizing_rub = float(free + go_open)
+                    # ЯКОРЬ ставится здесь, а не на totalAmountPortfolio: сверка идёт по
+                    # ТОЙ ЖЕ серии, что и база (free+ГО). Разные серии в базе и в замере
+                    # давали бы «разрыв» размером с mark-to-market, а не с издержками.
+                    if self.exec_anchor is None or not self.exec_anchor.get("capital_sizing"):
+                        self.exec_anchor = {
+                            "capital_sizing": self.capital_sizing_rub,
+                            "net": sum(t.get("net_pnl_rub", 0) for t in self.trades),
+                            "account_id": self.cfg.account_id,
+                            "ts": int(time.time() * 1000)}
             except Exception:  # noqa: BLE001
                 pass
         except Exception:  # noqa: BLE001
@@ -1221,6 +1262,9 @@ class St9Session:
             # ЧЕСТНЫЙ капитал (free+ГО) — для KPI дашборда; capital_rub (totalAmountPortfolio)
             # искажён переоценкой шорта фьючерса и пугает оператора мусорной цифрой
             "capital_sizing_rub": round(self.capital_sizing_rub) or None,
+            # СВЕРКА С ИСТИНОЙ: «факт счёта − модель журнала» с момента якоря. Отрицательное
+            # = журнал рисует больше, чем принёс счёт (скрытые издержки исполнения).
+            "execution_gap_rub": self._execution_gap(),
             # утилизация капитала / плечо и предохранитель просадки (наблюдаемость)
             "go_target_pct": self.cfg.strategy.go_target_pct,
             "capital_dd_stop_pct": self.cfg.strategy.capital_dd_stop_pct,
