@@ -1085,9 +1085,13 @@ def test_execution_gap_ignores_legacy_anchor():
     assert s._execution_gap() is None
 
 
-def test_execution_gap_none_while_position_price_unknown():
-    """Открытая позиция без прогретых баров (сразу после рестарта): unrealized посчитать
-    нечем, а без него разрыв показал бы фикцию размером с позицию → None."""
+def test_execution_gap_only_when_flat():
+    """Сверка ТОЛЬКО во флэте: `free + ГО` не содержит вариационной маржи (ГО — залог,
+    от хода цены не меняется), а модель с unrealized — содержит. При открытой позиции
+    разрыв равнялся бы вармарже, а не издержкам.
+
+    Замер на проде 11.08 поймал это в бою: разрыв −23 901₽ при unrealized +24 217₽ —
+    метрика мерила плавающую прибыль, а не стоимость исполнения."""
     import app.st9.service as svc
     from app.st9.config import St9InstrumentCfg
     s = svc.St9Session()
@@ -1095,10 +1099,41 @@ def test_execution_gap_none_while_position_price_unknown():
     s.cfg.account_id = "acc"
     s.capital_sizing_rub = 500_000.0
     s.exec_anchor = {"capital_sizing": 500_000.0, "net": 0.0, "account_id": "acc"}
+    assert s._execution_gap() == 0             # флэт → сверка работает
+
     s._pv_cache["USDRUBF"] = 1000.0
     eng = s._engine(St9InstrumentCfg(secid="USDRUBF"))
-    eng.open("long", 80.0, 2, 1, atr=0.5)      # позиция есть, баров нет
-    assert s._execution_gap() is None
+    eng.open("long", 80.0, 2, 1, atr=0.5)
+    assert s._execution_gap() is None          # позиция открыта → не сверяем
+
+
+def test_execution_anchor_not_set_while_position_open(monkeypatch, tmp_path):
+    """Якорь ставится только во ФЛЭТЕ: при открытой позиции в базу попала бы вармаржа,
+    которой нет в модели, и разрыв врал бы на её величину навсегда. Плюс якорь обязан
+    ПЕРСИСТИТЬСЯ — иначе рестарт обнуляет накопленную сверку."""
+    import app.st9.service as svc
+    from app.st4 import tbank_sandbox as sb
+    from app.st9.config import St9InstrumentCfg
+    s = svc.St9Session()
+    s.cfg.mode = "tbank_sandbox"
+    s.cfg.account_id = "acc"
+    s._session_file = tmp_path / "s9.json"
+    monkeypatch.setattr(sb, "portfolio",
+                        lambda acc: {"totalAmountPortfolio": {"units": "500000", "nano": 0}})
+    monkeypatch.setattr(sb, "free_money_rub", lambda acc: 480_000.0)
+    monkeypatch.setattr(sb, "find_future", lambda sec: {"uid": "u1"})
+    monkeypatch.setattr(sb, "futures_margin", lambda uid: (10_000.0, 10_000.0))
+
+    s._pv_cache["USDRUBF"] = 1000.0
+    eng = s._engine(St9InstrumentCfg(secid="USDRUBF"))
+    eng.open("long", 80.0, 2, 1, atr=0.5)
+    s.refresh_capital()
+    assert s.exec_anchor is None               # позиция открыта → якорь НЕ ставим
+
+    eng.position = None
+    s.refresh_capital()
+    assert s.exec_anchor is not None and s.exec_anchor.get("capital_sizing")
+    assert "exec_anchor" in s._session_file.read_text()   # персистнут
 
 
 def test_entry_notional_is_400k_and_margin_stays_safe():

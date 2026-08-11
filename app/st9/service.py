@@ -1077,7 +1077,15 @@ class St9Session:
         последний искажён mark-to-market фьючерсов (завышал ~на 77к) и сам же код в трёх
         местах называет его недостоверным. Сверять модель с искажённой серией бессмысленно.
 
-        None — нет якоря, не sandbox/real, чужой счёт или капитал ещё не прочитан."""
+        ⚠️ ТОЛЬКО ВО ФЛЭТЕ. `free + ГО` НЕ содержит вариационной маржи (ГО — залог, он не
+        меняется от хода цены), а модель с unrealized — содержит. Сравнение этих величин
+        при открытой позиции даёт «разрыв» ровно размером с вармаржу: замер 11.08 на
+        проде показал −23 901₽ при unrealized +24 217₽ — то есть мерил не издержки, а
+        плавающую прибыль. Реализованный P&L сверять корректно только когда все позиции
+        закрыты и вармаржа осела в деньгах.
+
+        None — нет якоря, не sandbox/real, чужой счёт, капитал не прочитан или есть
+        открытые позиции."""
         a = self.exec_anchor
         if a is None or self.cfg.mode not in ("tbank_sandbox", "tbank_real"):
             return None
@@ -1089,15 +1097,10 @@ class St9Session:
         cap = self.capital_sizing_rub
         if not cap:
             return None
+        if any(e.position is not None for e in self.engines.values()):
+            return None         # см. «ТОЛЬКО ВО ФЛЭТЕ» выше
         net = sum(t.get("net_pnl_rub", 0) for t in self.trades)
-        unreal = 0.0
-        for eng in self.engines.values():
-            if eng.position is None:
-                continue
-            if not eng.bars:    # после рестарта окна ещё пусты — цены нет
-                return None     # без unrealized разрыв покажет фикцию размером с позицию
-            unreal += eng.unrealized_rub(eng.bars[-1].c)
-        model_delta = (net + unreal) - a.get("net", 0.0)
+        model_delta = net - a.get("net", 0.0)
         fact_delta = cap - float(base)
         return round(fact_delta - model_delta)
 
@@ -1151,12 +1154,19 @@ class St9Session:
                     # ЯКОРЬ ставится здесь, а не на totalAmountPortfolio: сверка идёт по
                     # ТОЙ ЖЕ серии, что и база (free+ГО). Разные серии в базе и в замере
                     # давали бы «разрыв» размером с mark-to-market, а не с издержками.
-                    if self.exec_anchor is None or not self.exec_anchor.get("capital_sizing"):
+                    # ТОЛЬКО ВО ФЛЭТЕ: при открытой позиции в base попала бы вармаржа,
+                    # которой нет в модели, и разрыв врал бы на её величину навсегда.
+                    if ((self.exec_anchor is None
+                         or not self.exec_anchor.get("capital_sizing"))
+                            and not any(e.position is not None
+                                        for e in self.engines.values())):
                         self.exec_anchor = {
                             "capital_sizing": self.capital_sizing_rub,
                             "net": sum(t.get("net_pnl_rub", 0) for t in self.trades),
                             "account_id": self.cfg.account_id,
                             "ts": int(time.time() * 1000)}
+                        self.save_session()   # иначе якорь живёт только в памяти и
+                        # сбрасывается рестартом — накопленная сверка обнулялась бы
             except Exception:  # noqa: BLE001
                 pass
         except Exception:  # noqa: BLE001
