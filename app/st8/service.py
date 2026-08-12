@@ -8,9 +8,11 @@
 from __future__ import annotations
 
 import json
+import re as _re
 import threading
 import time
 import urllib.request
+import urllib.request as _urlreq
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -276,6 +278,48 @@ class St8Session:
             del self.events[0]
 
     # ---------- данные ISS ----------
+    @staticmethod
+    def _smartlab_divs(tk: str) -> list[tuple[str, float]]:
+        """Сырые дивиденды с smart-lab: [(registryclosedate ISO, value)].
+
+        ЗАМЕНА ISS (12.08.2026): `iss/securities/<TK>/dividends.json` перестал
+        обновляться — данные обрываются на 2025 у ВСЕХ тикеров, за 2026 ни одной
+        отсечки, хотя дивиденды платились. Параметры limit/start/from игнорируются,
+        живой дивидендный метод ISS (`/iss/cci/corp-actions/dividends`) — платный
+        (X-MicexPassport-Marker: denied). Из-за этого ST8 не сделал НИ ОДНОЙ сделки
+        с запуска 09.07 и молча простоял весь сезон.
+
+        Кросс-сверка с ISS на пересекающихся годах: 91 запись, 1 расхождение
+        (LKOH 2022-12-21 — спецдивиденд). Даты реестра совпадают везде.
+
+        HTML, не JSON: вёрстка может поехать без предупреждения — поэтому вызывающий
+        код НЕ кэширует пустой результат (см. ниже) и жалуется в лог."""
+        url = f"https://smart-lab.ru/q/{tk}/dividend/"
+        req = _urlreq.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with _urlreq.urlopen(req, timeout=25) as r:
+            html = r.read().decode("utf-8", "replace")
+        out = []
+        for m in _re.finditer(r"<tr[^>]*>(.*?)</tr>", html, _re.S):
+            cells = _re.findall(r"<td[^>]*>(.*?)</td>", m.group(1), _re.S)
+            if len(cells) < 5:
+                continue
+            c = [_re.sub(r"<[^>]+>", "", x).replace("₽", "")
+                   .replace("&nbsp;", " ").strip() for x in cells]
+            # страница SBER содержит и строки SBERP — фильтр по тикеру ОБЯЗАТЕЛЕН
+            if c[0] != tk:
+                continue
+            reg = c[2]
+            if not _re.fullmatch(r"\d{2}\.\d{2}\.\d{4}", reg or ""):
+                continue
+            try:                      # русский формат: «37,64», у IRAO «0.321425305785»
+                val = float(c[4].replace(" ", "").replace(",", "."))
+            except ValueError:
+                continue
+            if val <= 0:
+                continue
+            out.append((f"{reg[6:10]}-{reg[3:5]}-{reg[0:2]}", val))
+        return out
+
     def _fetch_divs(self, tk: str) -> list:
         """Дивиденды тикера: [(ex_date, div, div_yield_pct)]. ex_date = registryclosedate − 1
         торг.день (T+1 гэп). div_yield по последней close перед ex."""
@@ -284,15 +328,9 @@ class St8Session:
         if not self._trading_days:
             return []   # торговый календарь ещё не загружен — считать нельзя, НЕ кэшируем
         try:
-            d = _iss(f"{ISS}/securities/{tk}/dividends.json?iss.meta=off")
-            dv = d.get("dividends", d)
-            ci = {c: i for i, c in enumerate(dv["columns"])}
             today = date.today().isoformat()
             out = []
-            for r in dv["data"]:
-                rc = r[ci["registryclosedate"]]; val = r[ci["value"]]
-                if not rc or not val:
-                    continue
+            for rc, val in self._smartlab_divs(tk):
                 ex = self._prev_trading_day(rc)
                 if ex is None:
                     continue
@@ -897,6 +935,17 @@ class St8Session:
                     "july": is_july, "status": status,
                 })
         rows.sort(key=lambda r: (r["entry_date"] or r["ex_date"]))
+        # АЛЕРТ НА ТИХУЮ ПОЛОМКУ (12.08): движок месяц рапортовал live и «котировки
+        # обновлены», не сделав НИ ОДНОЙ сделки — источник дивидендов умер, а календарь
+        # молча отдавал []. Пустой календарь при включённых тикерах = либо сломался
+        # парсер/источник, либо межсезонье; и то и другое оператор должен видеть.
+        # Логируем один раз в сутки, чтобы не засорять ленту.
+        if not rows and any(self.enabled.values()):
+            if getattr(self, "_empty_cal_day", None) != today:
+                self._empty_cal_day = today
+                self.log_event("warn", "🚨 календарь ПУСТ: ни одной отсечки в окне "
+                                       f"{lo}..{hi} при {sum(self.enabled.values())} "
+                                       "включённых тикерах — проверить источник дивидендов")
         return rows
 
     def price_series(self, ticker: str, ex_date: str, pad: int = 20) -> list[dict]:
