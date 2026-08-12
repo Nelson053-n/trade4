@@ -415,10 +415,18 @@ class St9Session:
         return day_net if day_net < -abs(lim) else None
 
     def _entry_lots(self, icfg, px: float, pv: float, side: str = "long",
-                    sec: str | None = None) -> int:
-        """Лоты входа. При плече (go_target_pct>0) — из ФАКТИЧЕСКОГО ГО на лот; иначе из
-        нотионала оси. В tbank_real режется потолком real_max_notional_rub (пилот).
-        side/sec нужны для точного ГО (long/short, контракт) при плече."""
+                    sec: str | None = None, atr: float | None = None) -> int:
+        """Лоты входа. Три режима, в порядке приоритета:
+
+        1. РИСК-САЙЗИНГ (`risk_per_trade_rub>0`, пер-ось): размер от бюджета риска,
+           `лоты = risk / (atr_mult × ATR × pv)` — знаменатель это цена стопа в ₽.
+           Включён точечно на USDRUBF (замер 12.08: +49.5% при равной просадке,
+           5 лет из 5); на IMOEXF режим ВРЕДЕН (−67.5%), поэтому не глобальный.
+        2. ПЛЕЧО (`go_target_pct>0`): из фактического ГО на лот.
+        3. НОТИОНАЛ оси (по умолчанию).
+
+        В tbank_real режется потолком real_max_notional_rub (пилот).
+        side/sec нужны для точного ГО при плече; atr — для риск-сайзинга."""
         sec = sec or self._trade_secid(icfg)
         if px <= 0 or pv <= 0:
             # битая цена (ISS отдал 0/None) → ОТКАЗ входа, НЕ 1 лот вслепую: при px=0
@@ -428,6 +436,25 @@ class St9Session:
             return 0
         s = self.cfg.strategy
         target = icfg.entry_notional_rub
+        # ── РЕЖИМ 1: САЙЗИНГ ПО РИСКУ (пер-ось). Знаменатель — цена стопа в ₽ на лот:
+        # позиция закрывается по трейлу примерно в atr_mult×ATR от входа.
+        risk = getattr(icfg, "risk_per_trade_rub", 0.0)
+        if risk > 0:
+            if not atr or atr <= 0:
+                # ATR не прогрет — на риск-оси размер посчитать НЕЧЕМ. Падать на нотионал
+                # нельзя: он для этой оси не откалиброван и дал бы чужой размер вслепую.
+                # Молча: этот путь зовётся и для предварительного lots_for_entry на КАЖДОМ
+                # баре прогрева — лог бы захлебнулся. Реальный вход всё равно не состоится
+                # (0 лотов), а сигнала при непрогретом ATR движок и не даст.
+                return 0
+            risk_per_lot = icfg.atr_mult * atr * pv
+            if risk_per_lot <= 0:
+                return 0
+            lots = max(1, int(risk / risk_per_lot))
+            cap = getattr(s, "real_max_notional_rub", 0.0)
+            if self.cfg.mode == "tbank_real" and cap > 0:
+                lots = min(lots, max(1, int(cap / (px * pv))))
+            return lots
         # режим утилизации капитала: нотионал от % капитала на число осей (плечо)
         go_pct = getattr(s, "go_target_pct", 0.0)
         # ЧЕСТНЫЙ капитал (free+ГО), НЕ totalAmountPortfolio (искажён переоценкой шорта)
@@ -576,7 +603,8 @@ class St9Session:
                         self.save_session()
                         return
                     eng.pv = pv
-                lots = self._entry_lots(icfg, sig["px"], eng.pv, side, sec)
+                lots = self._entry_lots(icfg, sig["px"], eng.pv, side, sec,
+                                        atr=sig.get("atr"))
                 got = self._order(sec, lots, "BUY" if side == "long" else "SELL",
                                   ref_px=sig["px"])
                 if got <= 0:
@@ -658,7 +686,8 @@ class St9Session:
             rec["slip_rub"] = self._slip_rub(tr, entry_fill, exit_fill, eng.pv)
             self.trades.append(rec)
             eng.pv = new_pv
-            lots = self._entry_lots(icfg, new_px, new_pv, side, new_sec)
+            lots = self._entry_lots(icfg, new_px, new_pv, side, new_sec,
+                                    atr=eng._atr())
             got2 = self._order(new_sec, lots, "BUY" if side == "long" else "SELL",
                                ref_px=new_px)
             if got2 <= 0:
@@ -771,7 +800,11 @@ class St9Session:
                         self.log_event("info", f"{icfg.secid}: бар отложен до открытия FORTS")
                     break
                 self._last_bar_ts[icfg.secid] = b.ts
-                lots = self._entry_lots(icfg, b.c, eng.pv, "long", self._trade_secid(icfg))
+                # предварительный размер для step(); фактический пересчитывается в
+                # _apply_signal_locked с верной стороной. На риск-оси без прогретого ATR
+                # вернётся 0 — это нормально, step() значение не использует.
+                lots = self._entry_lots(icfg, b.c, eng.pv, "long",
+                                        self._trade_secid(icfg), atr=eng._atr())
                 sig = eng.step(b, lots_for_entry=lots)
                 if sig and not warmup:
                     acted["signals"] += 1

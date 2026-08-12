@@ -673,7 +673,9 @@ def test_entry_lots_rejects_bad_price():
     """Битая цена (px<=0 / pv<=0) → 0 лотов (отказ), не 1 вслепую (иначе обход sanity)."""
     from app.st9.service import St9Session
     s = St9Session()
-    icfg = s.cfg.instruments[0]
+    # ось БЕЗ риск-сайзинга: instruments[0] (USDRUBF) с 12.08 считает размер от
+    # бюджета риска, а эти тесты проверяют режимы НОТИОНАЛА и ПЛЕЧА
+    icfg = next(i for i in s.cfg.instruments if not i.risk_per_trade_rub)
     assert s._entry_lots(icfg, 0, 1000) == 0       # px=0 → отказ
     assert s._entry_lots(icfg, 100, 0) == 0        # pv=0 → отказ
     assert s._entry_lots(icfg, 100, 1) > 0         # норма → лоты есть
@@ -715,7 +717,9 @@ def test_sizing_by_capital_pct():
     from app.st9.service import St9Session
     s = St9Session()
     s.capital_rub = 500_000
-    icfg = s.cfg.instruments[0]
+    # ось БЕЗ риск-сайзинга: instruments[0] (USDRUBF) с 12.08 считает размер от
+    # бюджета риска, а эти тесты проверяют режимы НОТИОНАЛА и ПЛЕЧА
+    icfg = next(i for i in s.cfg.instruments if not i.risk_per_trade_rub)
     # выкл → по entry_notional_rub оси (величина берётся из конфига, не хардкодом:
     # размер менялся 100к→400к 11.08, тест проверяет МЕХАНИКУ, а не число)
     s.cfg.strategy.go_target_pct = 0.0
@@ -798,7 +802,9 @@ def test_update_strategy_leverage():
     assert r["go_target_pct"] == 15 and r["capital_dd_stop_pct"] == 15
     assert s._capital_peak == 500_000          # пик от честного капитала
     # сайзинг теперь от честного капитала (не totalAmountPortfolio)
-    icfg = s.cfg.instruments[0]
+    # ось БЕЗ риск-сайзинга: instruments[0] (USDRUBF) с 12.08 считает размер от
+    # бюджета риска, а эти тесты проверяют режимы НОТИОНАЛА и ПЛЕЧА
+    icfg = next(i for i in s.cfg.instruments if not i.risk_per_trade_rub)
     n_axes = sum(1 for i in s.cfg.instruments if i.entries_enabled)            # движков нет → делитель = весь реестр
     notional = s._entry_lots(icfg, 77, 1000) * 77 * 1000
     expected = 500_000 * 0.15 / n_axes / 0.044
@@ -812,7 +818,9 @@ def test_sizing_uses_honest_capital():
     s.cfg.strategy.go_target_pct = 15.0
     s.capital_rub = 578_000            # искажённый totalAmountPortfolio
     s.capital_sizing_rub = 500_000     # честный
-    icfg = s.cfg.instruments[0]
+    # ось БЕЗ риск-сайзинга: instruments[0] (USDRUBF) с 12.08 считает размер от
+    # бюджета риска, а эти тесты проверяют режимы НОТИОНАЛА и ПЛЕЧА
+    icfg = next(i for i in s.cfg.instruments if not i.risk_per_trade_rub)
     notional = s._entry_lots(icfg, 77, 1000) * 77 * 1000
     # должен считать от 500к, не 578к
     expected = 500_000 * 0.15 / sum(1 for i in s.cfg.instruments if i.entries_enabled) / 0.044
@@ -836,7 +844,9 @@ def test_sizing_from_actual_go_per_lot():
     s.cfg.strategy.go_target_pct = 15.0
     # мок фактического ГО: 11500₽/лот (реальное USDRUBF, не go_frac-оценка)
     s._go_per_lot = lambda sec, side: 11_500.0
-    icfg = s.cfg.instruments[0]
+    # ось БЕЗ риск-сайзинга: instruments[0] (USDRUBF) с 12.08 считает размер от
+    # бюджета риска, а эти тесты проверяют режимы НОТИОНАЛА и ПЛЕЧА
+    icfg = next(i for i in s.cfg.instruments if not i.risk_per_trade_rub)
     lots = s._entry_lots(icfg, 77, 1000, side="long")
     # целевое ГО на ось = 500к×15%/N осей; лоты = ГО_оси/11500
     expected = int(500_000 * 0.15 / sum(1 for i in s.cfg.instruments if i.entries_enabled) / 11_500.0)
@@ -850,7 +860,9 @@ def test_sizing_go_fallback_when_api_down():
     s.capital_sizing_rub = 500_000
     s.cfg.strategy.go_target_pct = 15.0
     s._go_per_lot = lambda sec, side: None      # API недоступно
-    icfg = s.cfg.instruments[0]
+    # ось БЕЗ риск-сайзинга: instruments[0] (USDRUBF) с 12.08 считает размер от
+    # бюджета риска, а эти тесты проверяют режимы НОТИОНАЛА и ПЛЕЧА
+    icfg = next(i for i in s.cfg.instruments if not i.risk_per_trade_rub)
     lots = s._entry_lots(icfg, 77, 1000, side="long")
     assert lots >= 1                             # фолбэк сработал, вход возможен
 
@@ -961,7 +973,9 @@ def test_leverage_divider_independent_of_created_engines():
     s.capital_sizing_rub = 500_000
     s.cfg.strategy.go_target_pct = 15.0
     s._go_per_lot = lambda sec, side: 11_500.0
-    icfg = s.cfg.instruments[0]
+    # ось БЕЗ риск-сайзинга: instruments[0] (USDRUBF) с 12.08 считает размер от
+    # бюджета риска, а эти тесты проверяют режимы НОТИОНАЛА и ПЛЕЧА
+    icfg = next(i for i in s.cfg.instruments if not i.risk_per_trade_rub)
     # реестр ЖИВЫХ осей (выведенные из состава долю бюджета не занимают, 11.08)
     n = sum(1 for i in s.cfg.instruments if i.entries_enabled)
     expected = int(500_000 * 0.15 / n / 11_500.0)
@@ -1069,6 +1083,45 @@ def test_backtest_dd_is_mark_to_market():
     # ...и складываются, когда совпадают
     c = {1: 0.0, 2: -100.0, 3: 0.0}
     assert portfolio_dd({"a": a, "c": c}) == 200
+
+
+def test_risk_sizing_scales_inversely_with_volatility():
+    """ПЕР-ОСЕВОЙ РИСК-САЙЗИНГ (12.08): лоты = risk / (atr_mult × ATR × pv).
+
+    Смысл — не наращивание размера, а перераспределение: больше лотов в спокойном
+    рынке, меньше на всплеске волатильности. Включён ТОЧЕЧНО на USDRUBF (замер: при
+    равной просадке +49.5%, выигрыш 5 лет из 5); на IMOEXF режим ВРЕДЕН (−67.5%)."""
+    import app.st9.service as svc
+    from app.st9.config import St9InstrumentCfg
+    s = svc.St9Session()
+    s._pv_cache["USDRUBF"] = 1000.0
+    icfg = St9InstrumentCfg(secid="USDRUBF", atr_mult=5.0, risk_per_trade_rub=5_000.0)
+
+    # ATR 0.2 → цена стопа на лот = 5.0 × 0.2 × 1000 = 1000₽ → 5 лотов
+    assert s._entry_lots(icfg, 80.0, 1000.0, "long", "USDRUBF", atr=0.2) == 5
+    # волатильность выросла вдвое → размер ВДВОЕ меньше при том же риске
+    assert s._entry_lots(icfg, 80.0, 1000.0, "long", "USDRUBF", atr=0.4) == 2
+    # ...и цена входа на размер НЕ влияет (в отличие от режима нотионала)
+    assert s._entry_lots(icfg, 160.0, 1000.0, "long", "USDRUBF", atr=0.2) == 5
+
+    # ATR не прогрет → вход не состоится: падать на нотионал нельзя, он для риск-оси
+    # не откалиброван и дал бы чужой размер вслепую
+    assert s._entry_lots(icfg, 80.0, 1000.0, "long", "USDRUBF", atr=None) == 0
+
+    # ось БЕЗ risk_per_trade_rub считает по-старому, от нотионала
+    plain = St9InstrumentCfg(secid="USDRUBF", entry_notional_rub=400_000.0)
+    assert s._entry_lots(plain, 80.0, 1000.0, "long", "USDRUBF", atr=0.2) == 5
+
+
+def test_risk_sizing_enabled_only_on_usdrubf():
+    """Режим ПЕР-ОСЕВОЙ: на IMOEXF он ухудшал результат (−67.5% при равной просадке,
+    проигрыш 3 года из 4), поэтому включён только там, где замерен выигрыш."""
+    from app.st9.config import St9Config
+    cfg = St9Config()
+    risk = {i.secid: i.risk_per_trade_rub for i in cfg.instruments}
+    assert risk["USDRUBF"] == 5_000.0
+    assert risk["IMOEXF"] == 0.0
+    assert risk["GLDRUBF"] == 0.0
 
 
 def test_backtest_funding_sign_and_daily_accrual():
@@ -1215,9 +1268,10 @@ def test_disabled_axis_excluded_from_margin_divider():
     s.capital_sizing_rub = 600_000
     s.cfg.strategy.go_target_pct = 15.0
     monkeypatch_go = 10_000.0
-    s._go_lot_cache[("USDRUBF", "long")] = (monkeypatch_go, __import__("time").time())
-    icfg = next(i for i in s.cfg.instruments if i.secid == "USDRUBF")
-    lots_3axes = s._entry_lots(icfg, 80.0, 1000.0, "long", "USDRUBF")
+    # IMOEXF, а не USDRUBF: последняя с 12.08 на риск-сайзинге и режим плеча минует
+    s._go_lot_cache[("IMOEXF", "long")] = (monkeypatch_go, __import__("time").time())
+    icfg = next(i for i in s.cfg.instruments if i.secid == "IMOEXF")
+    lots_3axes = s._entry_lots(icfg, 80.0, 1000.0, "long", "IMOEXF")
 
     # GLDRUBF выведена → бюджет делится на 2 живые оси, не на 3
     live = sum(1 for i in s.cfg.instruments if i.entries_enabled)
