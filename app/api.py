@@ -228,29 +228,26 @@ def _daily_ledger_recon(day: str, MSK):
             except Exception:  # noqa: BLE001
                 ts = None
         _st8_trades.append({"exit_ts": ts, "fees_rub": t.get("fees_rub", 0)})
+    # Комиссии ВХОДОВ, ещё не попавших в журнал: сделка пишется только при ЗАКРЫТИИ, а счёт
+    # списывает комиссию сразу при открытии. Без этого каждое открытие давало ложную ⚠️
+    # (дайджест 12.08: ST9 0 сделок, Δ+249 при живом входе).
+    _open8 = sum(p.fees_rub for e in ST8.engines.values()
+                 if (p := e.position) is not None and p.entry_date == day)
+    _open9 = sum(p.fees_rub for e in ST9.engines.values()
+                 if (p := e.position) is not None
+                 and _dtm.datetime.fromtimestamp(p.entry_ts / 1000, MSK).strftime("%Y-%m-%d") == day)
+    # Только действующие движки: st4-st7 остановлены, сверка по ним давала пустые строки
     engines = [
-        ("ST5", getattr(ST5.cfg.connector, "account_id", None),
-         ST5.cfg.connector.mode, ST5.trades),
-        ("ST6", ST6.cfg.account_id, ST6.cfg.mode, ST6.trades),
-        ("ST7", ST7.cfg.account_id, ST7.cfg.mode, ST7.trades),
-        ("ST8", ST8.cfg.account_id, ST8.cfg.mode, _st8_trades),
-        ("ST9", ST9.cfg.account_id, ST9.cfg.mode, ST9.trades),
+        ("ST8", ST8.cfg.account_id, ST8.cfg.mode, _st8_trades, _open8),
+        ("ST9", ST9.cfg.account_id, ST9.cfg.mode, ST9.trades, _open9),
     ]
-    for eng in ST4S.values():
-        # только ЖИВЫЕ пары st4 — остановленные (rtkm/tatn) висят на общем счёте 614c441c
-        # с чужими операциями (/opt/trade), сверка дала бы ложное расхождение
-        if not eng.state.get("live"):
-            continue
-        engines.append((f"ST4-{eng.pair}", getattr(eng.cfg.connector, "account_id", None),
-                        eng.cfg.connector.mode,
-                        [{"exit_ts": t.exit_ts, "fees_rub": t.fees_rub} for t in eng.engine.trades]))
-    for name, acc, mode, trades in engines:
+    for name, acc, mode, trades, open_fee in engines:
         if mode != "tbank_sandbox" or not acc:
             out.append((f"{name}: paper (сверка не требуется)", None, 0.0))
             continue
         jfee = sum(t.get("fees_rub", 0) or 0 for t in (trades or [])
                    if t.get("exit_ts") and _dtm.datetime.fromtimestamp(
-                       t["exit_ts"] / 1000, MSK).strftime("%Y-%m-%d") == day)
+                       t["exit_ts"] / 1000, MSK).strftime("%Y-%m-%d") == day) + open_fee
         jn = sum(1 for t in (trades or []) if t.get("exit_ts")
                  and _dtm.datetime.fromtimestamp(t["exit_ts"] / 1000, MSK).strftime("%Y-%m-%d") == day)
         try:
@@ -303,35 +300,9 @@ async def _daily_digest_loop():
             if not ST5.cfg.notify.enabled:
                 sent_for = day
                 continue
-            def _today_net(trades, key="exit_ts"):
-                out_n, out_c = 0.0, 0
-                for t in trades or []:
-                    ts = t.get(key) if isinstance(t, dict) else getattr(t, key, 0)
-                    if ts and _dtm.datetime.fromtimestamp(ts / 1000, MSK).strftime("%Y-%m-%d") == day:
-                        v = t.get("net_pnl_rub") if isinstance(t, dict) else getattr(t, "net_pnl_rub", 0)
-                        out_n += v or 0; out_c += 1
-                return out_n, out_c
+            # В дайджесте только ДЕЙСТВУЮЩИЕ движки — st8/st9. st4-st7 остановлены
+            # (вердикт 07.07: ни одна не жизнеспособна), их нулевые строки были шумом.
             lines = [f"📊 <b>Дневной дайджест {day}</b>"]
-            n5, c5 = _today_net(ST5.trades)
-            gap = ST5._execution_gap()
-            lines.append(f"ST5: {c5} сд, {n5:+.0f}₽ · капитал {ST5.portfolio.capital_rub:,.0f}₽"
-                         + (f" · сверка {gap:+.0f}₽" if gap is not None else "")
-                         + f" · позиций на ночь {sum(1 for e in ST5.engines.values() if e.position)}")
-            n4 = 0.0; c4 = 0
-            for s4 in ST4S.values():
-                nn, cc = _today_net([{"exit_ts": t.exit_ts, "net_pnl_rub": t.net_pnl_rub}
-                                     for t in s4.engine.trades])
-                n4 += nn; c4 += cc
-            lines.append(f"ST4: {c4} сд, {n4:+.0f}₽")
-            fund6 = sum(p.funding_rub for e in ST6.engines.values() if (p := e.position))
-            gap6 = ST6._execution_gap()
-            lines.append(f"ST6: позиций {sum(1 for e in ST6.engines.values() if e.position)}"
-                         f" · фандинг накоплен {fund6:+.0f}₽ · net {sum(t.get('net_pnl_rub', 0) for t in ST6.trades):+.0f}₽"
-                         + (f" · сверка {gap6:+.0f}₽" if gap6 is not None else ""))
-            sig7 = ", ".join(f"{v['pair']} {v['fund_ann_pp']:+.0f}%" for v in ST7.signal_view.values())
-            lines.append(f"ST7: позиций {sum(1 for e in ST7.engines.values() if e.position)}"
-                         f" · net {sum(t.get('net_pnl_rub', 0) for t in ST7.trades):+.0f}₽"
-                         + (f" · фандинг: {sig7}" if sig7 else ""))
             # ST8 — дивидендный набег (сделки за день, открытые позиции, свежие дивиденды)
             n8 = sum(t.get("net_pnl_rub", 0) for t in ST8.trades
                      if t.get("exit_date") == day)
@@ -342,10 +313,6 @@ async def _daily_digest_loop():
             lines.append(f"ST8: {c8} сд, {n8:+.0f}₽ · открыто {open8}"
                          + (f" · 🆕 дивидендов {newdiv}" if newdiv else "")
                          + (f" · сверка {gap8:+.0f}₽" if gap8 is not None else ""))
-            miss_today = sum(1 for m in ST5.missed
-                             if _dtm.datetime.fromtimestamp(m["ts"] / 1000, MSK).strftime("%Y-%m-%d") == day)
-            if miss_today:
-                lines.append(f"⏭ упущенных входов st5: {miss_today}")
             miss8 = sum(1 for m in ST8.missed if m.get("date") == day)
             if miss8:
                 lines.append(f"⏭ упущенных входов st8: {miss8}")
