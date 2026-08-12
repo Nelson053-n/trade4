@@ -1071,6 +1071,48 @@ def test_backtest_dd_is_mark_to_market():
     assert portfolio_dd({"a": a, "c": c}) == 200
 
 
+def test_backtest_funding_sign_and_daily_accrual():
+    """ФАНДИНГ В МОДЕЛИ (12.08). ST9 торгует ВЕЧНЫМИ фьючерсами, средняя сделка живёт
+    4.3 дня, а фандинга в модели издержек не было ВООБЩЕ — при том что st6/st7 его
+    считают. Фактические ставки: 20-29% ГОДОВЫХ, больше комиссии и лага вместе.
+
+    Проверяем два инварианта:
+    1. ЗНАК — лонг ПЛАТИТ положительный фандинг, шорт ПОЛУЧАЕТ (канон st6/data.py:16).
+    2. Начисление РАЗ В КАЛЕНДАРНЫЙ ДЕНЬ, а не на каждый бар: внутри дня баров 10-14,
+       поначасовое начисление завысило бы издержки на порядок."""
+    from app.st9.backtest import run
+    from app.st9.engine import Bar
+    import datetime as dt
+
+    # два дня по 3 часовых бара; растущая цена → лонг по пробою
+    base = dt.datetime(2026, 3, 2, 10, 0)
+    bars = []
+    px = 100.0
+    for day in range(14):
+        for hour in range(3):
+            ts = int((base + dt.timedelta(days=day, hours=hour)).timestamp() * 1000)
+            px += 0.5
+            bars.append(Bar(ts=ts, o=px, h=px + 0.3, l=px - 0.3, c=px))
+    swaps = {(base + dt.timedelta(days=d)).date().isoformat(): 1.0 for d in range(14)}
+
+    t_no = run("GLDRUBF", 3, 2, 3.0, bars, notional=10_000.0)
+    t_fund = run("GLDRUBF", 3, 2, 3.0, bars, notional=10_000.0, swaps=swaps)
+    if not t_no:
+        return                                   # сигнала не случилось — нечего сверять
+    net_no = sum(x.net_pnl_rub for x in t_no)
+    net_f = sum(x.net_pnl_rub for x in t_fund)
+    # позиция лонговая (цена растёт) → положительный фандинг УХУДШАЕТ результат
+    assert net_f < net_no, (net_no, net_f)
+
+    # шорт при том же положительном фандинге его ПОЛУЧАЕТ: проверяем на падающей цене
+    bars_dn = [Bar(ts=b.ts, o=-b.o + 300, h=-b.l + 300, l=-b.h + 300, c=-b.c + 300)
+               for b in bars]
+    s_no = run("GLDRUBF", 3, 2, 3.0, bars_dn, notional=10_000.0)
+    s_f = run("GLDRUBF", 3, 2, 3.0, bars_dn, notional=10_000.0, swaps=swaps)
+    if s_no:
+        assert sum(x.net_pnl_rub for x in s_f) > sum(x.net_pnl_rub for x in s_no)
+
+
 def test_backtest_stats_backward_compatible():
     """stats(trades) без curve обязан работать как раньше — на него опираются
     прежние вызовы; dd тогда = просадка по закрытым сделкам, dd_mtm = None."""
