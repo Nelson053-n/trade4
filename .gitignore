@@ -9,11 +9,10 @@ venv/
 build/
 dist/
 
-# рантайм-состояние сессий st4/st5 (не коммитим)
-session_state_4*.json
-session_state_5*.json
-session_state_6*.json
-session_state_7*.json
+# рантайм-состояние сессий (не коммитим): журналы сделок + боевые account_id.
+# Шаблон на ВСЕ движки — перечисление по номерам пропустило st8/st9 (14.08),
+# они висели untracked и ушли бы в репозиторий первым же `git add -A`.
+session_state_*.json
 
 # токен T-Bank (секрет, НИКОГДА не коммитить)
 .tbank_token
