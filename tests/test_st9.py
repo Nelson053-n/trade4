@@ -1683,3 +1683,35 @@ def test_ledger_recon_old_trades_without_split(monkeypatch):
     monkeypatch.setattr(_sb, "_account_token", lambda acc: "t")
     rows = {r[0].split(" ")[0]: r[2] for r in api._daily_ledger_recon("2026-08-13", MSK)}
     assert rows["ST9"] == 300.0
+
+
+def test_entry_fee_survives_restart_into_trade(tmp_path, monkeypatch):
+    """Позиция, открытая ДО появления entry_fees_rub, после рестарта всё равно даёт
+    правильную разбивку: входная комиссия живёт в position.fees_rub и персистится.
+
+    Проверка перед деплоем 14.08: три открытые позиции прода закроются корректно,
+    миграция журнала не нужна."""
+    import json
+    import app.st9.service as svc
+    f = tmp_path / "s9.json"
+    # session-файл в формате прода: позиция с уплаченной комиссией входа
+    f.write_text(json.dumps({
+        "positions": {"USDRUBF": {"side": "long", "entry": 83.13, "lots": 6,
+                                  "entry_ts": 1786533308397, "trail": 83.36,
+                                  "fees_rub": 261.39}},
+        "trades": [], "state": {}, "config": {},
+    }), encoding="utf-8")
+    s = svc.St9Session()
+    s._session_file = f
+    s.load_session()
+    # позиция уже в движке (или ждёт в pending, если pv был недоступен)
+    eng = s.engines.get("USDRUBF")
+    pos = eng.position if eng and eng.position else svc.St9Position(
+        **s._pending_positions["USDRUBF"])
+    assert pos.fees_rub == 261.39               # комиссия входа пережила рестарт
+
+    e = _eng(secid="USDRUBF", pv=1.0, fee_per_lot=0.0)
+    e.position = pos
+    tr = e.close(84.0, 1786600000000, "trail")
+    assert tr.entry_fees_rub == 261.39          # уплачено в день ВХОДА
+    assert tr.fees_rub >= tr.entry_fees_rub     # плюс выходная часть
