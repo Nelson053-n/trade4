@@ -216,40 +216,62 @@ def _daily_ledger_recon(day: str, MSK):
     import datetime as _dtm
     from .st4 import tbank_sandbox as _sb
     out = []
-    # st8-сделки имеют exit_date (строка) → конвертируем в exit_ts (мс) для единой сверки
-    _st8_trades = []
-    for t in ST8.trades:
-        exd = t.get("exit_date")
-        ts = None
-        if exd:
-            try:
-                ts = int(_dtm.datetime.strptime(exd, "%Y-%m-%d")
-                         .replace(tzinfo=MSK).timestamp() * 1000)
-            except Exception:  # noqa: BLE001
-                ts = None
-        _st8_trades.append({"exit_ts": ts, "fees_rub": t.get("fees_rub", 0)})
-    # Комиссии ВХОДОВ, ещё не попавших в журнал: сделка пишется только при ЗАКРЫТИИ, а счёт
-    # списывает комиссию сразу при открытии. Без этого каждое открытие давало ложную ⚠️
-    # (дайджест 12.08: ST9 0 сделок, Δ+249 при живом входе).
+
+    def _day_of(ts):
+        """мс-эпоха → МСК-день ('' если нет)."""
+        if not ts:
+            return ""
+        return _dtm.datetime.fromtimestamp(ts / 1000, MSK).strftime("%Y-%m-%d")
+
+    # ── Журнальная комиссия ЗА ДЕНЬ = то, что счёт СПИСАЛ в этот день ──────────────
+    # Сделка ложится в журнал днём ЗАКРЫТИЯ, но её fees_rub = вход + выход, а вход
+    # счёт списал днём ОТКРЫТИЯ. Раньше вся сумма падала на день закрытия → ложная ⚠️
+    # в обе стороны (13.08: ST9 Δ-211 = входная комиссия сделки, вошедшей 12.08).
+    # Теперь части разносятся по датам фактического списания:
+    #   день = Σ выходных частей закрытых СЕГОДНЯ + Σ входных частей вошедших СЕГОДНЯ
+    #          + Σ комиссий входа ещё ОТКРЫТЫХ позиций, открытых сегодня
+    # entry_fees_rub появилось 14.08; у сделок до него 0 → входная часть неизвестна,
+    # относим всю комиссию ко дню закрытия (прежнее поведение, без ложных нулей).
+    def _journal_fee(trades, positions_entry_fee):
+        total = 0.0
+        for t in trades or []:
+            fee = t.get("fees_rub", 0) or 0
+            ent = t.get("entry_fees_rub", 0) or 0
+            d_exit, d_entry = t.get("_exit_day"), t.get("_entry_day")
+            if not ent:                       # старая сделка: разбить нечем
+                total += fee if d_exit == day else 0.0
+                continue
+            if d_exit == day:
+                total += fee - ent            # выходная часть
+            if d_entry == day:
+                total += ent                  # входная часть (может быть тот же день)
+        return total + positions_entry_fee
+
+    # st8 хранит даты строками, st9 — мс-эпохой: приводим к единому виду
+    _st8_trades = [{"_exit_day": t.get("exit_date") or "",
+                    "_entry_day": t.get("entry_date") or "",
+                    "fees_rub": t.get("fees_rub", 0),
+                    "entry_fees_rub": t.get("entry_fees_rub", 0)} for t in ST8.trades]
+    _st9_trades = [{"_exit_day": _day_of(t.get("exit_ts")),
+                    "_entry_day": _day_of(t.get("entry_ts")),
+                    "fees_rub": t.get("fees_rub", 0),
+                    "entry_fees_rub": t.get("entry_fees_rub", 0)} for t in ST9.trades]
+    # ОТКРЫТЫЕ позиции: их вход счёт уже списал, а сделки в журнале ещё нет
     _open8 = sum(p.fees_rub for e in ST8.engines.values()
                  if (p := e.position) is not None and p.entry_date == day)
     _open9 = sum(p.fees_rub for e in ST9.engines.values()
-                 if (p := e.position) is not None
-                 and _dtm.datetime.fromtimestamp(p.entry_ts / 1000, MSK).strftime("%Y-%m-%d") == day)
+                 if (p := e.position) is not None and _day_of(p.entry_ts) == day)
     # Только действующие движки: st4-st7 остановлены, сверка по ним давала пустые строки
     engines = [
         ("ST8", ST8.cfg.account_id, ST8.cfg.mode, _st8_trades, _open8),
-        ("ST9", ST9.cfg.account_id, ST9.cfg.mode, ST9.trades, _open9),
+        ("ST9", ST9.cfg.account_id, ST9.cfg.mode, _st9_trades, _open9),
     ]
     for name, acc, mode, trades, open_fee in engines:
         if mode != "tbank_sandbox" or not acc:
             out.append((f"{name}: paper (сверка не требуется)", None, 0.0))
             continue
-        jfee = sum(t.get("fees_rub", 0) or 0 for t in (trades or [])
-                   if t.get("exit_ts") and _dtm.datetime.fromtimestamp(
-                       t["exit_ts"] / 1000, MSK).strftime("%Y-%m-%d") == day) + open_fee
-        jn = sum(1 for t in (trades or []) if t.get("exit_ts")
-                 and _dtm.datetime.fromtimestamp(t["exit_ts"] / 1000, MSK).strftime("%Y-%m-%d") == day)
+        jfee = _journal_fee(trades, open_fee)
+        jn = sum(1 for t in (trades or []) if t.get("_exit_day") == day)
         try:
             # ВАЖНО: 'day' — МСК-дата, а API работает в UTC. Ранним утром МСК (00:00-03:00
             # UTC ещё вчера) 'from={day}T00:00Z' оказывается В БУДУЩЕМ по UTC → 30070.

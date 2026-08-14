@@ -1595,3 +1595,91 @@ def test_implausible_entry_fill_dropped_on_load(tmp_path):
     s.load_session()
     assert "IMOEXF" not in s._entry_fill_px       # 22146 против 2214 — ×10, выброшена
     assert s._entry_fill_px["GLDRUBF"] == 10250.9  # правдоподобная — сохранена
+
+
+def test_trade_carries_entry_fee_share():
+    """Сделка хранит долю комиссии, уплаченную в день ВХОДА (сверка журнал↔счёт).
+
+    fees_rub = вход + выход, но счёт списывает эти части в РАЗНЫЕ дни. Без
+    entry_fees_rub сверка относила всю сумму ко дню закрытия → ложная ⚠️."""
+    e = _eng(fee_per_lot=10.0)
+    _feed_flat(e, 8)
+    e.open("long", 100.0, 3, 9, 1.0)
+    entry_fee = e.position.fees_rub
+    tr = e.close(110.0, 20, "trail")
+    assert entry_fee > 0
+    assert tr.entry_fees_rub == round(entry_fee, 2)
+    # выходная часть = остаток; вместе дают полную комиссию сделки
+    assert round(tr.fees_rub - tr.entry_fees_rub, 2) > 0
+    assert tr.net_pnl_rub == round(tr.gross_pnl_rub - tr.fees_rub, 2)
+
+
+def test_partial_close_splits_entry_fee_proportionally():
+    """При частичном закрытии в сделку попадает ТОЛЬКО своя доля входной комиссии."""
+    e = _eng(fee_per_lot=10.0)
+    _feed_flat(e, 8)
+    e.open("long", 100.0, 10, 9, 1.0)
+    full_entry = e.position.fees_rub
+    tr = e.close_partial(110.0, 4, 20, "partial")
+    assert tr.entry_fees_rub == round(full_entry * 4 / 10, 2)
+    # остаток сохранил свою долю — сумма частей не превышает исходную
+    assert round(tr.entry_fees_rub + e.position.fees_rub, 2) == round(full_entry, 2)
+
+
+def test_ledger_recon_splits_fee_across_days(monkeypatch):
+    """Комиссия разносится по дням ФАКТИЧЕСКОГО списания счётом, а не валится на выход.
+
+    Инцидент 13.08: сделка вошла 12-го, вышла 13-го → вся fees_rub (вход+выход) легла
+    на 13-е, тогда как счёт списал вход 12-го. Итог — ложная ⚠️ Δ-211 при сошедшемся
+    по существу учёте."""
+    import datetime as _dtm
+    import app.api as api
+    from app.st4 import tbank_sandbox as _sb
+    MSK = _dtm.timezone(_dtm.timedelta(hours=3))
+
+    def _ms(day, hour=12):
+        return int(_dtm.datetime.strptime(day, "%Y-%m-%d")
+                   .replace(hour=hour, tzinfo=MSK).timestamp() * 1000)
+
+    # вход 12.08, выход 13.08; комиссия 300 = вход 100 + выход 200
+    monkeypatch.setattr(api.ST9, "trades",
+                        [{"exit_ts": _ms("2026-08-13"), "entry_ts": _ms("2026-08-12"),
+                          "fees_rub": 300.0, "entry_fees_rub": 100.0}], raising=False)
+    monkeypatch.setattr(api.ST9, "engines", {}, raising=False)
+    monkeypatch.setattr(api.ST8, "engines", {}, raising=False)
+    monkeypatch.setattr(api.ST8, "trades", [], raising=False)
+    api.ST9.cfg.mode = "tbank_sandbox"; api.ST9.cfg.account_id = "acc-test"
+    api.ST8.cfg.mode = "paper"; api.ST8.cfg.account_id = ""
+    monkeypatch.setattr(_sb, "_call", lambda *a, **k: {"operations": []})
+    monkeypatch.setattr(_sb, "_account_token", lambda acc: "t")
+
+    def _fee_of(day):
+        return {r[0].split(" ")[0]: r[2] for r in api._daily_ledger_recon(day, MSK)}["ST9"]
+
+    assert _fee_of("2026-08-12") == 100.0   # входная часть — в день ВХОДА
+    assert _fee_of("2026-08-13") == 200.0   # выходная часть — в день ВЫХОДА
+    assert _fee_of("2026-08-14") == 0.0     # посторонний день чист
+
+
+def test_ledger_recon_old_trades_without_split(monkeypatch):
+    """Сделки до 14.08 не имеют entry_fees_rub — вся комиссия относится ко дню закрытия.
+
+    Иначе исторические сделки давали бы нулевую журнальную сторону и ложную ⚠️."""
+    import datetime as _dtm
+    import app.api as api
+    from app.st4 import tbank_sandbox as _sb
+    MSK = _dtm.timezone(_dtm.timedelta(hours=3))
+    ts = int(_dtm.datetime.strptime("2026-08-13", "%Y-%m-%d")
+             .replace(hour=12, tzinfo=MSK).timestamp() * 1000)
+    monkeypatch.setattr(api.ST9, "trades",
+                        [{"exit_ts": ts, "entry_ts": ts - 86400_000,
+                          "fees_rub": 300.0}], raising=False)   # без entry_fees_rub
+    monkeypatch.setattr(api.ST9, "engines", {}, raising=False)
+    monkeypatch.setattr(api.ST8, "engines", {}, raising=False)
+    monkeypatch.setattr(api.ST8, "trades", [], raising=False)
+    api.ST9.cfg.mode = "tbank_sandbox"; api.ST9.cfg.account_id = "acc-test"
+    api.ST8.cfg.mode = "paper"; api.ST8.cfg.account_id = ""
+    monkeypatch.setattr(_sb, "_call", lambda *a, **k: {"operations": []})
+    monkeypatch.setattr(_sb, "_account_token", lambda acc: "t")
+    rows = {r[0].split(" ")[0]: r[2] for r in api._daily_ledger_recon("2026-08-13", MSK)}
+    assert rows["ST9"] == 300.0

@@ -47,9 +47,12 @@ class St8Trade:
     lots: int
     stock_pnl_rub: float               # P&L ноги акции
     hedge_pnl_rub: float               # P&L хедж-ноги IMOEXF (гасит бету)
-    fees_rub: float
+    fees_rub: float                    # ВСЯ комиссия сделки (вход+выход)
     net_pnl_rub: float
     reason: str                        # exit | stop | expiry
+    entry_fees_rub: float = 0.0        # доля fees_rub, уплаченная В ДЕНЬ ВХОДА — счёт
+    #                                    списывает её тогда, а сделка ложится в журнал
+    #                                    днём закрытия (сверка журнал↔счёт)
     days_held: int = 0
     div_yield_pct: float = 0.0
     side: str = "long"
@@ -227,6 +230,7 @@ class St8Engine:
         tr = St8Trade(ticker=self.ticker, entry_date=p.entry_date, exit_date=day, lots=p.lots,
                       stock_pnl_rub=round(stock_pnl, 2), hedge_pnl_rub=round(hedge_pnl, 2),
                       fees_rub=round(fees, 2), net_pnl_rub=round(net, 2), reason=reason,
+                      entry_fees_rub=round(p.fees_rub, 2),
                       div_yield_pct=p.div_yield_pct, side=p.side, instrument=p.instrument)
         self.trades.append(tr)
         self.position = None

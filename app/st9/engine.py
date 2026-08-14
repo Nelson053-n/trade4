@@ -39,9 +39,13 @@ class St9Trade:
     entry_ts: int
     exit_ts: int
     gross_pnl_rub: float
-    fees_rub: float
+    fees_rub: float          # ВСЯ комиссия сделки (вход+выход) — участвует в net_pnl_rub
     net_pnl_rub: float
     reason: str      # reverse | trail | flat
+    entry_fees_rub: float = 0.0   # доля fees_rub, уплаченная В ДЕНЬ ВХОДА. Нужна сверке
+    #                               журнал↔счёт: счёт списывает комиссию входа в день
+    #                               открытия, а сделка попадает в журнал днём закрытия.
+    #                               Старые сделки: 0 → сверка ведёт себя как раньше.
 
 
 class St9Engine:
@@ -162,7 +166,8 @@ class St9Engine:
         tr = St9Trade(secid=self.secid, side=p.side, entry=p.entry, exit=px,
                       lots=p.lots, entry_ts=p.entry_ts, exit_ts=ts,
                       gross_pnl_rub=round(gross, 2), fees_rub=round(fees, 2),
-                      net_pnl_rub=round(gross - fees, 2), reason=reason)
+                      net_pnl_rub=round(gross - fees, 2), reason=reason,
+                      entry_fees_rub=round(p.fees_rub, 2))
         self.trades.append(tr)
         self.position = None
         return tr
@@ -186,7 +191,8 @@ class St9Engine:
         tr = St9Trade(secid=self.secid, side=p.side, entry=p.entry, exit=px,
                       lots=lots, entry_ts=p.entry_ts, exit_ts=ts,
                       gross_pnl_rub=round(gross, 2), fees_rub=round(fees, 2),
-                      net_pnl_rub=round(gross - fees, 2), reason=reason)
+                      net_pnl_rub=round(gross - fees, 2), reason=reason,
+                      entry_fees_rub=round(entry_fee_part, 2))
         self.trades.append(tr)
         p.lots -= lots
         p.fees_rub -= entry_fee_part      # остаток несёт только СВОЮ долю входной комиссии
