@@ -1715,3 +1715,38 @@ def test_entry_fee_survives_restart_into_trade(tmp_path, monkeypatch):
     tr = e.close(84.0, 1786600000000, "trail")
     assert tr.entry_fees_rub == 261.39          # уплачено в день ВХОДА
     assert tr.fees_rub >= tr.entry_fees_rub     # плюс выходная часть
+
+
+def test_update_strategy_applies_fee_to_live_engines(monkeypatch):
+    """Смена модели издержек доходит до УЖЕ СОЗДАННЫХ движков.
+
+    Параметры комиссии читаются в St9Engine при создании, а движки кэшируются в
+    self.engines — без проброса правка молча не действовала бы до рестарта, выглядя
+    применённой. Ровно так на проде до 14.08 жил fee_per_lot=2.0 (фиктивная модель,
+    заменённая на 0.05% нотионала ещё 30.07)."""
+    import app.st9.service as svc
+    s = svc.St9Session()
+    s.cfg.strategy.fee_per_lot = 2.0
+    s.cfg.strategy.fee_pct_notional = 0.05
+    monkeypatch.setattr(s, "save_session", lambda: None)
+    e = _eng(secid="IMOEXF", pv=10.0, fee_per_lot=2.0)
+    e.fee_pct_notional = 0.05
+    s.engines["IMOEXF"] = e
+    # 2₽/лот завышают комиссию: 20 лотов @2267 → 226.70 (0.05%) + 40 лишних
+    assert round(e._fee(2267.0, 20), 2) == 266.70
+
+    out = s.update_strategy({"fee_per_lot": 0.0})
+    assert out["fee_per_lot"] == 0.0
+    assert e.fee_per_lot == 0.0                      # проброшено в ЖИВОЙ движок
+    assert round(e._fee(2267.0, 20), 2) == 226.70    # чистые 0.05% нотионала
+
+
+def test_update_strategy_rejects_bad_fee():
+    """Комиссия вне диапазона отвергается (защита от опечатки в боевом параметре)."""
+    import pytest
+    import app.st9.service as svc
+    s = svc.St9Session()
+    with pytest.raises(ValueError):
+        s.update_strategy({"fee_pct_notional": 5.0})   # 5% — заведомо опечатка
+    with pytest.raises(ValueError):
+        s.update_strategy({"fee_per_lot": -1.0})

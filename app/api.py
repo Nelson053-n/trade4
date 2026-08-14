@@ -1909,7 +1909,9 @@ def st9_reset_dd_halt():
 @app.post("/st9/strategy-config")
 def st9_strategy_config(payload: dict):
     """⚠️ Плечо и стоп просадки ST9: go_target_pct (0=выкл, >0 включает плечо от % капитала),
-    capital_dd_stop_pct (предохранитель). БОЕВОЙ РИСК — устанавливать оба осознанно."""
+    capital_dd_stop_pct (предохранитель). БОЕВОЙ РИСК — устанавливать оба осознанно.
+    Также модель издержек: fee_pct_notional (% нотионала за сторону) и fee_per_lot
+    (₽/лот, 0 = только %) — влияют на журнальный P&L и сверку, не на реальные списания."""
     try:
         return _clean(ST9.update_strategy(payload))
     except ValueError as e:

@@ -1095,12 +1095,19 @@ class St9Session:
         self.save_session()
 
     def update_strategy(self, params: dict) -> dict:
-        """Strategy-level параметры ST9: плечо (go_target_pct) и стоп просадки капитала
-        (capital_dd_stop_pct). ⚠️ БОЕВОЙ РИСК: go_target_pct>0 включает плечо. Устанавливать
-        оба вместе (плечо без предохранителя опасно). Инициализирует пик от текущего капитала."""
+        """Strategy-level параметры ST9: плечо (go_target_pct), стоп просадки капитала
+        (capital_dd_stop_pct) и МОДЕЛЬ ИЗДЕРЖЕК (fee_pct_notional / fee_per_lot).
+        ⚠️ БОЕВОЙ РИСК: go_target_pct>0 включает плечо. Устанавливать оба вместе
+        (плечо без предохранителя опасно). Инициализирует пик от текущего капитала.
+
+        Комиссия была недоступна ни через API, ни через UI — а session побеждает код,
+        и на проде до 14.08 жил `fee_per_lot=2.0` из модели, признанной фиктивной ещё
+        30.07 (замер: ровно 0.05% нотионала, 292 сделки). Узнать о расхождении можно
+        было только заглянув в session-файл. Те же грабли, что с poll_seconds (48194cc)."""
         s = self.cfg.strategy
         ranges = {"go_target_pct": (0, 50), "capital_dd_stop_pct": (0, 90),
-                  "go_frac": (0.005, 0.5)}
+                  "go_frac": (0.005, 0.5),
+                  "fee_pct_notional": (0, 1), "fee_per_lot": (0, 50)}
         for key, (lo, hi) in ranges.items():
             if key not in params or params[key] is None:
                 continue
@@ -1108,6 +1115,15 @@ class St9Session:
             if not (lo <= v <= hi):
                 raise ValueError(f"{key}: вне [{lo}, {hi}]")
             setattr(s, key, v)
+        # ПРОБРОС В ЖИВЫЕ ДВИЖКИ: параметры комиссии читаются в St9Engine при СОЗДАНИИ,
+        # а движки кэшируются в self.engines — без этого правка молча не подействовала бы
+        # до рестарта (и выглядела бы применённой).
+        if "fee_pct_notional" in params or "fee_per_lot" in params:
+            for eng in self.engines.values():
+                eng.fee_pct_notional = s.fee_pct_notional
+                eng.fee_per_lot = s.fee_per_lot
+            self.log_event("info", f"модель издержек: {s.fee_pct_notional}% нотионала"
+                                   f" + {s.fee_per_lot}₽/лот (применено к живым движкам)")
         # при включении плеча/стопа — инициализировать пик от ЧЕСТНОГО капитала сейчас,
         # иначе guard мог бы сработать от нулевого/искажённого пика
         if s.capital_dd_stop_pct > 0:
@@ -1120,7 +1136,8 @@ class St9Session:
         self.save_session()
         return {"go_target_pct": s.go_target_pct, "capital_dd_stop_pct": s.capital_dd_stop_pct,
                 "go_frac": s.go_frac, "capital_peak_rub": round(self._capital_peak),
-                "capital_sizing_rub": round(self.capital_sizing_rub) or None}
+                "capital_sizing_rub": round(self.capital_sizing_rub) or None,
+                "fee_pct_notional": s.fee_pct_notional, "fee_per_lot": s.fee_per_lot}
 
     def reset_dd_halt(self) -> dict:
         """Сброс стопа просадки капитала (оператор оценил и решил продолжить). Сбрасывает

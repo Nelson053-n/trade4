@@ -593,8 +593,10 @@ def test_expiry_gate_blocks_entry():
     from datetime import datetime, timedelta, timezone
     soon = (datetime.now(timezone.utc) + timedelta(days=2)).strftime("%Y-%m-%d")
     eng = _engine_with_expiry(soon)
-    # бары «сейчас»: до экспирации 2 дн < 5 (no_new_entry)
-    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    # бары «сейчас»: до экспирации 2 дн < 5 (no_new_entry). Час ЗАКРЕПЛЁН (10:00 МСК):
+    # иначе тест мог бы «пройти» из-за клирингового окна, а не из-за гейта экспирации
+    now_ms = int(datetime.now(timezone.utc).replace(hour=7, minute=0, second=0,
+                                                    microsecond=0).timestamp() * 1000)
     ts = _warm_alternating(eng, start_ts=now_ms)
     res = eng.on_candles(ts, 32000.0, 32000.0 + 250)     # пробой → сигнал был бы
     assert eng.state == BotState.FLAT                     # вход не открыт
@@ -606,7 +608,11 @@ def test_expiry_forces_position_close():
     from datetime import datetime, timedelta, timezone
     far = (datetime.now(timezone.utc) + timedelta(days=30)).strftime("%Y-%m-%d")
     eng = _engine_with_expiry(far)
-    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    # старт баров ЗАКРЕПЛЁН на 10:00 МСК: при старте от now() 40 баров по 10 мин
+    # уводили решающий бар в клиринговое окно 14:00-14:05 → вход не открывался и
+    # тест падал при запуске примерно с 04:00 до 05:00 МСК (найдено 14.08)
+    now_ms = int(datetime.now(timezone.utc).replace(hour=7, minute=0, second=0,
+                                                    microsecond=0).timestamp() * 1000)
     ts = _warm_alternating(eng, start_ts=now_ms)
     eng.on_candles(ts, 32000.0, 32000.0 + 250)
     assert eng.state == BotState.SHORT_SPREAD
