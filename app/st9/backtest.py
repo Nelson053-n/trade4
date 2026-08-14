@@ -105,12 +105,18 @@ def swap_rates(secid: str, frm: str = "2022-01-01", to: str = None) -> dict:
 
 
 def run(secid, don_enter, don_exit, atr_mult, bars, notional=100_000.0,
-        fee_pct=0.05, slip_pct=0.0, allow_short=True, curve=None, swaps=None):
+        fee_pct=0.05, slip_pct=0.0, allow_short=True, curve=None, swaps=None,
+        curve_realized=None):
     """Прогон. slip_pct — проскальзывание в % на сторону (ухудшает цену исполнения).
 
     curve: если передать dict, в него пишется equity ПО КАЖДОМУ БАРУ
     (реализованное + плавающее) — нужно для честной mark-to-market просадки,
     см. `stats(..., curve=...)` и `portfolio_dd`.
+
+    curve_realized: если передать dict — в него пишется ТОЛЬКО реализованная часть
+    (без плавающей). Пара curve/curve_realized нужна для сравнения метрик стопа
+    просадки: guard считает по mark-to-market, из-за чего откат бумажной прибыли
+    трендовой позиции выглядит как потеря капитала (разбор 15.08).
 
     swaps: карта фандинга из swap_rates(secid). Начисляется за каждый календарный
     день удержания: лонг платит положительный фандинг, шорт получает. Без неё
@@ -160,6 +166,8 @@ def run(secid, don_enter, don_exit, atr_mult, bars, notional=100_000.0,
         if curve is not None:
             unreal = eng.unrealized_rub(b.c) if eng.position else 0.0
             curve[b.ts] = realized + unreal
+        if curve_realized is not None:
+            curve_realized[b.ts] = realized
     return trades
 
 
