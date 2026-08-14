@@ -1750,3 +1750,35 @@ def test_update_strategy_rejects_bad_fee():
         s.update_strategy({"fee_pct_notional": 5.0})   # 5% — заведомо опечатка
     with pytest.raises(ValueError):
         s.update_strategy({"fee_per_lot": -1.0})
+
+
+def test_portfolio_sizing_matches_live_formula():
+    """Стенд портфеля сайзит как БОЙ: риск-режим приоритетнее плеча, ГО фактическое.
+
+    Прежний стенд гонял оси независимо с фиксированным нотионалом 400к и потому не
+    воспроизводил боевое срабатывание стопа (0 при любом пороге за 3.8 года)."""
+    from app.st9.backtest_portfolio import Axis, GO_FRAC_REAL
+    # риск-ось: лоты = risk / (atr_mult × ATR × pv), плечо игнорируется
+    ax = Axis("USDRUBF", 70, 10, 5.0, bars=[], risk_per_trade=5000.0)
+    lots = ax.lots_for(px=84.0, capital=500_000, go_pct=15.0, n_axes=3, atr=0.5)
+    assert lots == max(1, int(5000 / (5.0 * 0.5 * 1000.0)))
+    # ATR не прогрет → 0 лотов (падать на нотионал нельзя — ось не откалибрована)
+    assert ax.lots_for(px=84.0, capital=500_000, go_pct=15.0, n_axes=3, atr=None) == 0
+
+    # ось на плече: лоты из ФАКТИЧЕСКОГО ГО, не из go_frac=0.044
+    ax2 = Axis("IMOEXF", 45, 35, 6.0, bars=[])
+    px = 2144.5
+    got = ax2.lots_for(px=px, capital=600_000, go_pct=15.0, n_axes=3, atr=10.0)
+    go_lot = px * ax2.pv * GO_FRAC_REAL["IMOEXF"]
+    assert got == max(1, int((600_000 * 0.15 / 3) / go_lot))
+    # go_frac=0.044 дал бы КРАТНО больше — проверяем, что стенд не завышает плечо
+    assert got < int((600_000 * 0.15 / 3) / (px * ax2.pv * 0.044))
+
+
+def test_portfolio_capital_feedback():
+    """Размер зависит от ТЕКУЩЕГО капитала — обратная связь P&L → размер."""
+    from app.st9.backtest_portfolio import Axis
+    ax = Axis("IMOEXF", 45, 35, 6.0, bars=[])
+    small = ax.lots_for(px=2144.5, capital=400_000, go_pct=15.0, n_axes=3, atr=10.0)
+    big = ax.lots_for(px=2144.5, capital=800_000, go_pct=15.0, n_axes=3, atr=10.0)
+    assert big > small                      # вдвое больше капитал → крупнее позиция

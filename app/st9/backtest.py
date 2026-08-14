@@ -49,8 +49,19 @@ def load_bars(secid: str, days: int, interval: int = 60) -> list[Bar]:
     while True:
         url = (f"{ISS}/engines/futures/markets/forts/securities/{secid}/candles.json"
                f"?iss.meta=off&interval={iss_iv}&from={frm}&start={start}")
-        with _u.urlopen(url, timeout=30) as r:
-            d = _j.loads(r.read())
+        # РЕТРАИ: длинная пагинация (3.8 года = десятки запросов) падала целиком от
+        # одиночного 502 ISS. Пауза растёт, чтобы не долбить прилёгший источник.
+        import time as _t
+        d = None
+        for attempt in range(4):
+            try:
+                with _u.urlopen(url, timeout=30) as r:
+                    d = _j.loads(r.read())
+                break
+            except Exception:  # noqa: BLE001  сетевой сбой/5xx — пробуем ещё
+                if attempt == 3:
+                    raise
+                _t.sleep(2 * (attempt + 1))
         rows = d["candles"]["data"]
         if not rows:
             break
