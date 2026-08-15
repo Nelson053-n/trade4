@@ -94,6 +94,7 @@ class St9Session:
         self._capital_peak = 0.0                       # пик капитала для стопа просадки (плечо)
         self._dd_halted = False                        # сработал стоп просадки капитала → блок входов
         self.capital_sizing_rub = 0.0                  # ЧЕСТНЫЙ капитал (money+ГО) для сайзинга плеча
+        self.capital_cash_rub = 0.0                    # СВОБОДНЫЕ деньги (без ГО) — база стопа просадки
         self._go_lot_cache: dict[tuple, tuple] = {}    # (sec,side) -> (ГО на лот, ts кэша)
         self._tick_cache: dict[str, float] = {}        # uid -> шаг цены (справочник тяжёлый)
         self._dd_breach_count = 0                      # подтверждение просадки (2 тика подряд, против битого чтения)
@@ -1045,10 +1046,30 @@ class St9Session:
         на уровне счёта. При capital < peak×(1−pct/100): flat всех осей + блок входов
         (trading_enabled=False). Сбрасывается вручную (оператор оценил и перезапустил)."""
         pct = getattr(self.cfg.strategy, "capital_dd_stop_pct", 0.0)
-        # честный капитал (money+ГО), не искажённый totalAmountPortfolio
-        cap = self.capital_sizing_rub or self.capital_rub
+        # БАЗА — СВОБОДНЫЕ ДЕНЬГИ (без ГО). До 15.08 брали capital_sizing_rub = free+ГО,
+        # и метрика реагировала на РАЗМЕР ОТКРЫТЫХ ПОЗИЦИЙ, а не на потерю денег: ГО
+        # блокируется при открытии и высвобождается при закрытии. Инцидент 14.08 —
+        # «просадка 19.2%», flat трёх ПРИБЫЛЬНЫХ позиций, реальных денег минус 0.8%.
+        # Фолбэк на старую серию оставлен: до первого чтения счёта cash=0, и без него
+        # guard молчал бы вовсе (хуже, чем мерить огрублённо).
+        # getattr: сессия, восстановленная из session-файла старой версии, поля не имеет
+        cash = getattr(self, "capital_cash_rub", 0.0) or 0.0
+        cap = cash or self.capital_sizing_rub or self.capital_rub
         if pct <= 0 or cap <= 0:
             return
+        # МИГРАЦИЯ СЕРИИ: персистнутый пик мог быть посчитан по СТАРОЙ базе (free+ГО) и
+        # тогда он завышен на величину ГО. Сравнивать его с новой базой нельзя: на проде
+        # это дало бы мнимую просадку 12.5% из 18% запаса при живых позициях. Признак —
+        # пик выше текущей базы более чем на порог; ГО открытых позиций объясняет разрыв.
+        if (cash > 0 and self._capital_peak > 0
+                and not self.state.get("peak_series_cash")):
+            go_now = max(0.0, self.capital_sizing_rub - cash)
+            if self._capital_peak > cap + go_now * 0.5:
+                self.log_event("info", f"пик просадки переведён на серию свободных денег: "
+                                       f"{self._capital_peak:.0f} → {cap:.0f}")
+                self._capital_peak = cap
+            self.state["peak_series_cash"] = True
+            self.save_session()
         # защита пика от АНОМАЛЬНОГО ВЫБРОСА (аудит #7): единичный битый cap (сбой API вернул
         # мусор) навсегда подтянул бы пик вверх (max монотонен) → floor завышен → стоп НЕ
         # сработает при реальной просадке. Пик не растёт скачком >15% за тик (капитал при
@@ -1127,7 +1148,10 @@ class St9Session:
         # при включении плеча/стопа — инициализировать пик от ЧЕСТНОГО капитала сейчас,
         # иначе guard мог бы сработать от нулевого/искажённого пика
         if s.capital_dd_stop_pct > 0:
-            cap = self.capital_sizing_rub or self.capital_rub
+            # та же серия, что и база guard (свободные деньги), иначе пик и текущее
+            # значение мерились бы разными линейками — «просадка» на ровном месте
+            cap = (getattr(self, "capital_cash_rub", 0.0)
+                   or self.capital_sizing_rub or self.capital_rub)
             if cap > 0 and self._capital_peak <= 0:
                 self._capital_peak = cap
         self.log_event("warn" if s.go_target_pct > 0 else "info",
@@ -1149,7 +1173,8 @@ class St9Session:
         # capital_rub=totalAmountPortfolio (аудит 30.07): тот искажён mark-to-market и
         # завышал пик → эффективный допуск был вдвое уже порога, а в paper/до первого
         # чтения портфеля capital_rub=0 обнулял пик и глушил стоп совсем.
-        self._capital_peak = self.capital_sizing_rub or self.capital_rub
+        self._capital_peak = (getattr(self, "capital_cash_rub", 0.0)
+                              or self.capital_sizing_rub or self.capital_rub)
         self.log_event("info", f"стоп просадки сброшен (пик → {self._capital_peak:.0f})")
         self.save_session()
         return {"dd_halted": False, "capital_peak_rub": round(self._capital_peak),
@@ -1241,6 +1266,16 @@ class St9Session:
                                            f"капитал не обновлён (защита от ложного стопа)")
                 elif free > 0:
                     self.capital_sizing_rub = float(free + go_open)
+                    # БАЗА СТОПА ПРОСАДКИ — БЕЗ ГО (разбор 15.08). capital_sizing_rub
+                    # включает ЗАБЛОКИРОВАННОЕ ГО, поэтому открытие позиций поднимает
+                    # «капитал», а закрытие обрушивает: 14.08 метрика показала просадку
+                    # 19.2% и закрыла ТРИ ПРИБЫЛЬНЫЕ позиции, тогда как реальных денег
+                    # убыло 4 025₽ (0.8%). Петля самоусиливается: стоп закрывает позиции
+                    # → ГО высвобождается → «просадка» углубляется (после flat стало
+                    # 29.6%). Свободные деньги от размера позиций не зависят, а реальный
+                    # убыток приходит вармаржой ЕЖЕДНЕВНО — чувствительность сохраняется
+                    # (проверено на истории счёта: макс просадка этой метрики 1.75%).
+                    self.capital_cash_rub = float(free)
                     # ЯКОРЬ ставится здесь, а не на totalAmountPortfolio: сверка идёт по
                     # ТОЙ ЖЕ серии, что и база (free+ГО). Разные серии в базе и в замере
                     # давали бы «разрыв» размером с mark-to-market, а не с издержками.
@@ -1363,6 +1398,9 @@ class St9Session:
             # ЧЕСТНЫЙ капитал (free+ГО) — для KPI дашборда; capital_rub (totalAmountPortfolio)
             # искажён переоценкой шорта фьючерса и пугает оператора мусорной цифрой
             "capital_sizing_rub": round(self.capital_sizing_rub) or None,
+            # СВОБОДНЫЕ деньги (без ГО) — БАЗА СТОПА просадки. Отдельно от capital_sizing_rub:
+            # та включает ГО и потому реагирует на размер позиций, а не на потерю денег.
+            "capital_cash_rub": round(getattr(self, "capital_cash_rub", 0.0)) or None,
             # СВЕРКА С ИСТИНОЙ: «факт счёта − модель журнала» с момента якоря. Отрицательное
             # = журнал рисует больше, чем принёс счёт (скрытые издержки исполнения).
             "execution_gap_rub": self._execution_gap(),

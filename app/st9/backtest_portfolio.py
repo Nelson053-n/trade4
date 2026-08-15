@@ -26,6 +26,10 @@ from .engine import St9Engine
 # доля ГО от нотионала (GetFuturesMargin, замер 15.08.2026)
 GO_FRAC_REAL = {"USDRUBF": 0.1488, "GLDRUBF": 0.1238, "IMOEXF": 0.1046}
 
+# кэш загруженной истории: свип по порогам гоняет одни и те же бары десятки раз
+_BARS_CACHE: dict = {}
+_SWAP_CACHE: dict = {}
+
 
 class Axis:
     """Одна ось: движок + бары + курсор по таймлайну."""
@@ -80,13 +84,21 @@ def run_portfolio(axes_cfg, start_capital=500_000.0, go_target_pct=15.0,
     """
     axes = []
     for cfg in axes_cfg:
-        bars = load_bars(cfg["secid"], days=days)
+        # КЭШ: свип по порогам зовёт run_portfolio десятки раз на ОДНИХ И ТЕХ ЖЕ данных.
+        # Без кэша 1400 дней × 3 оси качались заново каждый раз (CPU 0.7% — всё время
+        # в сети, прогон растягивался на часы).
+        key = (cfg["secid"], days)
+        if key not in _BARS_CACHE:
+            _BARS_CACHE[key] = load_bars(cfg["secid"], days=days)
+        bars = _BARS_CACHE[key]
         sw = None
         if use_swaps:
-            try:
-                sw = swap_rates(cfg["secid"])
-            except Exception:  # noqa: BLE001  фандинг не критичен для метрики стопа
-                sw = None
+            if cfg["secid"] not in _SWAP_CACHE:
+                try:
+                    _SWAP_CACHE[cfg["secid"]] = swap_rates(cfg["secid"])
+                except Exception:  # noqa: BLE001  фандинг не критичен для метрики стопа
+                    _SWAP_CACHE[cfg["secid"]] = None
+            sw = _SWAP_CACHE[cfg["secid"]]
         ax = Axis(cfg["secid"], cfg["don_enter"], cfg["don_exit"], cfg["atr_mult"],
                   bars, fee_pct=fee_pct, risk_per_trade=cfg.get("risk_per_trade_rub", 0.0))
         ax.swaps = sw

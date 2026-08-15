@@ -1782,3 +1782,64 @@ def test_portfolio_capital_feedback():
     small = ax.lots_for(px=2144.5, capital=400_000, go_pct=15.0, n_axes=3, atr=10.0)
     big = ax.lots_for(px=2144.5, capital=800_000, go_pct=15.0, n_axes=3, atr=10.0)
     assert big > small                      # вдвое больше капитал → крупнее позиция
+
+
+def _dd_session(cash, sizing, peak, pct=18.0, halted=False):
+    """Сессия с подставленным капиталом для проверки guard'а просадки."""
+    import app.st9.service as svc
+    s = svc.St9Session()
+    s.cfg.strategy.capital_dd_stop_pct = pct
+    s.cfg.trading_enabled = True
+    s.capital_cash_rub = cash
+    s.capital_sizing_rub = sizing
+    s._capital_peak = peak
+    s._dd_halted = halted
+    s.state["peak_series_cash"] = True      # миграция уже пройдена
+    s.save_session = lambda: None
+    s.flat_all = lambda: None
+    return s
+
+
+def test_dd_guard_ignores_margin_release():
+    """Стоп НЕ срабатывает от высвобождения ГО при закрытии позиций.
+
+    Инцидент 14.08: метрика free+ГО показала просадку 19.2% и закрыла ТРИ ПРИБЫЛЬНЫЕ
+    позиции, тогда как реальных денег убыло 4 025₽ (0.8%). ГО блокируется при открытии
+    и высвобождается при закрытии — метрика реагировала на РАЗМЕР ПОЗИЦИЙ."""
+    # боевые числа: пик денег 518 910, после закрытия позиций деньги 513 545,
+    # а sizing (free+ГО) рухнул с 720 796 до 582 541
+    s = _dd_session(cash=513_545, sizing=582_541, peak=518_910)
+    s._capital_dd_guard()
+    s._capital_dd_guard()                    # два тика — подтверждение сработало бы
+    assert not s._dd_halted                  # реальная просадка 1.0% — стопа нет
+    assert s.cfg.trading_enabled
+
+
+def test_dd_guard_still_catches_real_loss():
+    """Настоящая потеря денег ловится: вармаржа списывается ежедневно."""
+    s = _dd_session(cash=400_000, sizing=450_000, peak=500_000)   # −20% реальных денег
+    s._capital_dd_guard()
+    assert not s._dd_halted                  # первый тик — только предупреждение
+    s._capital_dd_guard()
+    assert s._dd_halted                      # подтверждено вторым тиком → стоп
+    assert not s.cfg.trading_enabled          # входы заблокированы
+
+
+def test_dd_guard_migrates_peak_from_old_series():
+    """Пик из СТАРОЙ серии (free+ГО) переводится на серию свободных денег.
+
+    Без миграции персистнутый пик 588 338 против новой базы 514 580 дал бы мнимую
+    просадку 12.5% — две трети запаса до порога съедены на ровном месте."""
+    import app.st9.service as svc
+    s = svc.St9Session()
+    s.cfg.strategy.capital_dd_stop_pct = 18.0
+    s.cfg.trading_enabled = True
+    s.capital_cash_rub = 514_580
+    s.capital_sizing_rub = 588_338           # разница = ГО открытых позиций
+    s._capital_peak = 588_338                # пик посчитан по СТАРОЙ серии
+    s.save_session = lambda: None
+    s.flat_all = lambda: None
+    s._capital_dd_guard()
+    assert s._capital_peak == 514_580        # переведён на деньги
+    assert s.state.get("peak_series_cash")   # повторно не мигрирует
+    assert not s._dd_halted
