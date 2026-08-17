@@ -859,3 +859,50 @@ def test_position_has_stuck_counter():
     assert p.stuck_ticks == 0
     p.stuck_ticks += 1
     assert p.stuck_ticks == 1
+
+
+def _cal_session(cache, monkeypatch):
+    """Сессия st8 с подставленным кэшем дивидендов и пустым календарём."""
+    from app.st8.service import St8Session, ST8_TICKERS
+    s = St8Session()
+    s.cfg.mode = "paper"
+    s.enabled = {tk: (tk in cache) for tk in ST8_TICKERS}
+    s._div_cache = dict(cache)
+    s._trading_days = ["2026-08-17", "2026-08-18"]
+    monkeypatch.setattr(s, "_load_trading_days", lambda since: None)
+    monkeypatch.setattr(s, "_fetch_divs", lambda tk: s._div_cache.get(tk, []))
+    return s
+
+
+def test_empty_calendar_offseason_is_not_alert(monkeypatch):
+    """Межсезонье: источник ЖИВ (отдаёт прошлые отсечки) → info, а не 🚨.
+
+    Август на рынке РФ — 1.2% всех отсечек за историю, следующая волна октябрь.
+    Ежедневный 🚨 неделями обесценивал бы алерт: настоящая поломка в нём потеряется."""
+    s = _cal_session({"SBER": [("2026-07-20", 37.64, 5.1)],
+                      "LKOH": [("2026-05-04", 278.0, 4.2)]}, monkeypatch)
+    rows = s.build_calendar(days_ahead=5, days_back=1)      # окно без отсечек
+    assert rows == []
+    msgs = [e.get("message", "") for e in s.events]
+    assert not any("🚨" in m for m in msgs), "в межсезонье тревоги быть не должно"
+    assert any("межсезонье" in m and "источник жив" in m for m in msgs)
+
+
+def test_empty_calendar_dead_source_still_alerts(monkeypatch):
+    """Источник НЕ отдаёт данных ни по одному тикеру → 🚨 (как ISS 12.08)."""
+    from app.st8.service import ST8_TICKERS
+    s = _cal_session({}, monkeypatch)
+    s.enabled = {tk: tk in ("SBER", "LKOH") for tk in ST8_TICKERS}
+    rows = s.build_calendar(days_ahead=5, days_back=1)
+    assert rows == []
+    msgs = [e.get("message", "") for e in s.events]
+    assert any("🚨" in m and "НЕ ОТДАЁТ ДАННЫХ" in m for m in msgs)
+
+
+def test_empty_calendar_alert_once_per_day(monkeypatch):
+    """Повторный вызов в тот же день не дублирует запись."""
+    s = _cal_session({"SBER": [("2026-07-20", 37.64, 5.1)]}, monkeypatch)
+    s.build_calendar(days_ahead=5, days_back=1)
+    n1 = len(s.events)
+    s.build_calendar(days_ahead=5, days_back=1)
+    assert len(s.events) == n1

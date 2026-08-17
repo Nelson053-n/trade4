@@ -956,9 +956,25 @@ class St8Session:
         if not rows and any(self.enabled.values()):
             if getattr(self, "_empty_cal_day", None) != today:
                 self._empty_cal_day = today
-                self.log_event("warn", "🚨 календарь ПУСТ: ни одной отсечки в окне "
-                                       f"{lo}..{hi} при {sum(self.enabled.values())} "
-                                       "включённых тикерах — проверить источник дивидендов")
+                # РАЗЛИЧАЕМ ПОЛОМКУ И МЕЖСЕЗОНЬЕ (18.08). Раньше алерт кричал в обоих
+                # случаях, а межсезонье на рынке РФ длится неделями (август — 1.2% всех
+                # отсечек за историю, следующая волна октябрь). Ежедневный 🚨 на пустом
+                # месте обесценивает алерт: настоящая поломка в нём потеряется.
+                # Признак ЖИВОГО источника — он отдаёт записи вообще (пусть все прошлые).
+                # Мёртвый (как ISS 12.08) не отдаёт ничего ни по одному тикеру.
+                enabled_tks = [t for t, on in self.enabled.items() if on]
+                with_data = sum(1 for t in enabled_tks if self._div_cache.get(t))
+                if with_data == 0:
+                    self.log_event("warn", "🚨 календарь ПУСТ и источник НЕ ОТДАЁТ ДАННЫХ "
+                                           f"ни по одному из {len(enabled_tks)} тикеров — "
+                                           "источник дивидендов сломан, проверить парсер")
+                else:
+                    # межсезонье: данные есть, будущих отсечек нет — это норма
+                    last_ex = max((d[0] for t in enabled_tks
+                                   for d in self._div_cache.get(t) or []), default="?")
+                    self.log_event("info", f"межсезонье: отсечек в окне {lo}..{hi} нет, "
+                                           f"источник жив ({with_data}/{len(enabled_tks)} "
+                                           f"тикеров с данными, последняя отсечка {last_ex})")
         return rows
 
     def price_series(self, ticker: str, ex_date: str, pad: int = 20) -> list[dict]:
