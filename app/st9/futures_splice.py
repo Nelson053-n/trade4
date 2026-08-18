@@ -39,30 +39,61 @@ from .engine import Bar
 from .service import ISS, bar_is_closed, _now_ms_frame
 
 
-def contracts_of(asset: str, days_back: int = 1530, step_days: int = 14) -> list[str]:
+def contracts_of(asset: str, days_back: int = 1530, step_days: int = 30) -> list[str]:
     """Все SECID серий актива за период. Идём срезами по history-борде: список
-    торгуемых контрактов на дату. Шаг 14 дней — серии живут кварталами, чаще не нужно."""
+    торгуемых контрактов на дату.
+
+    Шаг 30 дней (не 14): даже месячные серии, как BR, живут ≥30 дней, а квартальные
+    втрое дольше — более частые срезы лишь умножают запросы. На 1530 днях шаг 14 давал
+    ~107 дат × ~5 страниц = 535 запросов, то есть минуты только на поиск серий.
+
+    ⚠️ Кидает RuntimeError, если ISS не ответил. Раньше сетевой сбой молча превращался
+    в `break` и функция возвращала ПУСТОЙ список — вызывающий код принимал это за
+    «серий нет» и падал дальше по стеку (инцидент 18.08: «серий найдено: 0» при том,
+    что на 400 днях та же функция находила 20)."""
     today = _dt.date.today()
     out: set[str] = set()
+    failed = 0
+    probed = 0
+    # БЫСТРЫЙ ПУТЬ: фильтр по assetcode отдаёт ТЕКУЩИЕ серии одним запросом (~1.5с
+    # против минут перебора). Диапазон дат он игнорирует, поэтому исторические серии
+    # всё равно ищем срезами ниже — но свежие уже есть, и если истории не нужно,
+    # вызов с малым days_back отработает почти мгновенно.
+    try:
+        url = (f"{ISS}/history/engines/futures/markets/forts/securities.json"
+               f"?iss.meta=off&assetcode={asset}&iss.only=history&start=0")
+        with _u.urlopen(url, timeout=30) as r:
+            h = _json.loads(r.read())["history"]
+        ci = {c: i for i, c in enumerate(h["columns"])}
+        for x in (h.get("data") or []):
+            sec = x[ci["SECID"]]
+            # отсеиваем КАЛЕНДАРНЫЕ СПРЕДЫ (BRF7BRG7) — это отдельный инструмент
+            # «разница двух серий», а не контракт; в склейку он попасть не должен
+            if len(sec) <= len(asset) + 2:
+                out.add(sec)
+    except Exception:  # noqa: BLE001  быстрый путь не критичен — ниже полный перебор
+        pass
     d = today - _dt.timedelta(days=days_back)
     while d < today:
         if d.weekday() < 5:
+            probed += 1
             start = 0
             while True:
                 url = (f"{ISS}/history/engines/futures/markets/forts/securities.json"
                        f"?iss.meta=off&date={d.isoformat()}&iss.only=history&start={start}")
                 h = None
-                for a in range(4):
+                for a in range(3):
                     try:
-                        with _u.urlopen(url, timeout=40) as r:
+                        with _u.urlopen(url, timeout=30) as r:
                             h = _json.loads(r.read())["history"]
                         break
                     except Exception:  # noqa: BLE001  сетевой сбой ISS — ретраим
-                        if a == 3:
+                        if a == 2:
                             h = None
                             break
-                        _time.sleep(2 * (a + 1))
+                        _time.sleep(1 + a)
                 if not h:
+                    failed += 1
                     break
                 data = h.get("data") or []
                 if not data:
@@ -75,6 +106,9 @@ def contracts_of(asset: str, days_back: int = 1530, step_days: int = 14) -> list
                 if len(data) < 100:
                     break
         d += _dt.timedelta(days=step_days)
+    if not out and failed:
+        raise RuntimeError(f"contracts_of({asset}): ISS не ответил на {failed} из "
+                           f"{probed} дат — результат недостоверен")
     return sorted(out)
 
 
