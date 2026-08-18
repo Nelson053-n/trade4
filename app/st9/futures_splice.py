@@ -106,8 +106,16 @@ def candles(secid: str, interval: int = 60, frm: str = "2022-01-01") -> list[tup
             if ts in seen or not bar_is_closed(ts, interval, now_ms):
                 continue
             seen.add(ts)
+            # ОБОРОТ БЕРЁМ ИЗ `volume` (контракты), НЕ из `value` (рубли): у FORTS
+            # value приходит НУЛЁМ (проверено 18.08 на BRU6: Σvalue=0 при
+            # Σvolume=4 173 837). На нуле выбор front-month вырождался в случайный —
+            # склейка давала 1 ролл вместо ~10 и прыжок BRM6→BRF7 через 7 серий
+            # с ratio 0.868, т.е. фиктивный гэп 13% прямо в ряду.
+            vol = x[ci["volume"]] if "volume" in ci else None
+            if not vol:
+                vol = x[ci["value"]] if "value" in ci else 0
             out.append((ts, float(x[ci["open"]]), float(x[ci["high"]]),
-                        float(x[ci["low"]]), float(x[ci["close"]]), float(x[ci["value"]])))
+                        float(x[ci["low"]]), float(x[ci["close"]]), float(vol or 0)))
         start += len(rows)
     out.sort()
     return out
