@@ -306,65 +306,6 @@ def _daily_ledger_recon(day: str, MSK):
     return out
 
 
-async def _daily_digest_loop():
-    """Вечерний Telegram-дайджест по ВСЕМ движкам (23:55 МСК, раз в день).
-    Шлётся через notifier st5 (общий бот/чат); выключен вместе с notify.enabled."""
-    import datetime as _dtm
-    sent_for: str | None = None
-    MSK = _dtm.timezone(_dtm.timedelta(hours=3))
-    while True:
-        await asyncio.sleep(60)
-        try:
-            now = _dtm.datetime.now(MSK)
-            day = now.strftime("%Y-%m-%d")
-            if not (now.hour == 23 and now.minute >= 55) or sent_for == day:
-                continue
-            if not ST5.cfg.notify.enabled:
-                sent_for = day
-                continue
-            # В дайджесте только ДЕЙСТВУЮЩИЕ движки — st8/st9. st4-st7 остановлены
-            # (вердикт 07.07: ни одна не жизнеспособна), их нулевые строки были шумом.
-            lines = [f"📊 <b>Дневной дайджест {day}</b>"]
-            # ST8 — дивидендный набег (сделки за день, открытые позиции, свежие дивиденды)
-            n8 = sum(t.get("net_pnl_rub", 0) for t in ST8.trades
-                     if t.get("exit_date") == day)
-            c8 = sum(1 for t in ST8.trades if t.get("exit_date") == day)
-            open8 = sum(1 for e in ST8.engines.values() if e.position is not None)
-            newdiv = len([d for d in ST8.new_dividends if d.get("detected") == day])
-            gap8 = ST8.execution_gap()
-            lines.append(f"ST8: {c8} сд, {n8:+.0f}₽ · открыто {open8}"
-                         + (f" · 🆕 дивидендов {newdiv}" if newdiv else "")
-                         + (f" · сверка {gap8:+.0f}₽" if gap8 is not None else ""))
-            miss8 = sum(1 for m in ST8.missed if m.get("date") == day)
-            if miss8:
-                lines.append(f"⏭ упущенных входов st8: {miss8}")
-            # ST9 — трендовая корзина
-            n9 = sum(t.get("net_pnl_rub", 0) for t in ST9.trades
-                     if _dtm.datetime.fromtimestamp(t.get("exit_ts", 0) / 1000, MSK)
-                     .strftime("%Y-%m-%d") == day)
-            c9 = sum(1 for t in ST9.trades
-                     if _dtm.datetime.fromtimestamp(t.get("exit_ts", 0) / 1000, MSK)
-                     .strftime("%Y-%m-%d") == day)
-            open9 = sum(1 for e in ST9.engines.values() if e.position is not None)
-            # капитал — ЧЕСТНЫЙ (free+ГО), как на дашборде. capital_rub здесь показывал
-            # totalAmountPortfolio с нотионалом фьючерсов: оператор видел из одного
-            # движка две разные цифры «капитала» (аудит 10.08, MED-2).
-            cap9 = ST9.capital_sizing_rub or ST9.capital_rub
-            gap9 = ST9._execution_gap()
-            gap_s = f" · разрыв со счётом {gap9:+.0f}₽" if gap9 is not None else ""
-            lines.append(f"ST9: {c9} сд, {n9:+.0f}₽ · открыто {open9}"
-                         f" · капитал {cap9:,.0f}₽".replace(",", " ") + gap_s)
-            # ── ПОСДЕЛОЧНАЯ СВЕРКА журнал↔счёт по каждому движку (боевая песочная торговля) ──
-            lines.append("— <b>сверка сделок ↔ счёт</b> —")
-            for name, acc, jfee in _daily_ledger_recon(day, MSK):
-                lines.append(name if acc is None else
-                             f"{name}: журнал комис {jfee:+.0f}₽ · счёт {acc}")
-            await ST5.notifier.send("\n".join(lines))
-            sent_for = day
-        except Exception:  # noqa: BLE001  дайджест не должен ронять сервис
-            pass
-
-
 async def _auto_backtest_loop():
     """Авто-бэктест раз в ~2.5 дня: копит историю результативности на свежих данных T-Bank."""
     await asyncio.sleep(120)                 # первый прогон — через 2 мин после старта
@@ -423,7 +364,6 @@ async def lifespan(app: FastAPI):
     _watchdog_task = asyncio.create_task(ST5.watchdog_loop())  # самовосстановление зависшего live-цикла
     _watchdog9_task = asyncio.create_task(ST9.watchdog_loop())  # то же для st9 (позиция с плечом)
     _auto_bt_task = asyncio.create_task(_auto_backtest_loop())
-    _digest_task = asyncio.create_task(_daily_digest_loop())   # вечерний TG-дайджест (23:55)
     yield
     _watchdog_task.cancel()
     _watchdog9_task.cancel()
