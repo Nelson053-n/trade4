@@ -452,6 +452,8 @@ class St9Session:
             if risk_per_lot <= 0:
                 return 0
             lots = max(1, int(risk / risk_per_lot))
+            if lots < getattr(icfg, "min_entry_lots", 0):
+                return 0           # мелкий вход не окупает комиссию (см. min_entry_lots)
             cap = getattr(s, "real_max_notional_rub", 0.0)
             if self.cfg.mode == "tbank_real" and cap > 0:
                 lots = min(lots, max(1, int(cap / (px * pv))))
@@ -606,6 +608,11 @@ class St9Session:
                     eng.pv = pv
                 lots = self._entry_lots(icfg, sig["px"], eng.pv, side, sec,
                                         atr=sig.get("atr"))
+                if lots <= 0:
+                    self.log_event("info", f"{eng.secid}: вход пропущен — размер ниже "
+                                           f"минимума {icfg.min_entry_lots} лотов")
+                    self.save_session()
+                    return
                 got = self._order(sec, lots, "BUY" if side == "long" else "SELL",
                                   ref_px=sig["px"])
                 if got <= 0:

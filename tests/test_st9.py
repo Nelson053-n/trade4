@@ -1543,6 +1543,7 @@ def test_entry_fill_not_stale_when_price_unknown(monkeypatch):
     s.cfg.mode = "paper"                       # paper → _last_fill_px = None
     s._entry_fill_px["USDRUBF"] = 70.0         # протухшее от давно закрытой сделки
     icfg = next(i for i in s.cfg.instruments if i.secid == "USDRUBF")
+    icfg.min_entry_lots = 0                    # тест про цену филла, не про минимум размера
     eng = svc.St9Engine("USDRUBF", 5, 3, 3.0, 3, pv=1000.0)
     s.engines["USDRUBF"] = eng
     monkeypatch.setattr(s, "save_session", lambda: None)
@@ -1843,3 +1844,17 @@ def test_dd_guard_migrates_peak_from_old_series():
     assert s._capital_peak == 514_580        # переведён на деньги
     assert s.state.get("peak_series_cash")   # повторно не мигрирует
     assert not s._dd_halted
+
+
+def test_entry_lots_below_min_is_skipped():
+    """Риск-ось: размер ниже min_entry_lots → 0 (вход пропускается); на пороге и выше — входит."""
+    from app.st9.service import St9Session
+    from app.st9.config import St9InstrumentCfg
+    s = St9Session()
+    icfg = St9InstrumentCfg(secid="USDRUBF", atr_mult=5.0, risk_per_trade_rub=5_000.0,
+                            min_entry_lots=5)
+    # risk_per_lot = 5·atr·pv: atr=0.2, pv=1000 → 1000₽ → 5 лотов; atr=0.25 → 1250₽ → 4 лота
+    assert s._entry_lots(icfg, 80.0, 1000.0, atr=0.2) == 5
+    assert s._entry_lots(icfg, 80.0, 1000.0, atr=0.25) == 0
+    icfg.min_entry_lots = 0
+    assert s._entry_lots(icfg, 80.0, 1000.0, atr=0.25) == 4
