@@ -453,7 +453,7 @@ class St9Session:
                 return 0
             lots = max(1, int(risk / risk_per_lot))
             if lots < getattr(icfg, "min_entry_lots", 0):
-                return 0           # мелкий вход не окупает комиссию (см. min_entry_lots)
+                return 0           # вход ниже минимума размера пропускается (см. min_entry_lots)
             cap = getattr(s, "real_max_notional_rub", 0.0)
             if self.cfg.mode == "tbank_real" and cap > 0:
                 lots = min(lots, max(1, int(cap / (px * pv))))
