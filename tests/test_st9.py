@@ -1286,7 +1286,8 @@ def test_execution_gap_detects_hidden_costs():
     s = svc.St9Session()
     s.cfg.mode = "tbank_sandbox"
     s.cfg.account_id = "acc"
-    s.exec_anchor = {"capital_sizing": 500_000.0, "net": 0.0, "account_id": "acc"}
+    s.exec_anchor = {"capital_sizing": 500_000.0, "net": 0.0, "account_id": "acc",
+                     "flat": True}
 
     # журнал говорит +10 000, счёт вырос ровно на столько → расхождения нет
     s.trades = [{"net_pnl_rub": 10_000}]
@@ -1331,7 +1332,7 @@ def test_execution_gap_only_when_flat():
     s.cfg.mode = "tbank_sandbox"
     s.cfg.account_id = "acc"
     s.capital_sizing_rub = 500_000.0
-    s.exec_anchor = {"capital_sizing": 500_000.0, "net": 0.0, "account_id": "acc"}
+    s.exec_anchor = {"capital_sizing": 500_000.0, "net": 0.0, "account_id": "acc", "flat": True}
     assert s._execution_gap() == 0             # флэт → сверка работает
 
     s._pv_cache["USDRUBF"] = 1000.0
@@ -1858,3 +1859,82 @@ def test_entry_lots_below_min_is_skipped():
     assert s._entry_lots(icfg, 80.0, 1000.0, atr=0.25) == 0
     icfg.min_entry_lots = 0
     assert s._entry_lots(icfg, 80.0, 1000.0, atr=0.25) == 4
+
+
+def _refresh_session(mode, free, position):
+    from app.st9.service import St9Session
+    from app.st9.config import St9Config
+    s = St9Session.__new__(St9Session)
+    s.cfg = St9Config()
+    s.cfg.mode = mode
+    s.cfg.account_id = "acc"
+    s.log_event = lambda k, m: None
+    s.trades = []
+    s.exec_anchor = None
+    s.contracts = {}
+    s.capital_rub = 0.0
+    s.capital_sizing_rub = 0.0
+    s.save_session = lambda: None
+    class _Eng:
+        def __init__(self): self.position = position
+    s.engines = {"IMOEXF": _Eng()}
+    return s
+
+
+def _run_refresh(s, free):
+    from app.st4 import tbank_sandbox as sb
+    from app.st4 import tbank_live as live
+    old = (sb.portfolio, sb.free_money_rub, sb.find_future, sb.futures_margin, live.portfolio)
+    sb.portfolio = live.portfolio = lambda a: {"totalAmountPortfolio": {"units": "600000", "nano": 0}}
+    sb.free_money_rub = lambda a: free
+    sb.find_future = lambda s_: {"uid": "u"}
+    sb.futures_margin = lambda uid: (2_500.0, 2_500.0)
+    try:
+        s.refresh_capital()
+    finally:
+        sb.portfolio, sb.free_money_rub, sb.find_future, sb.futures_margin, live.portfolio = old
+
+
+def test_sandbox_capital_sizing_does_not_double_count_margin():
+    """29.10: в sandbox money уже нетто ГО — прибавлять ГО открытых позиций нельзя."""
+    pos = type("P", (), {"side": "long", "lots": 15})()
+    s = _refresh_session("tbank_sandbox", 500_000.0, pos)
+    _run_refresh(s, 500_000.0)
+    assert s.capital_sizing_rub == 500_000.0
+    r = _refresh_session("tbank_real", 500_000.0, pos)
+    _run_refresh(r, 500_000.0)
+    assert r.capital_sizing_rub == 500_000.0 + 15 * 2_500.0     # real: формула прежняя
+
+
+def test_anchor_requires_flat_flag_and_is_recreated():
+    """Якорь без флага flat (поставлен при открытых позициях) не используется в gap
+    и пересоздаётся на первом флэте; новый якорь помечен flat."""
+    s = _refresh_session("tbank_sandbox", 500_000.0, None)
+    s.exec_anchor = {"capital_sizing": 565_000.0, "net": 0.0, "account_id": "acc"}
+    s.capital_sizing_rub = 500_000.0
+    assert s._execution_gap() is None                  # старый якорь не годится
+    _run_refresh(s, 500_000.0)
+    assert s.exec_anchor.get("flat") is True
+    assert s.exec_anchor["capital_sizing"] == 500_000.0
+    assert s._execution_gap() == 0
+    # при открытой позиции якорь НЕ пересоздаётся
+    pos = type("P", (), {"side": "long", "lots": 1})()
+    h = _refresh_session("tbank_sandbox", 500_000.0, pos)
+    h.exec_anchor = {"capital_sizing": 565_000.0, "net": 0.0, "account_id": "acc"}
+    _run_refresh(h, 500_000.0)
+    assert h.exec_anchor["capital_sizing"] == 565_000.0
+
+
+def test_skipped_entry_is_recorded_and_persisted(tmp_path, monkeypatch):
+    """Вход ниже min_entry_lots пропущен, но записан (px/atr/side) для живой оценки фильтра."""
+    import app.st9.service as svc
+    s = svc.St9Session()
+    s.cfg.mode = "paper"
+    icfg = next(i for i in s.cfg.instruments if i.secid == "USDRUBF")
+    eng = svc.St9Engine("USDRUBF", 5, 3, 3.0, 3, pv=1000.0)
+    s.engines["USDRUBF"] = eng
+    monkeypatch.setattr(s, "save_session", lambda: None)
+    s._apply_signal_locked(eng, {"act": "open", "new_side": "long", "px": 78.0, "atr": 0.5}, icfg)
+    assert eng.position is None                      # 5000/(5·0.5·1000)=2 лота < 5
+    assert len(s.skipped_entries) == 1
+    assert s.skipped_entries[0]["secid"] == "USDRUBF" and s.skipped_entries[0]["px"] == 78.0

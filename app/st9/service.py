@@ -86,6 +86,9 @@ class St9Session:
         self.axis_overrides: dict[str, dict] = {}      # secid -> {don_enter,don_exit,atr_mult,notional} (персист поверх кода)
         self.capital_rub: float = 0.0
         self.exec_anchor: dict | None = None
+        # входы, пропущенные по min_entry_lots: для живой оценки фильтра (его польза в
+        # бэктесте не доказана) — P&L «что было бы» восстанавливается по барам офлайн
+        self.skipped_entries: list[dict] = []
         self.last_tick_ts: int = 0                    # мс; наблюдаемость живости цикла
         self._hb_ts: float = 0.0                      # heartbeat-событие раз в час
         self._task = None
@@ -609,6 +612,10 @@ class St9Session:
                 lots = self._entry_lots(icfg, sig["px"], eng.pv, side, sec,
                                         atr=sig.get("atr"))
                 if lots <= 0:
+                    if icfg.min_entry_lots > 0:
+                        self.skipped_entries.append(
+                            {"ts": ts, "secid": icfg.secid, "side": side,
+                             "px": sig["px"], "atr": sig.get("atr")})
                     self.log_event("info", f"{eng.secid}: вход пропущен — размер ниже "
                                            f"минимума {icfg.min_entry_lots} лотов")
                     self.save_session()
@@ -1214,7 +1221,7 @@ class St9Session:
         if a.get("account_id") != self.cfg.account_id:
             return None
         base = a.get("capital_sizing")
-        if not base:            # якорь старого формата (до 11.08) — сверять не с чем
+        if not base or not a.get("flat"):   # старый формат / поставлен не во флэте — сверять не с чем
             return None
         cap = self.capital_sizing_rub
         if not cap:
@@ -1272,7 +1279,12 @@ class St9Session:
                     self.log_event("warn", f"ГО недоступно по осям {','.join(missed)} — "
                                            f"капитал не обновлён (защита от ложного стопа)")
                 elif free > 0:
-                    self.capital_sizing_rub = float(free + go_open)
+                    # sandbox: `money` НЕ уменьшается на ГО (замер 29.10: money == сумма
+                    # INPUT+вармаржа+комиссии до копейки при открытых 15 лотах), поэтому
+                    # прибавлять ГО = считать его дважды (+7.5% капитала). Для tbank_real
+                    # формула free+ГО не проверена на счёте и оставлена прежней.
+                    self.capital_sizing_rub = float(
+                        free + (go_open if self.cfg.mode == "tbank_real" else 0.0))
                     # БАЗА СТОПА ПРОСАДКИ — БЕЗ ГО (разбор 15.08). capital_sizing_rub
                     # включает ЗАБЛОКИРОВАННОЕ ГО, поэтому открытие позиций поднимает
                     # «капитал», а закрытие обрушивает: 14.08 метрика показала просадку
@@ -1288,14 +1300,18 @@ class St9Session:
                     # давали бы «разрыв» размером с mark-to-market, а не с издержками.
                     # ТОЛЬКО ВО ФЛЭТЕ: при открытой позиции в base попала бы вармаржа,
                     # которой нет в модели, и разрыв врал бы на её величину навсегда.
+                    # Якорь без флага flat (старый формат: 11.08 он был поставлен при
+                    # открытых позициях и жил до ручного сброса 28.10) пересоздаётся.
                     if ((self.exec_anchor is None
-                         or not self.exec_anchor.get("capital_sizing"))
+                         or not self.exec_anchor.get("capital_sizing")
+                         or not self.exec_anchor.get("flat"))
                             and not any(e.position is not None
                                         for e in self.engines.values())):
                         self.exec_anchor = {
                             "capital_sizing": self.capital_sizing_rub,
                             "net": sum(t.get("net_pnl_rub", 0) for t in self.trades),
                             "account_id": self.cfg.account_id,
+                            "flat": True,
                             "ts": int(time.time() * 1000)}
                         self.save_session()   # иначе якорь живёт только в памяти и
                         # сбрасывается рестартом — накопленная сверка обнулялась бы
@@ -1496,6 +1512,7 @@ class St9Session:
             data = {"config": self.cfg.model_dump(), "trades": self.trades,
                     "state": self.state, "last_bar_ts": self._last_bar_ts,
                     "exec_anchor": self.exec_anchor,
+                    "skipped_entries": self.skipped_entries[-500:],
                     "contracts": self.contracts,
                     "axis_overrides": self.axis_overrides,
                     "capital_peak": self._capital_peak, "dd_halted": self._dd_halted,
@@ -1531,6 +1548,7 @@ class St9Session:
         self.state["real_trading_armed"] = False   # взвод НЕ переживает рестарт (safe)
         self._last_bar_ts = {k: int(v) for k, v in (d.get("last_bar_ts") or {}).items()}
         self.exec_anchor = d.get("exec_anchor") or None
+        self.skipped_entries = list(d.get("skipped_entries") or [])
         self.contracts = dict(d.get("contracts") or {})
         # цена филла ВХОДА живёт до закрытия сделки — переживает рестарт под позицией,
         # иначе проскальзывание такой сделки посчитать уже нечем (None вместо вранья)
