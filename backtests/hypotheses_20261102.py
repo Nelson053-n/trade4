@@ -282,7 +282,9 @@ def beta_before_entry(stock_close, index_close, entry):
     return float(np.clip(.5+.5*beta,0,2))
 
 
-def st8(beta_hedge=False,scale=1.,slip=.0011):
+def st8(beta_hedge=False,scale=1.,slip=.0011,ex_rule='legacy'):
+    # ex_rule='legacy' — как в прогоне 02.11 (торг.день строго перед регдатой = последний день С дивидендом при T+1);
+    # 't1' — фикс 07.11.2026: день гэпа = последний торг.день <= регдаты (см. app/st8/service._gap_day)
     dividends=dividend_adjustments()
     prices={tk:stock(tk) for tk in TICKERS};hedge=daily(load('IMOEXF'));rates=swaps('IMOEXF')
     idx=pd.read_csv(DATA/'index_IMOEX.csv',parse_dates=['TRADEDATE']).set_index('TRADEDATE')['CLOSE']
@@ -293,7 +295,7 @@ def st8(beta_hedge=False,scale=1.,slip=.0011):
     for tk,d in prices.items():
         divs=pd.read_csv(DATA/f'sl_{tk}.csv').groupby('rc')['value'].sum()
         for rc,div in divs.items():
-            exi=calendar.searchsorted(pd.Timestamp(rc))-1
+            exi=calendar.searchsorted(pd.Timestamp(rc),side='right' if ex_rule=='t1' else 'left')-1
             if exi<130 or exi+5>=len(calendar):continue
             ex=calendar[exi]
             if ex<pd.Timestamp('2024-01-01') or ex>pd.Timestamp(END):continue

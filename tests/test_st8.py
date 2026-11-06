@@ -936,3 +936,71 @@ def test_calendar_uses_per_ticker_window_overrides(monkeypatch):
     st = s.cfg.strategy
     assert rows["LKOH"]["entry_date"] == days[j - st.entry_days_before]
     assert rows["LKOH"]["exit_date"] == days[j - st.exit_offset_days]
+
+
+# ==================== день гэпа T+1/T+2 (фикс 07.11.2026) ====================
+
+def _gap_session():
+    from app.st8.service import St8Session
+    import datetime as _dt
+    s = St8Session()
+    d, end, days = _dt.date(2023, 6, 1), _dt.date(2027, 1, 31), []
+    while d <= end:
+        if d.weekday() < 5 and d.isoformat() not in ("2024-06-12", "2026-06-12"):
+            days.append(d.isoformat())
+        d += _dt.timedelta(days=1)
+    s._trading_days = days
+    return s
+
+
+def test_gap_day_t1_weekday_registry_is_registry_date():
+    """T+1: будняя регдата → гэп в саму регдату (LKOH 09.12.2026, X5 11.12.2026; факт ISS:
+    LKOH 03.06.2025, SBER 18.07.2025 — гэп в день реестра)."""
+    s = _gap_session()
+    assert s._gap_day("2026-12-09") == "2026-12-09"
+    assert s._gap_day("2026-12-11") == "2026-12-11"
+    assert s._gap_day("2025-06-03") == "2025-06-03"
+
+
+def test_gap_day_t1_weekend_registry_is_friday_before():
+    """T+1: регдата в выходной → гэп в пятницу (факт ISS: PHOR вс 22.09.2024 → пт 20.09,
+    ALRS сб 19.10.2024 → пт 18.10; PHOR вс 13.12.2026 → пт 11.12)."""
+    s = _gap_session()
+    assert s._gap_day("2024-09-22") == "2024-09-20"
+    assert s._gap_day("2024-10-19") == "2024-10-18"
+    assert s._gap_day("2026-12-13") == "2026-12-11"
+
+
+def test_gap_day_t1_holiday_before_registry():
+    """T+1: праздник перед регдатой не мешает — гэп = последний торговый день <= регдаты."""
+    s = _gap_session()
+    assert s._gap_day("2024-06-13") == "2024-06-13"       # 12.06 праздник, 13.06 торговый
+    assert s._gap_day("2024-06-12") == "2024-06-11"       # регдата в праздник → предыдущий торг.день
+
+
+def test_gap_day_t2_before_switch():
+    """T+2 (регдата до 31.07.2023): будни → регдата−1 торг.день; выходной → четверг."""
+    s = _gap_session()
+    assert s._gap_day("2023-07-14") == "2023-07-13"       # пт → чт
+    assert s._gap_day("2023-07-16") == "2023-07-13"       # вс → чт
+    assert s._gap_day("2023-07-31") == "2023-07-31"       # первый день T+1
+
+
+def test_scan_migrates_event_after_gap_fix_without_new_signal(monkeypatch):
+    """После фикса дня гэпа то же событие (тот же див, ex ±4 дня) не объявляется 🆕 заново,
+    а дата в new_dividends обновляется."""
+    from app.st8 import service as svc
+    s = _gap_session()
+    s.enabled = {tk: tk == "LKOH" for tk in svc.ST8_TICKERS}
+    s.new_dividends = [{"ticker": "LKOH", "ex_date": "2026-12-08", "div": 535.0,
+                        "div_yield_pct": 8.85, "detected": "2026-11-05"}]
+    s._div_seen = {"LKOH": "2026-12-08"}
+    monkeypatch.setattr(s, "_fetch_divs", lambda tk: [("2026-12-09", 535.0, 8.8)])
+    import datetime as _dt
+    class _FD(_dt.date):
+        @classmethod
+        def today(cls): return _dt.date(2026, 11, 7)
+    monkeypatch.setattr(svc, "date", _FD)
+    assert s.scan_new_dividends() == []
+    assert s.new_dividends[0]["ex_date"] == "2026-12-09" and len(s.new_dividends) == 1
+    assert s._div_seen["LKOH"] == "2026-12-09"

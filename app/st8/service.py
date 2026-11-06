@@ -64,6 +64,11 @@ ST8_TICKERS = {**ST8_CORE, **ST8_OPTIONAL, **ST8_EXTENDED, **ST8_BROAD}
 # «отрезать P у любого префа» сломало бы работающие тикеры.
 _PREF_PAGE = {"TATNP": "TATN", "LSNGP": "LSNG"}
 HEDGE_SECID = "IMOEXF"        # фьючерс индекса для хеджа беты
+# Расчёты по акциям MOEX перешли с T+2 на T+1 31.07.2023. От режима зависит день гэпа:
+# T+1 — последний торговый день <= регдаты (будняя регдата → гэп в саму регдату),
+# T+2 — торговый день перед ним. Проверено по ценам ISS (07.11.2026): 19/19 событий
+# 2024–2026 с будней регдатой — гэп в день реестра; регдата в выходной — гэп в пятницу.
+T1_SETTLEMENT_SINCE = "2023-07-31"
 ISS = "https://iss.moex.com/iss"
 EVENTS_LEN = 60
 
@@ -381,8 +386,8 @@ class St8Session:
         return out
 
     def _fetch_divs(self, tk: str) -> list:
-        """Дивиденды тикера: [(ex_date, div, div_yield_pct)]. ex_date = registryclosedate − 1
-        торг.день (T+1 гэп). div_yield по последней close перед ex."""
+        """Дивиденды тикера: [(ex_date, div, div_yield_pct)]. ex_date = день дивидендного
+        гэпа (_gap_day: T+1 — последний торг.день <= регдаты). div_yield по close на ex."""
         if tk in self._div_cache:
             return self._div_cache[tk]
         if not self._trading_days:
@@ -391,7 +396,7 @@ class St8Session:
             today = date.today().isoformat()
             out = []
             for rc, val in self._smartlab_divs(tk):
-                ex = self._prev_trading_day(rc)
+                ex = self._gap_day(rc)
                 if ex is None:
                     continue
                 # дивдоходность: прошедшее событие — close на день гэпа; БУДУЩЕЕ — текущая
@@ -445,8 +450,28 @@ class St8Session:
         except Exception as e:  # noqa: BLE001
             self.log_event("warn", f"торговый календарь не получен: {str(e)[:60]}")
 
+    def _gap_day(self, registry_date: str) -> str | None:
+        """День дивидендного гэпа по дате закрытия реестра.
+
+        ФИКС 07.11.2026: раньше ex = торг.день СТРОГО перед регдатой — это верно только для
+        T+2 и будней регдаты. С T+1 (31.07.2023) так получался ПОСЛЕДНИЙ день С дивидендом:
+        лонг выходил на день раньше задуманного, а пост-див шорт входил ДО гэпа (платил див).
+        T+1: последний торг.день <= регдаты (будни → сама регдата; выходной → пятница).
+        T+2: торг.день перед ним (будни → регдата−1; выходной → четверг)."""
+        last = self._last_trading_day_le(registry_date)
+        if last is None or registry_date >= T1_SETTLEMENT_SINCE:
+            return last
+        return self._prev_trading_day(last)
+
+    def _last_trading_day_le(self, d: str) -> str | None:
+        """Последний торговый день <= d."""
+        if not self._trading_days:
+            return None
+        le = [t for t in self._trading_days if t <= d]
+        return le[-1] if le else None
+
     def _prev_trading_day(self, d: str) -> str | None:
-        """Торговый день СТРОГО перед d (день гэпа = регдата − 1 торг.день)."""
+        """Торговый день СТРОГО перед d."""
         if not self._trading_days:
             return None
         prev = [t for t in self._trading_days if t < d]
@@ -606,6 +631,16 @@ class St8Session:
                     continue
                 prev = self._div_seen.get(tk)
                 if prev is None or ex > prev:
+                    # миграция после фикса дня гэпа (07.11.2026): то же событие (тот же див,
+                    # дата ±4 дня) уже записано со старой ex — обновить, а не слать 🆕 повторно
+                    same = [n for n in self.new_dividends if n["ticker"] == tk
+                            and abs(float(n.get("div", 0)) - div) < 1e-9
+                            and abs((date.fromisoformat(n["ex_date"]) - date.fromisoformat(ex)).days) <= 4]
+                    if same:
+                        for n in same:
+                            n["ex_date"] = ex
+                        self._div_seen[tk] = ex
+                        continue
                     is_new = ex not in [n["ex_date"] for n in self.new_dividends if n["ticker"] == tk]
                     if is_new:
                         rec = {"ticker": tk, "ex_date": ex, "div": div, "div_yield_pct": dy,

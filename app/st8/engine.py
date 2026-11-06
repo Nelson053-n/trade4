@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 class DivEvent:
     """Одно дивидендное событие для тикера: ex_date (день гэпа) и дивиденд."""
     ticker: str
-    ex_date: str          # YYYY-MM-DD — день дивидендного гэпа (registryclosedate − 1 торг.день)
+    ex_date: str          # YYYY-MM-DD — день дивидендного гэпа (service._gap_day, T+1/T+2)
     div: float            # дивиденд на акцию, ₽
     div_yield_pct: float  # дивдоходность к цене cum-day, %
 
