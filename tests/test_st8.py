@@ -906,3 +906,14 @@ def test_empty_calendar_alert_once_per_day(monkeypatch):
     n1 = len(s.events)
     s.build_calendar(days_ahead=5, days_back=1)
     assert len(s.events) == n1
+
+
+def test_broad_universe_registered_but_disabled_by_default(tmp_path, monkeypatch):
+    """ST8_BROAD: тикеры известны реестру (API/оверрайды их принимают), но НЕ включаются сами —
+    ни в свежей сессии, ни при загрузке старого session-файла без ключей для них."""
+    from app.st8 import service as svc
+    assert set(svc.ST8_BROAD) <= set(svc.ST8_TICKERS)
+    assert not (set(svc.ST8_BROAD) & (set(svc.ST8_CORE) | set(svc.ST8_EXTENDED)))
+    s = svc.St8Session()
+    assert not any(s.enabled[tk] for tk in svc.ST8_BROAD)
+    assert all(s.enabled[tk] for tk in svc.ST8_EXTENDED)
