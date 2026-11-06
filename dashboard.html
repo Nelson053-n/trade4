@@ -2769,7 +2769,8 @@ function s8Render(s){
   $('s8-mode').textContent = (s.mode||'paper') + ' · бумаг ' + (s.tickers_enabled||[]).length
     + (s.hedge_px ? ' · IMOEXF '+s.hedge_px : '');
   $('s8-net').textContent = 'net '+(s.net_pnl_rub>=0?'+':'')+(s.net_pnl_rub||0)+' ₽ · сделок '+(s.trades_count||0)
-    + (s.execution_gap_rub!=null ? ' · сверка '+(s.execution_gap_rub>=0?'+':'')+s.execution_gap_rub+'₽' : '');
+    + (s.execution_gap_rub!=null ? ' · сверка '+(s.execution_gap_rub>=0?'+':'')+s.execution_gap_rub+'₽' : '')
+    + (s.unverified_trades?' · расчётный результат у '+s.unverified_trades+' сделок':'');
   $('s8-trading').textContent = 'торговля: '+(s.trading_enabled?'ВКЛ':'выкл');
   const mo=$('s8-c-mode'); if(mo&&document.activeElement!==mo) mo.value=s.mode||'paper';
   // сводка-KPI
@@ -3072,7 +3073,8 @@ function s9Render(s){
   const mo=$('s9-c-mode'); if(mo&&document.activeElement!==mo) mo.value=s.mode||'paper';
   const am=$('s9-c-armed'); if(am&&document.activeElement!==am) am.checked=!!s.real_trading_armed;
   $('s9-armed-note').textContent = s.real_trading_armed?'Взведён — боевые ордера разрешены.':'Сейчас выключено.';
-  $('s9-status-txt').textContent = 'Трендовая корзина — '+inst.length+' осей, открытых позиций '+openN;
+  $('s9-status-txt').textContent = 'Трендовая корзина — '+inst.length+' осей, открытых позиций '+openN
+    + (s.unverified_trades?' · расчётный результат у '+s.unverified_trades+' сделок':'');
 
   // селектор осей для параметров + заполнение полей (если не в фокусе)
   s9FillAxisParams(inst);
@@ -3144,13 +3146,13 @@ function s9RenderTrades(tail){
   const tb=$('s9-trades').querySelector('tbody'); tb.innerHTML='';
   if(!tail.length){ tb.innerHTML='<tr><td colspan="8" style="color:var(--ink-dim)">закрытых сделок ещё нет — запись появится, когда трейл-стоп закроет ось</td></tr>'; return; }
   tail.slice().reverse().forEach(t=>{
-    const net=+t.net_pnl_rub||0; const col=net>=0?'var(--signal)':'var(--loss)';
+    const net=+(t.actual_net_pnl_rub??t.net_pnl_rub)||0; const col=net>=0?'var(--signal)':'var(--loss)';
     const per=(t.entry_ts?new Date(t.entry_ts).toLocaleDateString('ru',{day:'2-digit',month:'2-digit'}):'—')
       +'→'+(t.exit_ts?new Date(t.exit_ts).toLocaleDateString('ru',{day:'2-digit',month:'2-digit'}):'—');
     const tr=document.createElement('tr');
     tr.innerHTML=`<td>${s4esc(t.secid)}</td><td>${s4esc(t.side||'')}</td><td>${per}</td><td>${s9num(t.lots)}</td>`
       +`<td>${s9px(t.entry)}</td><td>${s9px(t.exit)}</td>`
-      +`<td style="color:${col}">${(net>=0?'+':'')+s9num(Math.round(net))}</td><td>${s4esc(t.reason||'')}</td>`;
+      +`<td style="color:${col}">${(net>=0?'+':'')+s9num(Math.round(net))}${t.actual_net_pnl_rub==null?' (расчёт)':''}</td><td>${s4esc(t.reason||'')}</td>`;
     tb.appendChild(tr);
   });
   s9RenderFact();
@@ -3166,11 +3168,11 @@ async function s9Ledger(){
     _s9varmargin=(vm!=null?vm:null); s9RenderFact();
   }catch(e){ $('s9-ledger').innerHTML='<div class="lg"><span class="lk" style="color:var(--warn)">лента недоступна: '+s4esc(e.message)+'</span></div>'; }
 }
-// строка-сводка под журналом: фактический P&L = вар.маржа со счёта (истина)
+// Вармаржа — отдельный денежный поток; комиссии в эту сумму не входят.
 function s9RenderFact(){ const el=$('s9-trades-fact'); if(!el) return;
   if(_s9varmargin==null){ el.textContent=''; return; }
   const vm=_s9varmargin, col=vm>=0?'var(--signal)':'var(--loss)';
-  el.innerHTML='фактический P&amp;L (счёт, вар.маржа открыт.): <b style="color:'+col+';font-variant-numeric:tabular-nums">'+(vm>=0?'+':'')+s9num(Math.round(vm))+' ₽</b>';
+  el.innerHTML='Вариационная маржа за 30 дней, до комиссий: <b style="color:'+col+';font-variant-numeric:tabular-nums">'+(vm>=0?'+':'')+s9num(Math.round(vm))+' ₽</b>';
 }
 
 // селектор оси над графиком (кнопки как #s5-chart-switch)

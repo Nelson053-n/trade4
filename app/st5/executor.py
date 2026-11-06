@@ -22,6 +22,7 @@ import time
 import uuid
 
 from ..st4 import tbank_sandbox as _sb
+from ..st4.broker_accounting import order_fill
 
 _NS = uuid.UUID("5f5e1000-0000-4000-8000-000000000000")   # namespace для детерминированных UUID5
 
@@ -65,6 +66,7 @@ class St5PairExecutor:
         self._uid_pref: str | None = uid_pref
         self._seq = 0
         self._tick_cache: dict[str, float] = {}   # uid -> шаг цены (для лимит-потолка)
+        self.last_execution: dict = {}
 
     # ---------- ленивый резолв UID инструментов ----------
     def _uids(self) -> tuple[str, str]:
@@ -140,6 +142,7 @@ class St5PairExecutor:
                                       order_type=otype, price=price)
             audit["status"] = "ok"
             audit["executed_lots"] = resp.get("lotsExecuted") or resp.get("executedLots")
+            audit["response"] = resp
         except Exception as e:  # noqa: BLE001
             audit["status"] = "error"
             audit["error"] = str(e)
@@ -245,6 +248,7 @@ class St5PairExecutor:
                                    f"не удался: {'; '.join(errs)}")
             raise St5ExecError(f"частичный филл обычки {got_ord}/{lots_ord} — "
                                f"вход откачен целиком")
+        self.last_execution = {"ord": order_fill(r2, 1.0), "pref": order_fill(r1, 1.0)}
         return {"ok": True}
 
     def close_pair(self, long_spread: bool, lots_ord: int, lots_pref: int,
@@ -257,11 +261,27 @@ class St5PairExecutor:
         uid_ord, uid_pref = self._uids()
         pref_dir = "SELL" if long_spread else "BUY"   # закрытие префа
         ord_dir = "BUY" if long_spread else "SELL"
-        got_pref = self._filled(self._post(uid_pref, lots_pref, pref_dir, op, ref_pref), lots_pref)
-        got_ord = self._filled(self._post(uid_ord, lots_ord, ord_dir, op, ref_ord), lots_ord)
-        if got_pref != lots_pref or got_ord != lots_ord:
+        self.last_execution = {}
+        errors = []
+        for leg, uid, lots, direction, ref in (("pref", uid_pref, lots_pref, pref_dir, ref_pref),
+                                                ("ord", uid_ord, lots_ord, ord_dir, ref_ord)):
+            if not lots:
+                self.last_execution[leg] = {"lots": 0, "price": None, "fee": 0.0}
+                continue
+            try:
+                response = self._post(uid, lots, direction, op, ref)
+                fill = order_fill(response, 1.0)
+                fill["lots"] = self._filled(response, lots)
+                self.last_execution[leg] = fill
+            except Exception as exc:  # обе ноги закрываем независимо
+                self.last_execution[leg] = {"lots": None, "price": None, "fee": None}
+                errors.append(str(exc))
+        got_pref = self.last_execution["pref"]["lots"]
+        got_ord = self.last_execution["ord"]["lots"]
+        if errors or got_pref != lots_pref or got_ord != lots_ord:
             raise St5ExecError(f"закрытие недолилось: преф {got_pref}/{lots_pref}, "
-                               f"обычка {got_ord}/{lots_ord} — остаток на счёте, нужен разбор")
+                               f"обычка {got_ord}/{lots_ord} — остаток на счёте, нужен разбор; "
+                               + "; ".join(errors))
         return {"ok": True}
 
     # ---------- reconciliation: реальные лоты ног на счёте ----------

@@ -142,6 +142,7 @@ class St8Session:
         self.cfg = St8Config()
         self.engines: dict[str, St8Engine] = {}
         self.trades: list[dict] = []
+        self.execution_orders: dict[str, dict] = {}
         self.events: list[dict] = []
         self.enabled = {tk: (tk in ST8_CORE or tk in ST8_EXTENDED) for tk in ST8_TICKERS}  # ядро+расширение вкл, опц. выкл
         self.ticker_overrides: dict[str, dict] = {}  # tk -> {entry_days_before,exit_offset_days,min_div_yield_pct,stop_loss_pct,entry_notional_rub} (персист, поверх глобала)
@@ -251,9 +252,48 @@ class St8Session:
                 or self._executor.real != real or self._executor.paper != paper):
             self._executor = St8Executor(
                 self.cfg.account_id, paper=paper, real=real, armed_cb=self._real_armed,
-                audit_cb=lambda a: self.log_event("order",
-                    f"{a['op']} {a['direction']} {a['lots']}лот → {a.get('status')}"))
+                audit_cb=self._audit_order)
         return self._executor
+
+    def _audit_order(self, audit: dict) -> None:
+        oid = audit.get("order_id")
+        if oid:
+            self.execution_orders[oid] = audit
+            self.save_session()
+        self.log_event("order", f"{audit['op']} {audit['direction']} {audit['lots']}лот "
+                               f"→ {audit.get('status')}")
+
+    @staticmethod
+    def _entry_accounting(result: dict, stock_px: float, hedge_px: float) -> dict:
+        stock = result.get("stock_fill", {})
+        hedge = result.get("hedge_fill", {})
+        has_hedge = result.get("hedge_filled", 0) > 0
+        complete = (stock.get("price") is not None and stock.get("fee") is not None
+                    and (not has_hedge or (hedge.get("price") is not None
+                                           and hedge.get("fee") is not None)))
+        return {"stock_px": stock.get("price") or stock_px,
+                "hedge_px": hedge.get("price") or hedge_px,
+                "stock_fee": stock.get("fee"),
+                "hedge_fee": hedge.get("fee") if has_hedge else 0.0,
+                "accounting_complete": complete}
+
+    def _record_close(self, eng, result: dict, today: str, stock_px: float,
+                      hedge_px: float, reason: str):
+        stock_closed = result.get("stock_closed", 0)
+        hedge_closed = result.get("hedge_closed", 0)
+        if not stock_closed and not hedge_closed:
+            return None
+        stock = result.get("stock_fill", {})
+        hedge = result.get("hedge_fill", {})
+        complete = all(not qty or (fill.get("price") is not None and fill.get("fee") is not None)
+                       for qty, fill in ((stock_closed, stock), (hedge_closed, hedge)))
+        exit_fee = ((stock.get("fee", 0) if stock_closed else 0)
+                    + (hedge.get("fee", 0) if hedge_closed else 0)) if complete else None
+        tr = eng.close_partial(today, stock.get("price") or stock_px,
+                               hedge.get("price") or hedge_px, stock_closed, hedge_closed,
+                               reason, exit_fee=exit_fee, accounting_complete=complete)
+        self.trades.append(_trade_dict(tr))
+        return tr
 
     # ---------- боевой контур: взвод реальной торговли (канон st5) ----------
     def arm_real(self, armed: bool) -> None:
@@ -721,12 +761,10 @@ class St8Session:
                                                 self.hedge_px or 0, fut_secid=fut)
                         s_closed = rc.get("stock_closed", req_lots)
                         h_closed = rc.get("hedge_closed", req_hedge)
-                    # ЧАСТИЧНОЕ закрытие → НЕ фиксируем сделку, ведём остаток (иначе движок
-                    # flat при висящих на счёте лотах = голая нога, грабли st5). Полное
-                    # закрытие обеих ног → штатная фиксация в журнал.
+                    tr = self._record_close(eng, rc, today, close_px,
+                                            self.hedge_px or eng.position.hedge_entry, reason)
+                    # Закрытые части уже записаны, позиция содержит только остаток.
                     if s_closed < req_lots or (req_hedge > 0 and h_closed < req_hedge):
-                        eng.position.lots = max(0, req_lots - s_closed)
-                        eng.position.hedge_lots = max(0, req_hedge - h_closed)
                         eng.position.stuck_ticks += 1
                         naked = eng.position.lots == 0 and eng.position.hedge_lots > 0
                         self.log_event("warn", f"{tk}: 🚨 частичный выход — закрыто акция {s_closed}/"
@@ -741,14 +779,8 @@ class St8Session:
                                                     f"{eng.position.hedge_lots}"
                                                     f"{' (ГОЛАЯ хедж-нога!)' if naked else ''}; "
                                                     f"нужен ручной flat/reconcile")
-                        if eng.position.lots == 0 and eng.position.hedge_lots == 0:
-                            eng.position = None   # всё же закрылось до нуля — обнулить
                         self.save_session()
                         continue
-                    if eng.position:
-                        eng.position.stuck_ticks = 0   # полное закрытие — сброс счётчика
-                    tr = eng.close(today, close_px, self.hedge_px or eng.position.hedge_entry, reason)
-                    self.trades.append(_trade_dict(tr))
                     acted["exited"].append(tk)
                     self.log_event("exit", f"{tk}: выход {eng_side_label(tr.side)} ({reason}) "
                                            f"net {tr.net_pnl_rub:+.0f}₽")
@@ -774,12 +806,12 @@ class St8Session:
                     lots = self._position_lots(short_px, uval, tk)
                     try:
                         r = self._exec().open_short(tk, lots, short_px, fut_secid=fut)
-                        eng.open(today, sev, short_px, 0.0, 0, side="short",
-                                 instrument=fut or "", unit_value=uval,
-                                 lots=r["stock_filled"])
+                        eng.open(today, sev, hedge_lots=0, side="short",
+                                 instrument=fut or "", unit_value=uval, lots=r["stock_filled"],
+                                 **self._entry_accounting(r, short_px, 0.0))
                         acted["entered"].append(tk + ":short")
                         self.log_event("position", f"{tk}: ШОРТ {r['stock_filled']}лот"
-                                                   f"{' '+fut if fut else ''} @ {short_px} "
+                                                   f"{' '+fut if fut else ''} @ {eng.position.stock_entry} "
                                                    f"(сдувание после отсечки {sev.ex_date})")
                         continue
                     except Exception as e:  # noqa: BLE001
@@ -825,11 +857,12 @@ class St8Session:
             try:
                 r = self._exec().open(tk, lots, entry_px, hlots, self.hedge_px or 0,
                                       fut_secid=fut)
-                eng.open(today, ev, entry_px, self.hedge_px or 0, r.get("hedge_filled", 0),
-                         instrument=fut or "", unit_value=uval, lots=r["stock_filled"])
+                eng.open(today, ev, hedge_lots=r.get("hedge_filled", 0),
+                         instrument=fut or "", unit_value=uval, lots=r["stock_filled"],
+                         **self._entry_accounting(r, entry_px, self.hedge_px or 0))
                 acted["entered"].append(tk)
                 self.log_event("position", f"{tk}: ВХОД {r['stock_filled']}лот"
-                                           f"{' '+fut if fut else ''} @ {entry_px} "
+                                           f"{' '+fut if fut else ''} @ {eng.position.stock_entry} "
                                            f"+ хедж {r.get('hedge_filled',0)} IMOEXF (отсечка {ev.ex_date})")
             except Exception as e:  # noqa: BLE001
                 self.log_missed(tk, today, ev.ex_date, f"брокер: {str(e)[:80]}")
@@ -1009,6 +1042,9 @@ class St8Session:
                 for tk, e in self.engines.items() if e.position is not None
             ],
             "net_pnl_rub": round(net),
+            "actual_net_pnl_rub": (round(net, 2)
+                                   if all(t.get("accounting_complete") for t in self.trades) else None),
+            "unverified_trades": sum(not t.get("accounting_complete") for t in self.trades),
             "trades_count": len(self.trades),
             "capital_rub": round(self.capital_rub) or None,
             "execution_gap_rub": self.execution_gap(),      # аудит журнал↔счёт (кэш-истина)
@@ -1040,11 +1076,7 @@ class St8Session:
                     from ..st4 import tbank_live as live
                     ops = live.operations(self.cfg.account_id, frm, to)
                 else:
-                    ops = sb._call("tinkoff.public.invest.api.contract.v1.SandboxService",
-                                   "GetSandboxOperations",
-                                   {"accountId": self.cfg.account_id, "from": frm, "to": to,
-                                    "state": "OPERATION_STATE_EXECUTED"},
-                                   token=sb._account_token(self.cfg.account_id)).get("operations", [])
+                    ops = sb.operations(self.cfg.account_id, frm, to)
                 for o in ops:
                     amt = sb._q_to_float(o.get("payment"))
                     rows.append({"date": str(o.get("date", ""))[:16].replace("T", " "),
@@ -1121,18 +1153,14 @@ class St8Session:
                                             self.hedge_px or 0, fut_secid=fut)
                     s_closed = rc.get("stock_closed", req_lots)
                     h_closed = rc.get("hedge_closed", req_hedge)
-                # частичное закрытие → ведём остаток (не фиктивим полное закрытие)
+                tr = self._record_close(eng, rc, today, close_px,
+                                        self.hedge_px or p.hedge_entry, "flat_all")
+                # Закрытые части записаны, остаток продолжает обслуживаться.
                 if s_closed < req_lots or (req_hedge > 0 and h_closed < req_hedge):
-                    p.lots = max(0, req_lots - s_closed)
-                    p.hedge_lots = max(0, req_hedge - h_closed)
-                    if p.lots == 0 and p.hedge_lots == 0:
-                        eng.position = None
                     skipped.append({"ticker": tk, "reason": f"частично: акция {s_closed}/{req_lots}, "
                                                             f"хедж {h_closed}/{req_hedge}"})
                     self.log_event("warn", f"{tk}: 🚨 flat-all частично — остаток ведём")
                     continue
-                tr = eng.close(today, close_px, self.hedge_px or p.hedge_entry, "flat_all")
-                self.trades.append(_trade_dict(tr))
                 closed.append({"ticker": tk, "side": tr.side, "lots": tr.lots,
                                "net_pnl_rub": tr.net_pnl_rub})
                 self.log_event("exit", f"{tk}: flat-all {eng_side_label(tr.side)} "
@@ -1146,6 +1174,7 @@ class St8Session:
     def save_session(self) -> None:
         try:
             data = {"config": self.cfg.model_dump(), "trades": self.trades,
+                    "execution_orders": self.execution_orders,
                     "enabled": self.enabled, "state": self.state,
                     "ticker_overrides": self.ticker_overrides,
                     "exec_anchor": self.exec_anchor, "new_dividends": self.new_dividends[-100:],
@@ -1166,6 +1195,7 @@ class St8Session:
         except Exception:  # noqa: BLE001
             return False
         self.trades = d.get("trades", [])
+        self.execution_orders = d.get("execution_orders", {})
         # live — рантайм-факт, из файла не восстанавливаем (см. st9: фиктивный live без цикла)
         st = d.get("state") or {}
         st["live"] = False

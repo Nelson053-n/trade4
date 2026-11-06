@@ -14,6 +14,8 @@ P&L считается по ФАКТИЧЕСКИМ ногам (ценам исп
 from __future__ import annotations
 
 import math
+import uuid
+from dataclasses import asdict
 
 import numpy as np
 
@@ -308,11 +310,12 @@ class ST5Engine:
     def _pos_ord_lots(self) -> int:
         """Лоты обычки позиции (legacy-позиции без ord_lots → равные ноги)."""
         p = self.position
-        return p.ord_lots if p.ord_lots > 0 else p.lots
+        return p.ord_lots if p.broker_accounting or p.ord_lots > 0 else p.lots
 
     def _take_partial(self, ts: int, z: float, spread: float,
                       ord_px: float, pref_px: float) -> St5Trade:
         p = self.position
+        position_before = asdict(p)
         close_units = max(1, int(p.units * self.cfg.strategy.partial_take_frac))
         close_pref = close_units * p.unit_pref
         close_ord = close_units * p.unit_ord
@@ -333,13 +336,15 @@ class ST5Engine:
                       entry_z=p.entry_z, exit_z=z, entry_spread=p.entry_spread, exit_spread=exit_spread,
                       lots=close_pref, gross_pnl_rub=gross, fees_rub=fee, net_pnl_rub=net,
                       reason="take_partial", bars_held=p.bars_held, entry_beta=p.entry_beta,
-                      adopted=p.adopted, ord_lots=close_ord)
+                      adopted=p.adopted, ord_lots=close_ord, position_before=position_before,
+                      execution_id=str(uuid.uuid4()))
         self.trades.append(tr)
         return tr
 
     def _close(self, ts: int, z: float, spread: float,
                ord_px: float, pref_px: float, reason: str) -> St5Trade:
         p = self.position
+        position_before = asdict(p)
         close_ord = self._pos_ord_lots()
         ord_x, pref_x = self._leg_exit_prices(ord_px, pref_px)
         exit_spread = pref_x - p.entry_beta * ord_x
@@ -351,7 +356,8 @@ class ST5Engine:
                       entry_z=p.entry_z, exit_z=z, entry_spread=p.entry_spread, exit_spread=exit_spread,
                       lots=p.lots, gross_pnl_rub=gross, fees_rub=fee, net_pnl_rub=net,
                       reason=reason, bars_held=p.bars_held, entry_beta=p.entry_beta,
-                      adopted=p.adopted, ord_lots=close_ord)
+                      adopted=p.adopted, ord_lots=close_ord, position_before=position_before,
+                      execution_id=str(uuid.uuid4()))
         self.trades.append(tr)
         self.position = None
         return tr

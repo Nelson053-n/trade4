@@ -37,6 +37,9 @@ class St8Position:
     #                                    акции); 0 = lot_size движка. Хранится В ПОЗИЦИИ:
     #                                    мутация engine.lot_size ломала следующий вход акцией
     stuck_ticks: int = 0               # счётчик тиков «частичный остаток висит» (эскалация алерта)
+    stock_entry_fee: float | None = None
+    hedge_entry_fee: float | None = None
+    accounting_complete: bool = False
 
 
 @dataclass
@@ -57,6 +60,8 @@ class St8Trade:
     div_yield_pct: float = 0.0
     side: str = "long"
     instrument: str = ""               # чем исполнено (фьючерс или акция)
+    hedge_lots: int = 0
+    accounting_complete: bool = False
 
 
 class St8Engine:
@@ -200,7 +205,8 @@ class St8Engine:
     def open(self, day: str, ev: DivEvent, stock_px: float,
              hedge_px: float, hedge_lots: int, side: str = "long",
              instrument: str = "", unit_value: float | None = None,
-             lots: int | None = None) -> None:
+             lots: int | None = None, stock_fee: float | None = None,
+             hedge_fee: float | None = None, accounting_complete: bool = False) -> None:
         """unit_value — ₽ за пункт×лот (пункт-стоимость фьючерса или лотность акции),
         хранится в позиции (lot_size движка НЕ мутируем). lots — фактически налитые лоты
         (комиссия входа считается от них, не от quantity_lots)."""
@@ -208,32 +214,65 @@ class St8Engine:
         lots = lots or s.quantity_lots
         unit = float(unit_value or self.lot_size)
         notional = stock_px * lots * unit
-        fee = self._fee(notional)
-        if hedge_lots > 0:
-            fee += self._fee(hedge_px * hedge_lots * self.pv_hedge)
+        stock_fee = self._fee(notional) if stock_fee is None else stock_fee
+        hedge_fee = (self._fee(hedge_px * hedge_lots * self.pv_hedge)
+                     if hedge_fee is None else hedge_fee)
+        fee = stock_fee + hedge_fee
         self.position = St8Position(
             ticker=self.ticker, entry_date=day, ex_date=ev.ex_date, lots=lots,
             stock_entry=stock_px, hedge_lots=hedge_lots, hedge_entry=hedge_px,
             fees_rub=fee, div_yield_pct=ev.div_yield_pct, side=side, instrument=instrument,
-            unit_value=unit)
+            unit_value=unit, stock_entry_fee=stock_fee, hedge_entry_fee=hedge_fee,
+            accounting_complete=accounting_complete)
 
     def close(self, day: str, stock_px: float, hedge_px: float, reason: str) -> St8Trade:
+        return self.close_partial(day, stock_px, hedge_px, self.position.lots,
+                                  self.position.hedge_lots, reason)
+
+    def close_partial(self, day: str, stock_px: float, hedge_px: float,
+                      stock_closed: int, hedge_closed: int, reason: str,
+                      exit_fee: float | None = None,
+                      accounting_complete: bool = False) -> St8Trade:
+        """Фиксируем исполненные части обеих ног, сохраняя стоимость остатка."""
         p = self.position
-        stock_pnl, hedge_pnl, _ = self._pnl(stock_px, hedge_px)
-        # комиссия выхода: обе ноги
-        exit_fee = self._fee(stock_px * p.lots * self._unit())
-        if p.hedge_lots > 0:
-            exit_fee += self._fee(hedge_px * p.hedge_lots * self.pv_hedge)
-        fees = p.fees_rub + exit_fee
+        if not (0 <= stock_closed <= p.lots and 0 <= hedge_closed <= p.hedge_lots):
+            raise ValueError("закрытый объём превышает остаток позиции")
+        if stock_closed + hedge_closed == 0:
+            raise ValueError("нет исполнений для записи сделки")
+        unit = self._unit()
+        direction = 1 if p.side == "long" else -1
+        stock_pnl = (stock_px - p.stock_entry) * direction * stock_closed * unit
+        hedge_pnl = -(hedge_px - p.hedge_entry) * hedge_closed * self.pv_hedge
+        # Старые позиции содержат лишь общую модельную комиссию входа.
+        if p.stock_entry_fee is None or p.hedge_entry_fee is None:
+            sn = abs(p.stock_entry * p.lots * unit)
+            hn = abs(p.hedge_entry * p.hedge_lots * self.pv_hedge)
+            p.stock_entry_fee = p.fees_rub * sn / (sn + hn) if sn + hn else 0.0
+            p.hedge_entry_fee = p.fees_rub - p.stock_entry_fee
+        sf = p.stock_entry_fee * stock_closed / p.lots if p.lots else 0.0
+        hf = p.hedge_entry_fee * hedge_closed / p.hedge_lots if p.hedge_lots else 0.0
+        entry_fee = sf + hf
+        if exit_fee is None:
+            exit_fee = (self._fee(stock_px * stock_closed * unit)
+                        + self._fee(hedge_px * hedge_closed * self.pv_hedge))
+        fees = entry_fee + exit_fee
         net = stock_pnl + hedge_pnl - fees
         # дни удержания = позиция в календаре; простая разница индексов недоступна тут → 0-заглушка
-        tr = St8Trade(ticker=self.ticker, entry_date=p.entry_date, exit_date=day, lots=p.lots,
+        tr = St8Trade(ticker=self.ticker, entry_date=p.entry_date, exit_date=day, lots=stock_closed,
                       stock_pnl_rub=round(stock_pnl, 2), hedge_pnl_rub=round(hedge_pnl, 2),
                       fees_rub=round(fees, 2), net_pnl_rub=round(net, 2), reason=reason,
-                      entry_fees_rub=round(p.fees_rub, 2),
-                      div_yield_pct=p.div_yield_pct, side=p.side, instrument=p.instrument)
+                      entry_fees_rub=round(entry_fee, 2),
+                      div_yield_pct=p.div_yield_pct, side=p.side, instrument=p.instrument,
+                      hedge_lots=hedge_closed,
+                      accounting_complete=p.accounting_complete and accounting_complete)
         self.trades.append(tr)
-        self.position = None
+        p.lots -= stock_closed
+        p.hedge_lots -= hedge_closed
+        p.stock_entry_fee -= sf
+        p.hedge_entry_fee -= hf
+        p.fees_rub = p.stock_entry_fee + p.hedge_entry_fee
+        if p.lots == 0 and p.hedge_lots == 0:
+            self.position = None
         return tr
 
     def unrealized_rub(self, stock_px: float, hedge_px: float) -> float:

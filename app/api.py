@@ -254,37 +254,48 @@ def _daily_ledger_recon(day: str, MSK):
                     "entry_fees_rub": t.get("entry_fees_rub", 0)} for t in ST8.trades]
     _st9_trades = [{"_exit_day": _day_of(t.get("exit_ts")),
                     "_entry_day": _day_of(t.get("entry_ts")),
-                    "fees_rub": t.get("fees_rub", 0),
-                    "entry_fees_rub": t.get("entry_fees_rub", 0)} for t in ST9.trades]
+                    "fees_rub": (t["actual_fees_rub"] if t.get("actual_fees_rub") is not None
+                                 else t.get("fees_rub", 0)),
+                    "entry_fees_rub": (t["actual_entry_fees_rub"] if t.get("actual_entry_fees_rub") is not None
+                                       else t.get("entry_fees_rub", 0))} for t in ST9.trades]
     # ОТКРЫТЫЕ позиции: их вход счёт уже списал, а сделки в журнале ещё нет
     _open8 = sum(p.fees_rub for e in ST8.engines.values()
                  if (p := e.position) is not None and p.entry_date == day)
-    _open9 = sum(p.fees_rub for e in ST9.engines.values()
+    _open9 = sum((ST9._entry_fill_fee[sec] if ST9._entry_fill_fee.get(sec) is not None else p.fees_rub)
+                 for sec, e in ST9.engines.items()
                  if (p := e.position) is not None and _day_of(p.entry_ts) == day)
-    # Только действующие движки: st4-st7 остановлены, сверка по ним давала пустые строки
+    # ST5 включаем и после остановки: исторический день должен оставаться проверяемым.
+    _st5_trades = [{"_exit_day": _day_of(t.get("exit_ts")),
+                    "_entry_day": _day_of(t.get("entry_ts")),
+                    "fees_rub": t.get("fees_rub", 0),
+                    "entry_fees_rub": t.get("entry_fees_rub", 0)} for t in ST5.trades]
+    _open5 = sum(p.fees_rub for e in ST5.engines.values()
+                 if (p := e.position) is not None and _day_of(p.entry_ts) == day)
     engines = [
+        ("ST5", ST5.cfg.connector.account_id, ST5.cfg.connector.mode, _st5_trades, _open5),
         ("ST8", ST8.cfg.account_id, ST8.cfg.mode, _st8_trades, _open8),
         ("ST9", ST9.cfg.account_id, ST9.cfg.mode, _st9_trades, _open9),
     ]
     for name, acc, mode, trades, open_fee in engines:
-        if mode != "tbank_sandbox" or not acc:
+        if mode not in ("tbank_sandbox", "tbank_real") or not acc:
             out.append((f"{name}: paper (сверка не требуется)", None, 0.0))
             continue
         jfee = _journal_fee(trades, open_fee)
         jn = sum(1 for t in (trades or []) if t.get("_exit_day") == day)
         try:
-            # ВАЖНО: 'day' — МСК-дата, а API работает в UTC. Ранним утром МСК (00:00-03:00
-            # UTC ещё вчера) 'from={day}T00:00Z' оказывается В БУДУЩЕМ по UTC → 30070.
-            # Берём 'from' на сутки раньше в UTC, 'to' = текущий момент UTC (не будущее),
-            # оба с миллисекундами (.000 иначе HTTP 400). Фильтруем по МСК-дню на нашей стороне.
+            # Диапазон строим от запрошенного МСК-дня, включая исторические сверки.
             _now_utc = _dtm.datetime.now(_dtm.timezone.utc)
-            _frm = (_now_utc - _dtm.timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-            _to = _now_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-            ops = _sb._call("tinkoff.public.invest.api.contract.v1.SandboxService",
-                            "GetSandboxOperations",
-                            {"accountId": acc, "from": _frm,
-                             "to": _to, "state": "OPERATION_STATE_EXECUTED"},
-                            token=_sb._account_token(acc)).get("operations", [])
+            _start = _dtm.datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=MSK)
+            _end = min(_start + _dtm.timedelta(days=1), _now_utc)
+            if _start >= _end:
+                raise ValueError("день сверки ещё не наступил")
+            _frm = _start.astimezone(_dtm.timezone.utc).isoformat()
+            _to = _end.astimezone(_dtm.timezone.utc).isoformat()
+            if mode == "tbank_real":
+                from .st4 import tbank_live as _live
+                ops = _live.operations(acc, _frm, _to)
+            else:
+                ops = _sb.operations(acc, _frm, _to)
             # операции этого МСК-дня: date в UTC → конвертируем в МСК и сверяем
             def _msk_day(o):
                 try:
@@ -755,7 +766,8 @@ def st5_flat_all(payload: dict):
             tr = eng._close(int(__import__("time").time() * 1000), eng.last_z or 0.0,
                             eng.last_spread, ord_px, pref_px, "flat_all")
             ST5._on_engine_trade(pid, eng, tr, ord_px, pref_px)
-            closed.append(pid)
+            if eng.position is None:
+                closed.append(pid)
     ST5.save_session()
     return {"ok": True, "closed": closed}
 

@@ -120,11 +120,10 @@ def cancel_order(account_id: str, order_id: str) -> dict:
 
 # ---------------------------------------------------------------- история операций (read)
 def operations(account_id: str, frm_iso: str, to_iso: str) -> list[dict]:
-    """История операций по счёту за период (OperationsService.GetOperations).
-    frm_iso/to_iso — UTC ISO8601 ('...Z'). Возвращает список операций."""
-    r = _call(_OPERATIONS, "GetOperations",
-              {"accountId": account_id, "from": frm_iso, "to": to_iso})
-    return r.get("operations", [])
+    """Полная история исполненных операций по счёту, включая все страницы."""
+    from .broker_accounting import all_operations
+    return all_operations(_call, _OPERATIONS, "GetOperationsByCursor",
+                          account_id, frm_iso, to_iso)
 
 
 def last_entry_ts_for(account_id: str, instrument_uid: str, days: int = 7) -> int | None:

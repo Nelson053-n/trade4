@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -211,7 +212,7 @@ class St5Portfolio:
         if p is None:
             return 0.0
         m_ord, m_pref = cls.pair_leg_margins(pid)
-        ord_lots = p.ord_lots if p.ord_lots > 0 else p.lots   # legacy: равные ноги
+        ord_lots = eng._pos_ord_lots()
         return m_ord * ord_lots + m_pref * p.lots
 
     def on_trade(self, net_pnl_rub: float, ts_ms: int | None = None) -> None:
@@ -270,6 +271,8 @@ class St5Session:
         self.trades: list[dict] = []             # общий журнал портфеля (json-записи)
         self.history: dict[str, list] = {pid: [] for pid in ST5_PAIRS}   # история спреда по парам
         self.events: list[dict] = []
+        self.execution_orders: dict[str, dict] = {}
+        self.pending_executions: dict[str, dict] = {}
         self.state = {"live": False, "live_intent": False, "session_started": None,
                       "paused_by_user": False, "data_source": "synthetic",
                       "sandbox_active": False, "real_trading_armed": False}
@@ -432,7 +435,7 @@ class St5Session:
                 positions.append({
                     "pair": pid, "label": ST5_PAIRS[pid][3], "state": p.state.value,
                     "entry_z": round(p.entry_z, 2), "lots": p.lots, "entry_lots": p.entry_lots,
-                    "ord_lots": p.ord_lots or p.lots,   # β-ноги: лоты обычки ≠ лотам префа
+                    "ord_lots": eng._pos_ord_lots(),
                     "bars_held": p.bars_held, "partial_done": p.partial_done,
                     "unrealized_rub": round(eng.unrealized_rub(), 0),
                     "cur_z": round(eng.last_z, 2) if eng.last_z is not None else None})
@@ -461,8 +464,12 @@ class St5Session:
             "capital_rub": round(self.portfolio.capital_rub, 0),
             # сверка «журнал vs счёт»: сколько реально стоило исполнение с момента якоря
             "execution_gap_rub": self._execution_gap(),
+            "pending_executions": self.pending_executions,
             "day_pnl_rub": round(self.portfolio.day_pnl_rub, 0),
             "net_pnl_rub": round(net, 0),
+            "actual_net_pnl_rub": (round(net, 2)
+                                   if all(t.get("accounting_complete") for t in self.trades) else None),
+            "unverified_trades": sum(not t.get("accounting_complete") for t in self.trades),
             "halted": self.portfolio.halted, "halt_reason": self.portfolio.halt_reason,
             "trading_enabled": self.cfg.risk.trading_enabled,
             "quantity_lots": self.cfg.execution.quantity_lots,
@@ -483,7 +490,7 @@ class St5Session:
         }
 
     # ---------- персистентность ----------
-    def save_session(self) -> None:
+    def save_session(self) -> bool:
         try:
             data = {
                 "session_started": self.state["session_started"],
@@ -521,10 +528,15 @@ class St5Session:
                               for pid, eng in self.engines.items()},
                 "missed": self.missed[-self.MISSED_LEN:],   # журнал упущенных входов
                 "exec_anchor": self.exec_anchor,            # якорь сверки журнал↔счёт
+                "execution_orders": self.execution_orders,
+                "pending_executions": self.pending_executions,
             }
-            self._session_file.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+            tmp = self._session_file.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+            os.replace(tmp, self._session_file)
+            return True
         except Exception:  # noqa: BLE001
-            pass
+            return False
 
     # ---------- боевой контур: взвод реальной торговли ----------
     def arm_real(self, armed: bool) -> None:
@@ -543,6 +555,9 @@ class St5Session:
 
     def _audit(self, entry: dict) -> None:
         """Аудит-лог каждого реального/sandbox ордера (неизменяемый журнал для разбора)."""
+        if entry.get("order_id"):
+            self.execution_orders[entry["order_id"]] = entry
+            self.save_session()
         self.events.append({"ts": entry["ts"], "kind": "order",
                             "message": f"{entry['op']} {entry['direction']} {entry['lots']}лот "
                                        f"{entry['uid'][:8]} → {entry.get('status')}",
@@ -595,6 +610,8 @@ class St5Session:
         except Exception:  # noqa: BLE001
             return False
         self.trades = data.get("trades", [])
+        self.execution_orders = data.get("execution_orders", {})
+        self.pending_executions = data.get("pending_executions", {})
         self.missed = list(data.get("missed") or [])
         self.exec_anchor = data.get("exec_anchor") or None
         self.history = data.get("history", {pid: [] for pid in ST5_PAIRS})
@@ -671,6 +688,10 @@ class St5Session:
                     self.engines[pid].position = self._position_from_json(pdict)
                 except Exception:  # noqa: BLE001  битая запись не должна ронять старт
                     pass
+        for pid, pending in self.pending_executions.items():
+            if pid in self.engines and pending.get("position_before"):
+                self.engines[pid].position = self._position_from_json(pending["position_before"])
+                self.portfolio.halt_pair(pid, "неизвестен результат выхода — нужен разбор ордеров")
         return True
 
     @staticmethod
@@ -754,7 +775,7 @@ class St5Session:
         p = eng.position
         if p is None:
             return False
-        ord_l = p.ord_lots if p.ord_lots > 0 else p.lots   # legacy: равные ноги
+        ord_l = eng._pos_ord_lots()
         want_pref = p.lots if p.state == St5State.LONG_SPREAD else -p.lots
         want_ord = -ord_l if p.state == St5State.LONG_SPREAD else ord_l
         return bal_pref == want_pref and bal_ord == want_ord
@@ -788,6 +809,9 @@ class St5Session:
         позиция → усыновляем (`_adopt_position_from_account`). Непарные/несовпавшие ноги →
         логируем для ручного разбора (вслепую закрывать боевой счёт не закрываем).
         Сверка не должна ронять live — все ошибки глотаем в лог."""
+        if pid in self.pending_executions:
+            self.log_event("warn", f"{pid}: неопределённый результат ордера — нужен разбор исполнений")
+            return
         try:
             # uid серий обязательны для broker_lots (иначе резолв по asset-коду промахивается)
             self._ensure_uid_cache(pid)
@@ -856,7 +880,7 @@ class St5Session:
             self._reconcile_sig[pid] = sig
             if p is not None and not self._position_matches_lots(eng, bal_ord, bal_pref):
                 msg = (f"reconcile {pid}: ноги разошлись — движок {p.state.value} "
-                       f"преф {p.lots}/обычка {p.ord_lots or p.lots}, счёт ord={bal_ord} "
+                       f"преф {p.lots}/обычка {eng._pos_ord_lots()}, счёт ord={bal_ord} "
                        f"pref={bal_pref} (чужой движок на общем счёте или недолив) — наблюдаю")
                 self.log_event("warn", msg)
                 if self.cfg.notify.notify_reconcile:
@@ -1019,6 +1043,8 @@ class St5Session:
 
         Источник: в sandbox/real — T-Bank real-time (без лага/обрывов ISS); paper — MOEX ISS.
         """
+        if pid in self.pending_executions:
+            return  # сетевой обрыв не разрешает повторять потенциально исполненный выход
         from .service import ST5_PAIRS as _P
         ao, ap = _P[pid][0], _P[pid][1]
         from ..st4.config import St4Config as _C4
@@ -1159,6 +1185,17 @@ class St5Session:
             try:
                 long_spread = (p.state == St5State.LONG_SPREAD)
                 ex.open_pair(long_spread, ord_lots, p.lots, ord_px, pref_px)
+                execution = getattr(ex, "last_execution", {})
+                ordinary, preferred = execution.get("ord", {}), execution.get("pref", {})
+                p.ord_entry = ordinary.get("price") or p.ord_entry
+                p.pref_entry = preferred.get("price") or p.pref_entry
+                p.ord_entry_fee = ordinary.get("fee")
+                p.pref_entry_fee = preferred.get("fee")
+                p.accounting_complete = all(f.get("price") is not None and f.get("fee") is not None
+                                            for f in (ordinary, preferred))
+                p.broker_accounting = True
+                if p.accounting_complete:
+                    p.fees_rub = p.ord_entry_fee + p.pref_entry_fee
                 self.portfolio.on_success()
             except Exception as e:  # noqa: BLE001
                 self.log_missed(pid, p.entry_ts, f"|z|={abs(p.entry_z):.2f}, гейты пройдены",
@@ -1182,27 +1219,109 @@ class St5Session:
 
     def _on_engine_trade(self, pid: str, eng, tr, ord_px: float, pref_px: float) -> None:
         """Движок закрыл (полностью/частично). В брокере — реальный закрывающий ордер."""
+        if tr.execution_id and any(t.get("execution_id") == tr.execution_id for t in self.trades):
+            return
+        if pid in self.pending_executions:
+            if tr.position_before:
+                eng.position = St5Position(**tr.position_before)
+            if eng.trades and eng.trades[-1] is tr:
+                eng.trades.pop()
+            return
         ex = self._make_executor(pid)
+        accounting_complete = False
+        entry_fees = None
+        model_net = tr.net_pnl_rub
         if ex is not None:
+            before = St5Position(**tr.position_before) if tr.position_before else None
+            if before is None:
+                raise ValueError("нет снимка позиции перед брокерским выходом")
+            # Снимок до HTTP-запроса позволяет не повторить выход после обрыва/рестарта.
+            self.pending_executions[pid] = {"account_id": self.cfg.connector.account_id,
+                "position_before": tr.position_before, "exit_ts": tr.exit_ts,
+                "requested_ord": tr.ord_lots, "requested_pref": tr.lots,
+                "execution_id": tr.execution_id}
+            if self.save_session() is False:
+                eng.position = before
+                if eng.trades and eng.trades[-1] is tr:
+                    eng.trades.pop()
+                self.portfolio.halt_pair(pid, "не удалось сохранить состояние перед выходом")
+                return
             try:
                 long_spread = (tr.state == St5State.LONG_SPREAD)
                 op = "take50" if tr.reason == "take_partial" else "flat"
-                ord_lots = tr.ord_lots if tr.ord_lots > 0 else tr.lots
-                ex.close_pair(long_spread, ord_lots, tr.lots, ord_px, pref_px, op=op)
+                ex.close_pair(long_spread, tr.ord_lots, tr.lots, ord_px, pref_px, op=op)
                 self.portfolio.on_success()
             except Exception as e:  # noqa: BLE001
                 self.portfolio.on_error()
                 self.portfolio.halt_pair(pid, f"выход не исполнен: {e}")
                 self.log_event("warn", f"{pid}: выход в брокере не удался: {e}")
                 if self.cfg.notify.notify_errors:
-                    from .service import ST5_PAIRS as _P
-                    self._notify(f"⚠️ <b>Выход не исполнен</b> · {tg.esc(_P[pid][3])}\n{tg.esc(e)}")
+                    self._notify(f"⚠️ <b>Выход не исполнен</b> · {tg.esc(ST5_PAIRS[pid][3])}\n{tg.esc(e)}")
+            execution = getattr(ex, "last_execution", {})
+            self.pending_executions[pid]["execution"] = execution
+            ordinary, preferred = execution.get("ord", {}), execution.get("pref", {})
+            eng.position = before
+            if eng.trades and eng.trades[-1] is tr:
+                eng.trades.pop()
+            if ordinary.get("lots") is None or preferred.get("lots") is None:
+                # Неизвестный филл нельзя считать нулём и повторно закрывать тем же объёмом.
+                self.portfolio.halt_pair(pid, "неизвестен результат выхода — нужен разбор ордеров")
+                self.save_session()
+                return
+            got_ord, got_pref = ordinary["lots"], preferred["lots"]
+            ord_before = before.ord_lots if before.broker_accounting or before.ord_lots else before.lots
+            if not (0 <= got_ord <= tr.ord_lots and 0 <= got_pref <= tr.lots):
+                self.save_session()
+                raise ValueError("брокер вернул объём больше запрошенного")
+            self.pending_executions.pop(pid)
+            if got_ord + got_pref == 0:
+                self.save_session()
+                return
+            ord_exit = ordinary.get("price") or ord_px
+            pref_exit = preferred.get("price") or pref_px
+            direction = 1 if tr.state == St5State.LONG_SPREAD else -1
+            tr.gross_pnl_rub = direction * ((pref_exit - before.pref_entry) * got_pref
+                                           - (ord_exit - before.ord_entry) * got_ord)
+            of = (before.ord_entry_fee if before.ord_entry_fee is not None else
+                  eng._legs_fee(ord_before, 0, before.ord_entry, before.pref_entry))
+            pf = (before.pref_entry_fee if before.pref_entry_fee is not None else
+                  eng._legs_fee(0, before.lots, before.ord_entry, before.pref_entry))
+            entry_ord_fee = of * got_ord / ord_before if ord_before else 0.0
+            entry_pref_fee = pf * got_pref / before.lots if before.lots else 0.0
+            exit_fee = sum((f.get("fee") if f.get("fee") is not None else
+                            eng._legs_fee(qty if leg == "ord" else 0,
+                                          qty if leg == "pref" else 0, ord_exit, pref_exit))
+                           for leg, qty, f in (("ord", got_ord, ordinary),
+                                               ("pref", got_pref, preferred)))
+            tr.fees_rub = entry_ord_fee + entry_pref_fee + exit_fee
+            entry_fees = entry_ord_fee + entry_pref_fee
+            tr.net_pnl_rub = tr.gross_pnl_rub - tr.fees_rub
+            accounting_complete = before.accounting_complete and all(
+                not qty or (f.get("price") is not None and f.get("fee") is not None)
+                for qty, f in ((got_ord, ordinary), (got_pref, preferred)))
+            tr.ord_lots, tr.lots = got_ord, got_pref
+            before.ord_lots = ord_before - got_ord
+            before.lots -= got_pref
+            before.broker_accounting = True
+            before.ord_entry_fee = of - entry_ord_fee
+            before.pref_entry_fee = pf - entry_pref_fee
+            before.fees_rub = before.ord_entry_fee + before.pref_entry_fee
+            before.partial_done = True
+            before.realized_rub += tr.net_pnl_rub
+            if before.ord_lots == 0 and before.lots == 0:
+                eng.position = None
+            else:
+                before.units = 1
+                before.unit_ord, before.unit_pref = before.ord_lots, before.lots
+            eng.trades.append(tr)
         self.portfolio.on_trade(tr.net_pnl_rub, tr.exit_ts)
         rec = {"pair": pid, "state": tr.state.value, "entry_ts": tr.entry_ts, "exit_ts": tr.exit_ts,
                "entry_z": tr.entry_z, "exit_z": tr.exit_z, "lots": tr.lots, "ord_lots": tr.ord_lots,
                "gross_pnl_rub": tr.gross_pnl_rub, "fees_rub": tr.fees_rub,
                "net_pnl_rub": tr.net_pnl_rub, "reason": tr.reason, "bars_held": tr.bars_held,
-               "adopted": tr.adopted}
+               "adopted": tr.adopted, "accounting_complete": accounting_complete,
+               "model_net_pnl_rub": model_net, "entry_fees_rub": entry_fees,
+               "execution_id": tr.execution_id}
         self.trades.append(rec)
         self.log_event("exit", f"{pid}: {tr.reason} net {tr.net_pnl_rub:+.0f}₽ ({tr.lots}лот)")
         if self.cfg.notify.notify_exit:

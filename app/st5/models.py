@@ -42,6 +42,10 @@ class St5Position:
     units: int = 0                   # текущие юниты (частичная фиксация закрывает юниты целиком)
     unit_ord: int = 1                # лотов обычки в юните
     unit_pref: int = 1               # лотов префа в юните
+    broker_accounting: bool = False  # ord_lots=0 здесь означает реальный нулевой остаток
+    ord_entry_fee: float | None = None
+    pref_entry_fee: float | None = None
+    accounting_complete: bool = False
 
     def notional(self) -> float:
         """Грубый нотионал позиции в пунктах (для %-лимитов): |pref| + |β·ord|."""
@@ -68,6 +72,8 @@ class St5Trade:
     entry_beta: float = 1.0
     adopted: bool = False            # сделка из усыновлённой позиции → entry-метрики искажены
     ord_lots: int = 0                # закрытые лоты обычки (β-ноги); 0 → legacy равные ноги
+    position_before: dict | None = None
+    execution_id: str = ""
 
 
 @dataclass

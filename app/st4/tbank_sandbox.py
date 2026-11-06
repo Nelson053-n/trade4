@@ -409,6 +409,13 @@ def close_account(account_id: str) -> None:
           token=_account_token(account_id))
 
 
+def operations(account_id: str, frm_iso: str, to_iso: str) -> list[dict]:
+    """Полная история исполненных операций песочницы с токеном именно этого счёта."""
+    from .broker_accounting import all_operations
+    return all_operations(_call, _SANDBOX, "GetSandboxOperationsByCursor",
+                          account_id, frm_iso, to_iso, token=_account_token(account_id))
+
+
 def last_entry_ts_for(account_id: str, instrument_uid: str, days: int = 7) -> int | None:
     """История операций sandbox через REST недоступна (GetOperations→401, GetSandboxOperations
     →404). Возвращаем None → caller делает fallback на last_live_ts (время последнего бара)."""

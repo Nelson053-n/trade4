@@ -23,6 +23,7 @@ import uuid
 
 from ..st4 import tbank_sandbox as _sb
 from ..st4 import tbank_live as _live
+from ..st4.broker_accounting import order_fill
 
 
 class St8ExecError(Exception):
@@ -41,6 +42,7 @@ class St8Executor:
         self._seq = 0                      # счётчик для идемпотентных боевых order_id
         self._share_cache: dict[str, dict] = {}
         self._hedge_uid: str | None = None
+        self._fills: list[dict] = []
 
     # ---------- резолв инструментов ----------
     def _share(self, ticker: str) -> dict:
@@ -64,7 +66,9 @@ class St8Executor:
         if self.paper:
             return "paper_IMOEXF"
         if self._hedge_uid is None:
-            self._hedge_uid = _sb.find_future("IMOEXF")["uid"]
+            instrument = _sb.find_future("IMOEXF")
+            self._share_cache["IMOEXF"] = instrument
+            self._hedge_uid = instrument["uid"]
         return self._hedge_uid
 
     def share_lot(self, ticker: str) -> int:
@@ -82,7 +86,8 @@ class St8Executor:
                      "status": "paper_fill", "executed_lots": lots}
             if self.audit_cb:
                 self.audit_cb(audit)
-            return {"executionReportStatus": "FILL", "lotsExecuted": lots, "paper": True}
+            return {"executionReportStatus": "FILL", "lotsExecuted": lots, "paper": True,
+                    "fill": {"lots": lots, "price": ref_px, "fee": None}}
         if self.real:
             # гейт реальной торговли — на КАЖДЫЙ ордер (вход/выход/unwind/хедж)
             if self.armed_cb is None or not self.armed_cb():
@@ -111,6 +116,7 @@ class St8Executor:
             resp = api.post_order(self.account_id, uid, lots, full_dir, oid)
             audit["status"] = "ok"
             audit["executed_lots"] = resp.get("lotsExecuted") or resp.get("executedLots")
+            audit["response"] = resp
         except Exception as e:  # noqa: BLE001
             audit["status"] = "error"
             audit["error"] = str(e)
@@ -119,6 +125,15 @@ class St8Executor:
             raise
         if self.audit_cb:
             self.audit_cb(audit)
+        unit = 1.0
+        # У акции ответ содержит цену одной акции, у фьючерса — рубли за контракт.
+        for instrument in self._share_cache.values():
+            if instrument.get("uid") == uid and "basicAssetSize" in instrument:
+                step = _sb._q_to_float(instrument.get("minPriceIncrement"))
+                tick = _sb._q_to_float(instrument.get("minPriceIncrementAmount"))
+                unit = tick / step if step and tick else _sb._q_to_float(instrument.get("basicAssetSize"))
+                break
+        resp["fill"] = order_fill(resp, unit)
         return resp
 
     @staticmethod
@@ -139,13 +154,27 @@ class St8Executor:
         Возвращает ФАКТИЧЕСКИ закрытые лоты: частичное закрытие (break в середине) не должно
         выдаваться движку за полное — иначе остаток висит на счёте голой ногой (движок flat)."""
         closed = 0
+        self._fills = []
         for _ in range(lots):
             try:
                 r = self._order(uid, 1, direction, op, ref_px)
-                closed += self._filled(r, 1)
+                got = self._filled(r, 1)
+                closed += got
+                if got:
+                    fill = dict(r.get("fill", {"price": None, "fee": None}))
+                    fill["lots"] = got
+                    self._fills.append(fill)
             except Exception:  # noqa: BLE001
                 break
         return closed
+
+    def _close_fill(self) -> dict:
+        lots = sum(f["lots"] for f in self._fills)
+        return {"lots": lots,
+                "price": (sum(f["price"] * f["lots"] for f in self._fills) / lots
+                          if lots and all(f.get("price") is not None for f in self._fills) else None),
+                "fee": (sum(f["fee"] for f in self._fills)
+                        if all(f.get("fee") is not None for f in self._fills) else None)}
 
     # ---------- вход: акция long + хедж-шорт IMOEXF ----------
     def open(self, ticker: str, stock_lots: int, stock_px: float,
@@ -164,16 +193,19 @@ class St8Executor:
                 hedge_lots = max(1, round(hedge_lots * got_stock / stock_lots))
             stock_lots = got_stock
         hedge_filled = 0
+        hedge_fill = {"lots": 0, "price": None, "fee": 0.0}
         if hedge_lots > 0:
             h_uid = self._hedge()
             try:
                 rh = self._order(h_uid, hedge_lots, "SELL", "entry_hedge", hedge_px)
                 hedge_filled = self._filled(rh, hedge_lots)
+                hedge_fill = rh.get("fill", {})
             except Exception as e:  # noqa: BLE001
                 # ХЕДЖ НЕ ВСТАЛ → откат акции (иначе голая бета — против сути стратегии)
                 self._close_small(s_uid, got_stock, "SELL", "unwind", stock_px)
                 raise St8ExecError(f"{ticker}: хедж не исполнен → акция откачена: {str(e)[:80]}")
-        return {"ok": True, "stock_filled": stock_lots, "hedge_filled": hedge_filled}
+        return {"ok": True, "stock_filled": stock_lots, "hedge_filled": hedge_filled,
+                "stock_fill": r.get("fill", {}), "hedge_fill": hedge_fill}
 
     # ---------- шорт-нога: продать без покрытия / выкупить ----------
     def open_short(self, ticker: str, stock_lots: int, stock_px: float,
@@ -185,14 +217,16 @@ class St8Executor:
         got = self._filled(r, stock_lots)
         if got == 0:
             raise St8ExecError(f"{ticker}: шорт не налился (0 лотов)")
-        return {"ok": True, "stock_filled": got}
+        return {"ok": True, "stock_filled": got, "stock_fill": r.get("fill", {}),
+                "hedge_fill": {"lots": 0, "fee": 0.0}}
 
     def close_short(self, ticker: str, stock_lots: int, stock_px: float,
                     fut_secid: str | None = None) -> dict:
         """Выкуп шорта: BUY мелкими ордерами (ёмкость)."""
         s_uid = self._instr_uid(ticker, fut_secid)
         closed = self._close_small(s_uid, stock_lots, "BUY", "short_exit", stock_px)
-        return {"ok": closed >= stock_lots, "stock_closed": closed}
+        return {"ok": closed >= stock_lots, "stock_closed": closed,
+                "stock_fill": self._close_fill(), "hedge_fill": {"lots": 0, "fee": 0.0}}
 
     # ---------- выход: продать акцию + откупить хедж ----------
     def close(self, ticker: str, stock_lots: int, stock_px: float,
@@ -201,9 +235,12 @@ class St8Executor:
         обе ноги закрываем независимо, ошибки логируются (выход не гейтить)."""
         s_uid = self._instr_uid(ticker, fut_secid)
         stock_closed = self._close_small(s_uid, stock_lots, "SELL", "exit", stock_px)
+        stock_fill = self._close_fill()
         hedge_closed = 0
         if hedge_lots > 0:
             h_uid = self._hedge()
             hedge_closed = self._close_small(h_uid, hedge_lots, "BUY", "exit_hedge", hedge_px)
+        hedge_fill = self._close_fill() if hedge_lots else {"lots": 0, "fee": 0.0}
         return {"ok": stock_closed >= stock_lots and hedge_closed >= hedge_lots,
-                "stock_closed": stock_closed, "hedge_closed": hedge_closed}
+                "stock_closed": stock_closed, "hedge_closed": hedge_closed,
+                "stock_fill": stock_fill, "hedge_fill": hedge_fill}
