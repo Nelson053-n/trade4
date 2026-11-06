@@ -917,3 +917,22 @@ def test_broad_universe_registered_but_disabled_by_default(tmp_path, monkeypatch
     s = svc.St8Session()
     assert not any(s.enabled[tk] for tk in svc.ST8_BROAD)
     assert all(s.enabled[tk] for tk in svc.ST8_EXTENDED)
+
+
+def test_calendar_uses_per_ticker_window_overrides(monkeypatch):
+    """Календарь показывает окно тикера с учётом per-ticker оверрайда (как торгует движок)."""
+    from app.st8 import service as svc
+    s = svc.St8Session()
+    days = [f"2026-11-{d:02d}" for d in range(2, 28)] + [f"2026-12-{d:02d}" for d in range(1, 31)]
+    s._trading_days = days
+    s.enabled = {tk: tk in ("PHOR", "LKOH") for tk in svc.ST8_TICKERS}
+    ev = {"PHOR": [("2026-12-11", 309.0, 5.9)], "LKOH": [("2026-12-08", 535.0, 8.8)]}
+    monkeypatch.setattr(s, "_fetch_divs", lambda tk: ev.get(tk, []))
+    s.ticker_overrides = {"PHOR": {"entry_days_before": 15, "exit_offset_days": 1}}
+    rows = {r["ticker"]: r for r in s.build_calendar(days_ahead=400, days_back=400)}
+    i = days.index("2026-12-11")
+    assert rows["PHOR"]["entry_date"] == days[i - 15] and rows["PHOR"]["exit_date"] == days[i - 1]
+    j = days.index("2026-12-08")
+    st = s.cfg.strategy
+    assert rows["LKOH"]["entry_date"] == days[j - st.entry_days_before]
+    assert rows["LKOH"]["exit_date"] == days[j - st.exit_offset_days]

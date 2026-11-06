@@ -952,10 +952,13 @@ class St8Session:
                 entry_d = exit_d = short_exit_d = None
                 if ex in self._trading_days:
                     ex_i = self._trading_days.index(ex)
-                    if ex_i - s.entry_days_before >= 0:
-                        entry_d = self._trading_days[ex_i - s.entry_days_before]
-                    if ex_i - s.exit_offset_days >= 0:
-                        exit_d = self._trading_days[ex_i - s.exit_offset_days]
+                    # per-ticker оверрайды окна (как у движка тикера) — иначе календарь
+                    # показывал глобальные −10/−2, а движок торговал по оверрайду
+                    n_in, n_out = self._p(tk, "entry_days_before"), self._p(tk, "exit_offset_days")
+                    if ex_i - n_in >= 0:
+                        entry_d = self._trading_days[ex_i - n_in]
+                    if ex_i - n_out >= 0:
+                        exit_d = self._trading_days[ex_i - n_out]
                     if ex_i + s.short_hold_days < len(self._trading_days):
                         short_exit_d = self._trading_days[ex_i + s.short_hold_days]
                 # статус
