@@ -34,8 +34,8 @@ Paper / T-Bank sandbox + боевой контур `tbank_real` под гейт�
   заданных sandbox-счетах, иначе старт прерывается до live-задач. Креды логина — `EnvironmentFile`
   `/etc/trade4/recovery.env`, токен — `app/st4/.tbank_token`. nginx — `/etc/nginx/conf.d/recovery-sites-*.conf`.
   На сервере ~10 чужих docker-сервисов и nginx других проектов — не трогать.
-- **На проде нет `.git`**: код раскатан архивом коммита (сверка — sha256 файлов, см.
-  `out/recovery_20261105/candidate_manifest.json` на vm-claude). `git pull` на проде неприменим.
+- **На проде нет `.git`**: код выкладывается `infra/deploy_release.sh` (sha256 файлов против
+  коммита из origin/main; выложенный коммит — `/opt/trade4/RELEASE`). `git pull` на проде неприменим.
 - Активные стратегии с 05.11.2026: **st8 + st9 в T-Bank sandbox** (st4–st7 остановлены, боевой
   контур не взведён). Журналы до переезда не восстановлены (`history_recovered=false`), история
   операций — у брокера.
@@ -58,8 +58,9 @@ pytest -q                                     # все тесты (test_st4/st5/
 pytest tests/test_st5.py::test_<name> -q      # один тест
 ```
 
-Прод-деплой — **только через скилл `/trade-deploy`** (не по README!; шаг выкладки под новый
-сервер без git ещё не отлажен — согласовывать с оператором); статус прода — `/trade-status`.
+Прод-деплой — **только через скилл `/trade-deploy`** (не по README!): выкладка кода —
+`infra/deploy_release.sh check|apply` (без git на проде, без рестарта), рестарт — отдельно после
+флэт-гейта; статус прода — `/trade-status`.
 Инфраструктура (systemd + nginx, DNS) описана в `README.md`; конфиги — в `infra/`.
 
 ## Архитектура

@@ -52,6 +52,10 @@ PY
 
 echo "== коммит $SHORT ($(git log -1 --format='%ad %s' --date=short "$COMMIT")) → $HOST:$DST"
 compare
+if tr '\0' '\n' < "$TMP/changed0" | grep -qx 'infra/sandbox_server.py'; then
+  echo "ВНИМАНИЕ: изменён infra/sandbox_server.py — юнит запускает КОПИЮ $DST/sandbox_server.py;"
+  echo "          её скрипт не трогает — обновить отдельно (cp) при остановленном сервисе."
+fi
 echo "== на проде есть код вне коммита (не трогается, к сведению):"
 "${SSH[@]}" "cd $DST && find app tests infra -type f ! -path '*/__pycache__/*' ! -name '.tbank*' ! -name '*.pyc' 2>/dev/null | sort" \
   </dev/null > "$TMP/remote.list" || true
@@ -78,7 +82,7 @@ scp -q -o BatchMode=yes "$TMP/$PKG" "$HOST:/root/$PKG"
 echo "== архив на проде, sha256 сверен"
 
 # бэкап старых версий заменяемых файлов + рантайм-состояния (копия, оригиналы не трогаются)
-"${SSH[@]}" "set -e; mkdir -p $BK; cd $DST; tar --null -T - --ignore-failed-read -czf $BK/code-before.tgz 2>/dev/null || true; \
+"${SSH[@]}" "set -e; mkdir -m 700 -p $BK; cd $DST; tar --null -T - --ignore-failed-read -czf $BK/code-before.tgz 2>/dev/null || true; \
   cp -a session_state_*.json recovery_metadata.json $BK/ 2>/dev/null || true; cp -a RELEASE $BK/ 2>/dev/null || true; ls $BK" \
   < "$TMP/changed0"
 echo "== бэкап: $HOST:$BK"
